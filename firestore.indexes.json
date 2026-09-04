@@ -117,13 +117,6 @@
       "collectionGroup": "community",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "created_at", "order": "DESCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "community",
-      "queryScope": "COLLECTION",
-      "fields": [
         { "fieldPath": "user_id",    "order": "ASCENDING" },
         { "fieldPath": "created_at", "order": "DESCENDING" }
       ]
