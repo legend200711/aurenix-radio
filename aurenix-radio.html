@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#050507">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>AURENIX RADIO</title>
+<link rel="manifest" href="aurenix-manifest.json">
+<link rel="icon" href="aurenix-favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="aurenix-core.css">
+<style>
+/* ── Radio-specific extended styles ── */
+.radio-page-body {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 28px 24px 80px;
+}
+
+.radio-main-grid {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: 24px;
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .radio-main-grid { grid-template-columns: 1fr; }
+}
+
+/* Moderation panel */
+.mod-panel {
+  background: rgba(139,0,0,0.07);
+  border: 1px solid rgba(139,0,0,0.2);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  margin-top: 24px;
+}
+
+.mod-panel-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: #ff6680;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mod-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(139,0,0,0.12);
+}
+
+.mod-item:last-child { border-bottom: none; }
+
+.mod-item-info { flex: 1; min-width: 0; }
+.mod-item-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.mod-item-meta  { font-size: 11px; color: var(--text-muted); }
+
+.mod-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mod-approve {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(0,201,192,0.4);
+  background: rgba(0,201,192,0.1);
+  color: var(--energy);
+  cursor: pointer;
+}
+
+.mod-reject {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(139,0,0,0.4);
+  background: rgba(139,0,0,0.1);
+  color: #ff6680;
+  cursor: pointer;
+}
+
+.mod-approve:hover { background: rgba(0,201,192,0.2); }
+.mod-reject:hover  { background: rgba(139,0,0,0.2); }
+
+/* Integration callout */
+.integration-callout {
+  border: 1px dashed var(--border-metal);
+  border-radius: var(--radius-lg);
+  padding: 20px 22px;
+  margin-top: 20px;
+  background: rgba(26,111,255,0.04);
+}
+
+.integration-callout-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.integration-callout ul {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.integration-callout li {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding-left: 14px;
+  position: relative;
+  line-height: 1.5;
+}
+
+.integration-callout li::before {
+  content: '→';
+  position: absolute;
+  left: 0;
+  color: var(--text-muted);
+}
+
+.integration-callout code {
+  font-size: 11px;
+  color: var(--energy);
+  background: rgba(0,201,192,0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+</style>
+</head>
+<body>
+
+<!-- Background -->
+<div id="aurenix-bg" aria-hidden="true">
+  <canvas id="aurenix-particle-canvas"></canvas>
+  <div class="bg-fog"></div>
+</div>
+
+<div class="scan-line" aria-hidden="true"></div>
+
+<!-- ── Nav ── -->
+<nav id="aurenix-nav" role="navigation" aria-label="AURENIX Navigation">
+  <a href="aurenix.html" class="nav-logo" aria-label="AURENIX RADIO — Home">
+    <div class="nav-logo-mark">
+      <svg viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <polygon points="19,2 36,34 2,34" fill="none" stroke="#b8860b" stroke-width="1.2" opacity="0.7"/>
+        <circle cx="19" cy="22" r="7" fill="none" stroke="#00c9c0" stroke-width="1.2"/>
+        <circle cx="19" cy="22" r="3" fill="#00c9c0" opacity="0.7"/>
+      </svg>
+    </div>
+    <div class="nav-logo-text">AURE<span>NIX</span></div>
+  </a>
+  <div class="nav-links">
+    <span class="nav-link active">◉ Radio</span>
+  </div>
+  <div class="nav-right">
+    <a href="aurenix.html" class="btn btn-ghost btn-sm">← AURENIX</a>
+  </div>
+</nav>
+
+<!-- ════════════════════
+     MAIN
+════════════════════ -->
+<main style="position:relative; z-index:1; min-height:100vh; padding-top:var(--nav-h);" aria-label="AURENIX Radio Station">
+
+  <!-- Page header -->
+  <div class="section-header">
+    <h1 class="section-title">AURENIX <span>RADIO</span></h1>
+    <div id="radio-status-badge" class="status-badge status-offline" style="margin-left:auto;">
+      ⬡ OFFLINE
+    </div>
+  </div>
+
+  <!-- Separation notice -->
+  <div style="max-width:1100px; margin:0 auto; padding:0 24px 6px;">
+    <div style="background:rgba(184,134,11,0.06); border:1px solid rgba(184,134,11,0.15); border-radius:var(--radius); padding:9px 14px; font-size:11px; color:var(--text-dim); letter-spacing:0.5px;">
+      ⬡ AURENIX RADIO is a completely separate system from the 24-Hour Cloud Stream. They share no queues, players, or databases.
+    </div>
+  </div>
+
+  <div class="radio-page-body">
+    <div class="radio-main-grid">
+
+      <!-- ── LEFT COLUMN ── -->
+      <div>
+
+        <!-- Now Playing -->
+        <div class="mech-panel mech-corner radio-player-panel" style="margin-bottom:20px;">
+          <div class="mech-panel-title">
+            <span class="mech-panel-title-dot"></span>
+            Now Playing
+          </div>
+          <div style="padding:20px;">
+            <div class="radio-player-art" id="radio-art-standalone" aria-label="Track artwork">🎵</div>
+            <div class="radio-np-label" id="radio-np-label-s">AURENIX RADIO</div>
+            <div class="radio-np-title" id="radio-np-title-s">No track playing</div>
+            <div class="radio-np-artist" id="radio-np-artist-s">Awaiting signal…</div>
+
+            <div class="radio-progress" aria-label="Track progress">
+              <div class="radio-progress-fill" id="radio-progress-fill-s" style="width:0%"></div>
+            </div>
+
+            <div class="radio-controls">
+              <button class="radio-ctrl-btn" id="radio-vol-btn-s" aria-label="Toggle mute">🔊</button>
+              <button class="radio-ctrl-btn play-btn" id="radio-play-btn-s" aria-label="Play / Pause">▶</button>
+              <button class="radio-ctrl-btn" id="radio-skip-btn-s" aria-label="Skip track">⏭</button>
+            </div>
+
+            <div style="display:flex; justify-content:center; gap:8px; align-items:center; margin-top:2px;">
+              <span style="font-size:12px; color:var(--text-muted);">🔉</span>
+              <input type="range" min="0" max="100" value="80" id="radio-vol-s"
+                aria-label="Volume" style="width:160px; accent-color:var(--gold-bright);">
+              <span style="font-size:12px; color:var(--text-muted);">🔊</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Up Next -->
+        <div class="mech-panel mech-corner" style="margin-bottom:20px;">
+          <div class="mech-panel-title">
+            <span class="mech-panel-title-dot"></span>
+            Up Next
+          </div>
+          <div id="radio-up-next" style="padding:14px; font-size:13px; color:var(--text-muted);">
+            Nothing queued
+          </div>
+        </div>
+
+        <!-- Full Queue -->
+        <div class="mech-panel mech-corner" id="radio-queue-panel-s">
+          <div class="mech-panel-title">
+            <span class="mech-panel-title-dot"></span>
+            Approved Queue
+            <span id="radio-approved-count" style="margin-left:auto; font-size:11px; color:var(--text-muted);">0</span>
+          </div>
+          <div id="radio-queue-list-s" aria-label="Approved radio queue" aria-live="polite">
+            <div style="padding:20px; text-align:center; color:var(--text-muted); font-size:13px;">
+              No approved tracks yet
+            </div>
+          </div>
+        </div>
+
+        <!-- Moderation Panel -->
+        <div class="mod-panel" id="radio-mod-panel">
+          <div class="mod-panel-title">
+            🔒 Moderation Queue
+            <span id="radio-pending-count" style="margin-left:auto; background:rgba(139,0,0,0.2); border:1px solid rgba(139,0,0,0.3); padding:1px 8px; border-radius:10px; font-size:10px;">0 pending</span>
+          </div>
+          <div id="radio-mod-list" aria-label="Pending moderation" aria-live="polite">
+            <div style="font-size:12px; color:var(--text-muted);">No pending submissions</div>
+          </div>
+
+          <!-- Moderation integration callout -->
+          <div class="integration-callout">
+            <div class="integration-callout-title">⚙ Moderation Panel</div>
+            <ul>
+              <li>Submissions are persisted to the <code>radio_queue</code> Supabase table</li>
+              <li>Moderators and founders can approve or reject submitted tracks</li>
+              <li>Approved tracks move to the public queue automatically</li>
+              <li>YouTube submissions use official embed — never downloaded or rebroadcast</li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ── RIGHT COLUMN — Submit ── -->
+      <div>
+        <div class="mech-panel mech-corner" style="padding:22px;">
+          <div style="font-size:14px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:var(--text); margin-bottom:18px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+            Submit a Track
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="rsub-type-s">Submission Type</label>
+            <select class="field-select" id="rsub-type-s" aria-label="Submission type">
+              <option value="upload">Upload Audio File</option>
+              <option value="youtube">YouTube Link (official embed)</option>
+              <option value="url">Direct Media URL</option>
+            </select>
+          </div>
+
+          <div id="rsub-file-group-s">
+            <div class="field-group">
+              <label class="field-label">Audio File</label>
+              <div id="rsub-file-drop-s"
+                style="border:1px dashed var(--border-metal); border-radius:var(--radius); padding:22px; text-align:center; cursor:pointer;"
+                role="button" aria-label="Click to select or drop audio file">
+                <div style="font-size:26px; margin-bottom:6px;">🎵</div>
+                <div style="font-size:12px; color:var(--text-dim);" id="rsub-filename-s">Click to select or drop audio file</div>
+                <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">MP3, WAV, AAC, FLAC (max 50 MB)</div>
+              </div>
+              <input type="file" id="rsub-file-s" accept="audio/*" style="display:none;" aria-label="Select audio file">
+            </div>
+          </div>
+
+          <div class="hidden" id="rsub-url-group-s">
+            <div class="field-group">
+              <label class="field-label" for="rsub-url-s">URL</label>
+              <input class="field-input" type="url" id="rsub-url-s" placeholder="Paste URL…" aria-label="Media or YouTube URL">
+              <div style="font-size:11px; color:var(--text-muted); margin-top:4px;" id="rsub-url-hint-s"></div>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="rsub-title-s">Track Title <span style="color:var(--blood)">*</span></label>
+            <input class="field-input" type="text" id="rsub-title-s" placeholder="Track name" maxlength="120" required aria-label="Track title">
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="rsub-artist-s">Artist / Creator</label>
+            <input class="field-input" type="text" id="rsub-artist-s" placeholder="Artist name" maxlength="100" aria-label="Artist name">
+          </div>
+
+          <div class="field-group">
+            <label class="field-label" for="rsub-notes-s">Notes <span style="font-size:10px; color:var(--text-muted)">optional</span></label>
+            <textarea class="field-textarea" id="rsub-notes-s" placeholder="Message for moderators…" maxlength="400" aria-label="Notes for moderators"></textarea>
+          </div>
+
+          <div style="background:rgba(184,134,11,0.06); border:1px solid rgba(184,134,11,0.15); border-radius:var(--radius); padding:10px 12px; margin-bottom:16px; font-size:11px; color:var(--text-dim); line-height:1.6;">
+            ⚠️ By submitting you confirm ownership or rights to share this content.
+            All submissions are moderated before entering the public queue.
+            YouTube links use official embed playback only.
+          </div>
+
+          <div id="rsub-status-s" style="display:none; padding:10px 12px; border-radius:var(--radius); margin-bottom:12px; font-size:13px;"></div>
+
+          <button class="btn btn-gold" id="rsub-submit-btn-s" style="width:100%;" aria-label="Submit track to AURENIX Radio">
+            ◉ Submit to AURENIX Radio
+          </button>
+        </div>
+
+        <!-- Separate system notice -->
+        <div style="margin-top:14px; padding:12px 14px; background:rgba(0,201,192,0.04); border:1px solid var(--border-energy); border-radius:var(--radius); font-size:12px; color:var(--text-dim); line-height:1.7;">
+          <strong style="color:var(--energy); display:block; margin-bottom:4px;">⬡ System Architecture</strong>
+          AURENIX Radio is fully independent from 24-Hour Cloud Stream.
+          They have separate queues, separate players, and separate databases.
+          Tracks submitted here will never appear in the Cloud Stream system.
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</main>
+
+<!-- Crow & Toast -->
+<div id="crow-container" aria-hidden="true"></div>
+<div id="crow-transmission" role="dialog" aria-modal="true" aria-label="AURENIX Transmission">
+  <div class="ct-header">⚡ AURENIX TRANSMISSION ⚡</div>
+  <div class="ct-glyph" id="crow-tx-glyph">𓅃</div>
+  <div class="ct-message" id="crow-tx-message"></div>
+  <div class="ct-submessage" id="crow-tx-submessage"></div>
+  <div class="ct-hieroglyphs" aria-hidden="true">𓂀 𓆄 𓃭 𓅃 𓆙</div>
+  <button class="ct-close" id="crow-tx-close">Dismiss Transmission</button>
+</div>
+<div id="aurenix-toast" role="status" aria-live="polite"></div>
+
+<script src="aurenix-bg.js" defer></script>
+<script src="aurenix-crow.js" defer></script>
+<script type="module">
+/* Radio standalone page — wires Supabase into the standalone aurenix-radio.html page.
+   Uses the shared supabase-client.js so the same Supabase project handles everything. */
+import { supabase, onAuthChange, loadUserProfile } from './supabase-client.js';
+
+/* Expose supabase globally so inline event handlers (renderQueues mod buttons) can reach it */
+window._supabase = supabase;
+
+const $ = id => document.getElementById(id);
+
+/* ── State ── */
+const state = {
+  playing: false, muted: false, volume: 80, progress: 0,
+  queue: [],
+};
+let progressTimer = null;
+let _queueChannel = null;
+
+/* ── Auth ── */
+onAuthChange(async (session) => {
+  if (session) {
+    const ud = await loadUserProfile(session.user.id);
+    const badge = $('rsub-submit-btn-s');
+    if (badge && ud) badge.title = 'Submitting as ' + (ud.display_name || ud.username || session.user.email);
+  }
+});
+
+/* ── Queue: fetch + subscribe ── */
+async function refreshQueue() {
+  const { data } = await supabase
+    .from('radio_queue')
+    .select('*')
+    .neq('status', 'rejected')
+    .order('created_at', { ascending: true });
+  if (data) {
+    state.queue = data;
+    renderQueues();
+    const playing = data.find(t => t.status === 'playing');
+    renderNP(playing || null);
+  }
+}
+
+function subscribeQueue() {
+  refreshQueue();
+  if (_queueChannel) { try { supabase.removeChannel(_queueChannel); } catch(_) {} }
+  _queueChannel = supabase
+    .channel('radio-standalone-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'radio_queue' }, () => refreshQueue())
+    .subscribe();
+}
+
+subscribeQueue();
+
+/* ── Submission type toggle ── */
+const typeSelect = $('rsub-type-s');
+if (typeSelect) {
+  typeSelect.addEventListener('change', () => {
+    const v = typeSelect.value;
+    const fg = $('rsub-file-group-s'); const ug = $('rsub-url-group-s');
+    if (fg) fg.classList.toggle('hidden', v !== 'upload');
+    if (ug) ug.classList.toggle('hidden', v === 'upload');
+    const hint = $('rsub-url-hint-s'); const inp = $('rsub-url-s');
+    if (hint && inp) {
+      if (v === 'youtube') { inp.placeholder = 'https://www.youtube.com/watch?v=…'; hint.textContent = 'YouTube official embed.'; }
+      else { inp.placeholder = 'https://example.com/audio.mp3'; hint.textContent = 'Direct audio file URL.'; }
+    }
+  });
+}
+
+/* ── File drop ── */
+const fileDrop = $('rsub-file-drop-s'); const fileInp = $('rsub-file-s'); const filenameLbl = $('rsub-filename-s');
+if (fileDrop && fileInp) {
+  fileDrop.addEventListener('click', () => fileInp.click());
+  fileDrop.addEventListener('dragover', e => { e.preventDefault(); fileDrop.style.borderColor = 'var(--gold)'; });
+  fileDrop.addEventListener('dragleave', () => { fileDrop.style.borderColor = ''; });
+  fileDrop.addEventListener('drop', e => {
+    e.preventDefault(); fileDrop.style.borderColor = '';
+    if (e.dataTransfer?.files?.[0]) { fileInp.files = e.dataTransfer.files; if (filenameLbl) filenameLbl.textContent = e.dataTransfer.files[0].name; }
+  });
+  fileInp.addEventListener('change', () => { if (fileInp.files?.[0] && filenameLbl) filenameLbl.textContent = fileInp.files[0].name; });
+}
+
+/* ── Player controls ── */
+const playBtn = $('radio-play-btn-s');
+if (playBtn) {
+  playBtn.addEventListener('click', () => {
+    state.playing = !state.playing; playBtn.textContent = state.playing ? '⏸' : '▶';
+    if (state.playing) startProgress(); else clearInterval(progressTimer);
+  });
+}
+const volBtn = $('radio-vol-btn-s');
+if (volBtn) volBtn.addEventListener('click', () => { state.muted = !state.muted; volBtn.textContent = state.muted ? '🔇' : '🔊'; });
+const skipBtn = $('radio-skip-btn-s');
+if (skipBtn) skipBtn.addEventListener('click', advanceQueue);
+const volSlider = $('radio-vol-s');
+if (volSlider) volSlider.addEventListener('input', () => { state.volume = +volSlider.value; });
+
+function startProgress() {
+  clearInterval(progressTimer);
+  const fill = $('radio-progress-fill-s');
+  if (!fill) return;
+  progressTimer = setInterval(() => {
+    if (!state.playing) { clearInterval(progressTimer); return; }
+    state.progress = Math.min(state.progress + 0.05, 100);
+    fill.style.width = state.progress + '%';
+    if (state.progress >= 100) { state.progress = 0; advanceQueue(); }
+  }, 1000);
+}
+
+async function advanceQueue() {
+  const current = state.queue.find(t => t.status === 'playing');
+  if (current) await supabase.from('radio_queue').update({ status: 'approved' }).eq('id', current.id).catch(() => {});
+  const next = state.queue.find(t => t.status === 'approved' && t.id !== current?.id);
+  if (next) await supabase.from('radio_queue').update({ status: 'playing' }).eq('id', next.id).catch(() => {});
+  state.progress = 0;
+}
+
+function renderNP(t) {
+  const titleEl = $('radio-np-title-s'); const artistEl = $('radio-np-artist-s'); const labelEl = $('radio-np-label-s');
+  if (titleEl)  titleEl.textContent  = t?.title  || 'No track playing';
+  if (artistEl) artistEl.textContent = t?.artist || 'Awaiting signal…';
+  if (labelEl)  labelEl.textContent  = t ? '▶ NOW PLAYING' : 'AURENIX RADIO';
+}
+
+function renderQueues() {
+  const approved = state.queue.filter(t => t.status === 'approved' || t.status === 'playing');
+  const pending  = state.queue.filter(t => t.status === 'pending');
+
+  /* Approved queue */
+  const qList = $('radio-queue-list-s'); const ac = $('radio-approved-count');
+  if (ac) ac.textContent = approved.length;
+  if (qList) {
+    qList.innerHTML = !approved.length
+      ? '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">No approved tracks yet</div>'
+      : approved.map((t, i) => `
+          <div class="radio-queue-item">
+            <div class="rqi-num">${i+1}</div>
+            <div class="rqi-info">
+              <div class="rqi-title">${esc(t.title)}</div>
+              <div class="rqi-meta">${esc(t.artist||'Unknown')} · ${esc(t.type||'track')}</div>
+            </div>
+            <div class="rqi-status ${t.status==='playing'?'rqi-playing':'rqi-approved'}">${t.status==='playing'?'▶ Now':'Up Next'}</div>
+          </div>`).join('');
+  }
+
+  /* Up Next */
+  const upNext = approved.find(t => t.status === 'approved');
+  const unEl = $('radio-up-next');
+  if (unEl) {
+    unEl.innerHTML = upNext
+      ? `<div style="font-size:13px;color:var(--text);">${esc(upNext.title)}</div><div style="font-size:11px;color:var(--text-muted);">${esc(upNext.artist||'Unknown')}</div>`
+      : '<div style="font-size:13px;color:var(--text-muted);">Nothing queued</div>';
+  }
+
+  /* Moderation list */
+  const modList = $('radio-mod-list'); const pc = $('radio-pending-count');
+  if (pc) pc.textContent = pending.length + ' pending';
+  if (modList) {
+    if (!pending.length) {
+      modList.innerHTML = '<div style="font-size:12px;color:var(--text-muted);">No pending submissions</div>';
+    } else {
+      modList.innerHTML = pending.map(t => `
+        <div class="mod-item">
+          <div class="mod-item-info">
+            <div class="mod-item-title">${esc(t.title)}</div>
+            <div class="mod-item-meta">${esc(t.artist||'Unknown')} · ${esc(t.type)}</div>
+          </div>
+          <div class="mod-actions">
+            <button class="mod-approve" onclick="moderateItem(${t.id},'approve')">✓ Approve</button>
+            <button class="mod-reject"  onclick="moderateItem(${t.id},'reject')">✕ Reject</button>
+          </div>
+        </div>`).join('');
+    }
+  }
+}
+
+window.moderateItem = async function(id, action) {
+  const newStatus = action === 'approve' ? 'approved' : 'rejected';
+  await supabase.from('radio_queue').update({ status: newStatus }).eq('id', id).catch(() => {});
+  if (action === 'approve') {
+    const hasPlaying = state.queue.some(t => t.status === 'playing');
+    if (!hasPlaying) await supabase.from('radio_queue').update({ status: 'playing' }).eq('id', id).catch(() => {});
+  }
+  showToast(action === 'approve' ? '✓ Track approved' : 'Track rejected');
+};
+
+/* ── Submit form ── */
+const submitBtn = $('rsub-submit-btn-s');
+if (submitBtn) {
+  submitBtn.addEventListener('click', async () => {
+    const type  = typeSelect?.value || 'upload';
+    const title = ($('rsub-title-s')?.value || '').trim();
+    const artist = ($('rsub-artist-s')?.value || '').trim();
+    const notes  = ($('rsub-notes-s')?.value || '').trim();
+    const statusDiv = $('rsub-status-s');
+
+    if (!title) { showStatus(statusDiv, 'error', 'Track title is required.'); return; }
+
+    let url = '';
+    if (type === 'upload') {
+      if (!fileInp?.files?.[0]) { showStatus(statusDiv, 'error', 'Please select an audio file.'); return; }
+      if (fileInp.files[0].size > 50*1024*1024) { showStatus(statusDiv, 'error', 'File exceeds 50 MB.'); return; }
+      url = `[file:${fileInp.files[0].name}]`;
+    } else {
+      url = ($('rsub-url-s')?.value || '').trim();
+      if (!url) { showStatus(statusDiv, 'error', 'Please enter a URL.'); return; }
+      if (type === 'youtube' && !/youtube\.com\/watch|youtu\.be\//i.test(url)) {
+        showStatus(statusDiv, 'error', 'That does not look like a valid YouTube URL.'); return;
+      }
+    }
+
+    submitBtn.disabled = true; submitBtn.textContent = 'Submitting…';
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const { error } = await supabase.from('radio_queue').insert({
+        title, artist: artist || 'Unknown Artist', type, url, notes,
+        status: 'pending', submitted_by: session?.user?.id || null,
+      });
+      if (error) throw error;
+      submitBtn.disabled = false; submitBtn.textContent = '◉ Submit to AURENIX Radio';
+      showStatus(statusDiv, 'success', '✓ Submitted! Your track is pending moderation.');
+      ['rsub-title-s','rsub-artist-s','rsub-notes-s','rsub-url-s'].forEach(id => { const el = $(id); if (el) el.value = ''; });
+      if (fileInp) fileInp.value = '';
+      if (filenameLbl) filenameLbl.textContent = 'Click to select or drop audio file';
+    } catch(e) {
+      submitBtn.disabled = false; submitBtn.textContent = '◉ Submit to AURENIX Radio';
+      showStatus(statusDiv, 'error', 'Submission failed: ' + (e.message || 'Unknown error'));
+    }
+  });
+}
+
+function showStatus(el, type, msg) {
+  if (!el) return;
+  el.style.display = 'block';
+  el.style.background = type === 'error' ? 'rgba(139,0,0,0.2)' : 'rgba(0,201,192,0.12)';
+  el.style.border = type === 'error' ? '1px solid rgba(139,0,0,0.4)' : '1px solid rgba(0,201,192,0.3)';
+  el.style.color = type === 'error' ? '#ff6680' : 'var(--energy)';
+  el.textContent = msg;
+  if (type === 'success') setTimeout(() => { el.style.display = 'none'; }, 8000);
+}
+
+function showToast(msg) {
+  const t = $('aurenix-toast');
+  if (!t) return;
+  t.textContent = msg; t.classList.add('visible');
+  setTimeout(() => t.classList.remove('visible'), 3000);
+}
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+
+</body>
+</html>

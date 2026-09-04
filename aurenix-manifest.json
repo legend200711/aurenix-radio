@@ -1,0 +1,61 @@
+{
+  "name": "AURENIX",
+  "short_name": "AURENIX",
+  "description": "AURENIX — The Ancient Mechanical Digital World. Live. Radio. Community.",
+  "start_url": "/aurenix-radio.html",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#050507",
+  "theme_color": "#050507",
+  "categories": ["entertainment", "music", "social"],
+  "icons": [
+    {
+      "src": "aurenix-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "aurenix-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "aurenix-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "aurenix-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "screenshots": [],
+  "related_applications": [],
+  "prefer_related_applications": false,
+  "shortcuts": [
+    {
+      "name": "AURENIX Radio",
+      "short_name": "Radio",
+      "description": "Tune in to AURENIX Radio",
+      "url": "/aurenix-radio.html",
+      "icons": [
+        { "src": "aurenix-icon-192.png", "sizes": "192x192", "type": "image/png" }
+      ]
+    },
+    {
+      "name": "AURENIX Home",
+      "short_name": "Home",
+      "description": "AURENIX Home",
+      "url": "/aurenix.html",
+      "icons": [
+        { "src": "aurenix-icon-192.png", "sizes": "192x192", "type": "image/png" }
+      ]
+    }
+  ]
+}
