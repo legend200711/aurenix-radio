@@ -150,8 +150,207 @@ service cloud.firestore {
     // Written by admin actions, never by users.
     // ────────────────────────────────────────────────────────────
     match /moderation_logs/{logId} {
-      allow read:   if isAdmin();
-      allow write:  if isAdmin();
+      allow read:  if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // LIVE ROOMS — /live_rooms/{roomId}
+    // ────────────────────────────────────────────────────────────
+    match /live_rooms/{roomId} {
+      // Public (including unauthenticated) can read live rooms for the
+      // live-section display. Hosts write their own room.
+      allow read: if true;
+
+      // Only the room host (owner) or admin can create/update
+      allow create: if isSignedIn()
+                    && request.resource.data.host_uid == request.auth.uid;
+
+      allow update: if isAdmin()
+                    || (isSignedIn() && resource.data.host_uid == request.auth.uid);
+
+      allow delete: if isAdmin()
+                    || (isSignedIn() && resource.data.host_uid == request.auth.uid);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // LIVE MESSAGES — /live_messages/{msgId}
+    // ────────────────────────────────────────────────────────────
+    match /live_messages/{msgId} {
+      // Participants in the room can read messages
+      allow read: if isSignedIn();
+
+      // Authenticated users can send messages
+      allow create: if isSignedIn()
+                    && request.resource.data.uid == request.auth.uid;
+
+      // Only the sender or admin can delete
+      allow delete: if isAdmin()
+                    || (isSignedIn() && resource.data.uid == request.auth.uid);
+
+      allow update: if isAdmin();
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // POSTS — /posts/{postId}  (feed posts / stories)
+    // ────────────────────────────────────────────────────────────
+    match /posts/{postId} {
+      // Anyone can read public posts
+      allow read: if true;
+
+      // Authenticated users can create posts
+      allow create: if isSignedIn()
+                    && request.resource.data.uid == request.auth.uid;
+
+      // Only the author or admin can update/delete
+      allow update: if isAdmin()
+                    || (isSignedIn() && resource.data.uid == request.auth.uid);
+
+      allow delete: if isAdmin()
+                    || (isSignedIn() && resource.data.uid == request.auth.uid);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // STORIES — /stories/{storyId}
+    // ────────────────────────────────────────────────────────────
+    match /stories/{storyId} {
+      allow read: if true;
+
+      allow create: if isSignedIn()
+                    && request.resource.data.uid == request.auth.uid;
+
+      allow update: if isAdmin()
+                    || (isSignedIn() && resource.data.uid == request.auth.uid);
+
+      allow delete: if isAdmin()
+                    || (isSignedIn() && resource.data.uid == request.auth.uid);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // NOTIFICATIONS — /notifications/{notifId}
+    // ────────────────────────────────────────────────────────────
+    match /notifications/{notifId} {
+      // Users can read their own notifications
+      allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
+
+      // Authenticated users can create notifications (e.g. for other users)
+      allow create: if isSignedIn();
+
+      // Only the recipient or admin can update (mark as read)
+      allow update: if isAdmin()
+                    || (isSignedIn() && resource.data.uid == request.auth.uid);
+
+      allow delete: if isAdmin()
+                    || (isSignedIn() && resource.data.uid == request.auth.uid);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // COMMUNITY POSTS — /community/{postId}
+    // ────────────────────────────────────────────────────────────
+    match /community/{postId} {
+      allow read: if true;
+
+      allow create: if isSignedIn()
+                    && request.resource.data.user_id == request.auth.uid;
+
+      allow update: if isAdmin()
+                    || (isSignedIn() && resource.data.user_id == request.auth.uid);
+
+      allow delete: if isAdmin()
+                    || (isSignedIn() && resource.data.user_id == request.auth.uid);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // POST COMMENTS — /post_comments/{commentId}
+    // ────────────────────────────────────────────────────────────
+    match /post_comments/{commentId} {
+      allow read: if true;
+
+      allow create: if isSignedIn()
+                    && request.resource.data.user_id == request.auth.uid;
+
+      allow update: if isAdmin()
+                    || (isSignedIn() && resource.data.user_id == request.auth.uid);
+
+      allow delete: if isAdmin()
+                    || (isSignedIn() && resource.data.user_id == request.auth.uid);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // MEDIA FILES — /media_files/{fileId}
+    // Metadata only — actual file lives in Supabase Storage.
+    // ────────────────────────────────────────────────────────────
+    match /media_files/{fileId} {
+      // Public can read approved/published media
+      allow read: if resource.data.status == 'approved'
+                  || resource.data.status == 'published'
+                  || isAdmin()
+                  || (isSignedIn() && resource.data.uploaded_by == request.auth.uid);
+
+      allow create: if isSignedIn()
+                    && request.resource.data.uploaded_by == request.auth.uid;
+
+      allow update: if isAdmin()
+                    || (isSignedIn() && resource.data.uploaded_by == request.auth.uid);
+
+      allow delete: if isAdmin()
+                    || (isSignedIn() && resource.data.uploaded_by == request.auth.uid);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // MEDIA COMMENTS — /media_comments/{commentId}
+    // ────────────────────────────────────────────────────────────
+    match /media_comments/{commentId} {
+      allow read: if true;
+
+      allow create: if isSignedIn()
+                    && request.resource.data.user_id == request.auth.uid;
+
+      allow update: if isAdmin()
+                    || (isSignedIn() && resource.data.user_id == request.auth.uid);
+
+      allow delete: if isAdmin()
+                    || (isSignedIn() && resource.data.user_id == request.auth.uid);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // BOX REQUESTS — /box_requests/{requestId}
+    // Guest-box join requests in live rooms.
+    // ────────────────────────────────────────────────────────────
+    match /box_requests/{requestId} {
+      // Host and requester can read their own request
+      allow read: if isSignedIn()
+                  && (resource.data.guest_uid == request.auth.uid
+                      || resource.data.host_uid == request.auth.uid)
+                  || isAdmin();
+
+      // Authenticated users can create a box request for themselves
+      allow create: if isSignedIn()
+                    && request.resource.data.guest_uid == request.auth.uid;
+
+      // Host or requester or admin can update (accept/reject/cancel)
+      allow update: if isAdmin()
+                    || (isSignedIn()
+                        && (resource.data.guest_uid == request.auth.uid
+                            || resource.data.host_uid == request.auth.uid));
+
+      // Host, requester or admin can delete
+      allow delete: if isAdmin()
+                    || (isSignedIn()
+                        && (resource.data.guest_uid == request.auth.uid
+                            || resource.data.host_uid == request.auth.uid));
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // SITE SETTINGS — /site_settings/{docId}
+    // Feature flags and global configuration.
+    // ────────────────────────────────────────────────────────────
+    match /site_settings/{docId} {
+      // All authenticated users can read feature flags
+      allow read: if isSignedIn();
+
+      // Only admin can write
+      allow write: if isAdmin();
     }
 
     // ────────────────────────────────────────────────────────────

@@ -121,3 +121,110 @@ export function getStorageUrl(storagePath) {
     .getPublicUrl(storagePath);
   return publicUrl;
 }
+
+/* ══════════════════════════════════════════════════════════════
+   COMPATIBILITY SHIMS
+   These functions were previously implemented here using Supabase
+   Auth / Database. They now delegate to firebase-client.js so
+   that existing callers (live.js, community, media, etc.) continue
+   to work without code changes while the backend is Firebase.
+
+   STORAGE helpers (uploadAudioFile, getStorageUrl) remain above
+   and continue to use Supabase Storage directly.
+══════════════════════════════════════════════════════════════ */
+import {
+  auth        as _fbAuth,
+  db          as _fbDb,
+  onAuthChange       as _fbOnAuthChange,
+  loadUserProfile    as _fbLoadUserProfile,
+  upsertUserProfile  as _fbUpsertUserProfile,
+  doc         as _fbDoc,
+  getDoc      as _fbGetDoc,
+  setDoc      as _fbSetDoc,
+  collection  as _fbCollection,
+  query       as _fbQuery,
+  where       as _fbWhere,
+  getDocs     as _fbGetDocs,
+  serverTimestamp as _fbServerTs,
+} from './firebase-client.js';
+
+/**
+ * Subscribe to Firebase auth state changes.
+ * Drop-in replacement for the old Supabase onAuthChange().
+ * Callers receive a Firebase User (with .uid, .email, .emailVerified)
+ * instead of a Supabase User.
+ * @param {(user: import('firebase/auth').User | null) => void} cb
+ * @returns {() => void} unsubscribe
+ */
+export function onAuthChange(cb) {
+  return _fbOnAuthChange(cb);
+}
+
+/**
+ * Returns the currently signed-in Firebase user, or null.
+ * Drop-in replacement for the old Supabase getUser().
+ */
+export async function getUser() {
+  return _fbAuth.currentUser;
+}
+
+/**
+ * Returns the Firebase ID token for the current session.
+ * Drop-in replacement for the old Supabase getAccessToken().
+ * @returns {Promise<string | null>}
+ */
+export async function getAccessToken() {
+  try {
+    const user = _fbAuth.currentUser;
+    if (!user) return null;
+    return await user.getIdToken();
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Load a user's profile document from Firestore `users/{uid}`.
+ * Drop-in replacement for the old Supabase loadUserProfile().
+ *
+ * NOTE: The old Supabase profile used { id, uid, display_name, … }.
+ * The Firebase profile uses the same shape. Callers that access
+ * profile.id or profile.uid will still get the correct value
+ * because upsertUserProfile() writes both `uid` and `id` fields.
+ *
+ * @param {string} uid — Firebase Auth UID
+ */
+export async function loadUserProfile(uid) {
+  return _fbLoadUserProfile(uid);
+}
+
+/**
+ * Create or merge-update a user profile in Firestore `users/{uid}`.
+ * Drop-in replacement for the old Supabase upsertUserProfile().
+ *
+ * Accepts the same shape as before:
+ *   { uid, id, display_name, username, email, avatar, bio, role, … }
+ *
+ * Normalises `id` and `uid` so existing callers that pass either field work.
+ */
+export async function upsertUserProfile(profile) {
+  const authId = profile.uid || profile.id;
+  if (!authId) { console.warn('[supabase-client compat] upsertUserProfile: no uid/id'); return; }
+  await _fbUpsertUserProfile(authId, { ...profile, uid: authId, id: authId });
+}
+
+/**
+ * Read a feature flag from Firestore `site_settings/config`.
+ * Drop-in replacement for the old Supabase getFeatureFlag().
+ * Returns `defaultValue` if the document or field is missing.
+ */
+export async function getFeatureFlag(key, defaultValue = true) {
+  try {
+    const snap = await _fbGetDoc(_fbDoc(_fbDb, 'site_settings', 'config'));
+    if (!snap.exists()) return defaultValue;
+    const val = snap.data()[key];
+    return val !== undefined ? val : defaultValue;
+  } catch (_) {
+    return defaultValue;
+  }
+}

@@ -3,14 +3,15 @@
  * aurenix-live-section.js
  *
  * Populates the Live page inside aurenix.html with real-time data
- * from Supabase. Read-only subscriber — does NOT modify live_rooms.
+ * from Firestore. Read-only subscriber — does NOT modify live_rooms.
  */
 
-import { supabase } from './supabase-client.js';
+import { db, collection, query, where, orderBy,
+         getDocs, onSnapshot, Timestamp } from './firebase-client.js';
 
 /* ── Only activate when the live page is visible ── */
-let bootstrapped = false;
-let channel      = null;
+let bootstrapped  = false;
+let _unsubRooms   = null;
 
 window.addEventListener('aurenix:navigate', e => {
   if (e.detail.page === 'live' && !bootstrapped) {
@@ -26,44 +27,28 @@ function subscribeRooms() {
   const loadingEl = document.getElementById('live-loading-state');
   if (loadingEl) loadingEl.style.display = 'none';
 
-  // Initial fetch
-  fetchRooms();
+  // Unsubscribe from any previous listener
+  if (_unsubRooms) { try { _unsubRooms(); } catch(_) {} _unsubRooms = null; }
 
-  // Real-time subscription via Supabase Realtime
-  if (channel) { try { supabase.removeChannel(channel); } catch(_) {} }
+  // Cutoff: rooms created within the last 4 hours only
+  const cutoff = Timestamp.fromDate(new Date(Date.now() - 4 * 60 * 60 * 1000));
 
-  channel = supabase
-    .channel('aurenix-live-rooms')
-    .on(
-      'postgres_changes',
-      {
-        event:  '*',
-        schema: 'public',
-        table:  'live_rooms',
-        filter: 'status=eq.live',
-      },
-      () => fetchRooms()
-    )
-    .subscribe();
-}
+  const q = query(
+    collection(db, 'live_rooms'),
+    where('status',    '==', 'live'),
+    where('is_live',   '==', true),
+    where('created_at', '>', cutoff),
+    orderBy('created_at', 'desc'),
+  );
 
-async function fetchRooms() {
-  try {
-    const cutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
-    const { data, error } = await supabase
-      .from('live_rooms')
-      .select('*')
-      .eq('status', 'live')
-      .eq('is_live', true)
-      .gt('created_at', cutoff)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    renderRooms(data || []);
-  } catch (err) {
-    console.warn('[AURENIX Live] Rooms fetch error:', err.message);
-    showEmpty();
-  }
+  // Real-time subscription via Firestore onSnapshot
+  _unsubRooms = onSnapshot(q,
+    snap => renderRooms(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
+    err  => {
+      console.warn('[AURENIX Live] Rooms snapshot error:', err.message);
+      showEmpty();
+    },
+  );
 }
 
 /* ════════════════════════════════════

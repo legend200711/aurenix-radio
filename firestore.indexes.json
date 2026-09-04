@@ -1,5 +1,6 @@
 {
   "indexes": [
+    // ─── radio_submissions ─────────────────────────────────────
     {
       "collectionGroup": "radio_submissions",
       "queryScope": "COLLECTION",
@@ -25,10 +26,170 @@
       ]
     },
     {
+      "collectionGroup": "radio_submissions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status",     "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+
+    // ─── radio_reports ─────────────────────────────────────────
+    {
       "collectionGroup": "radio_reports",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "status",     "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+
+    // ─── live_rooms ────────────────────────────────────────────
+    {
+      "collectionGroup": "live_rooms",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status",     "order": "ASCENDING" },
+        { "fieldPath": "is_live",    "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+
+    // ─── live_messages ─────────────────────────────────────────
+    {
+      "collectionGroup": "live_messages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "room_id",    "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+
+    // ─── posts ─────────────────────────────────────────────────
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "uid",        "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "posts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "type",       "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+
+    // ─── stories ───────────────────────────────────────────────
+    {
+      "collectionGroup": "stories",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "uid",        "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+
+    // ─── notifications ─────────────────────────────────────────
+    {
+      "collectionGroup": "notifications",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "uid",        "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "notifications",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "uid",     "order": "ASCENDING" },
+        { "fieldPath": "is_read", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+
+    // ─── community ─────────────────────────────────────────────
+    {
+      "collectionGroup": "community",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "community",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "user_id",    "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+
+    // ─── post_comments ─────────────────────────────────────────
+    {
+      "collectionGroup": "post_comments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "post_id",    "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+
+    // ─── media_files ───────────────────────────────────────────
+    {
+      "collectionGroup": "media_files",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status",      "order": "ASCENDING" },
+        { "fieldPath": "uploaded_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "media_files",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "uploaded_by", "order": "ASCENDING" },
+        { "fieldPath": "uploaded_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "media_files",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "media_type",  "order": "ASCENDING" },
+        { "fieldPath": "uploaded_at", "order": "DESCENDING" }
+      ]
+    },
+
+    // ─── media_comments ────────────────────────────────────────
+    {
+      "collectionGroup": "media_comments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "media_id",   "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+
+    // ─── box_requests ──────────────────────────────────────────
+    {
+      "collectionGroup": "box_requests",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "host_uid",   "order": "ASCENDING" },
+        { "fieldPath": "status",     "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "box_requests",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "guest_uid",  "order": "ASCENDING" },
         { "fieldPath": "created_at", "order": "DESCENDING" }
       ]
     }

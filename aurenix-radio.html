@@ -276,7 +276,7 @@
           <div class="integration-callout">
             <div class="integration-callout-title">⚙ Moderation Panel</div>
             <ul>
-              <li>Submissions are persisted to the <code>studio_queue</code> Supabase table</li>
+              <li>Submissions are persisted to the <code>radio_submissions</code> Firestore collection</li>
               <li>Moderators and founders can approve or reject submitted tracks</li>
               <li>Approved tracks move to the public queue automatically</li>
               <li>YouTube submissions use official embed — never downloaded or rebroadcast</li>
@@ -391,12 +391,13 @@
 <script src="aurenix-bg.js" defer></script>
 <script src="aurenix-crow.js" defer></script>
 <script type="module">
-/* Radio standalone page — wires Supabase into the standalone aurenix-radio.html page.
-   Uses the shared supabase-client.js so the same Supabase project handles everything. */
-import { supabase, onAuthChange, loadUserProfile } from './supabase-client.js';
-
-/* Expose supabase globally so inline event handlers (renderQueues mod buttons) can reach it */
-window._supabase = supabase;
+/* Radio standalone page — Firebase Auth + Firestore, Supabase Storage for audio. */
+import { supabase }                   from './supabase-client.js';
+import { auth, db,
+         onAuthChange, loadUserProfile,
+         collection, query, where, orderBy, onSnapshot,
+         doc, updateDoc, serverTimestamp, addDoc }
+                                      from './firebase-client.js';
 
 const $ = id => document.getElementById(id);
 
@@ -405,40 +406,34 @@ const state = {
   playing: false, muted: false, volume: 80, progress: 0,
   queue: [],
 };
-let progressTimer = null;
-let _queueChannel = null;
+let progressTimer  = null;
+let _unsubQueue    = null;
 
 /* ── Auth ── */
-onAuthChange(async (session) => {
-  if (session) {
-    const ud = await loadUserProfile(session.user.id);
+onAuthChange(async (user) => {
+  if (user) {
+    const ud = await loadUserProfile(user.uid);
     const badge = $('rsub-submit-btn-s');
-    if (badge && ud) badge.title = 'Submitting as ' + (ud.display_name || ud.username || session.user.email);
+    if (badge && ud) badge.title = 'Submitting as ' + (ud.display_name || ud.username || user.email);
   }
 });
 
-/* ── Queue: fetch + subscribe ── */
-async function refreshQueue() {
-  const { data } = await supabase
-    .from('studio_queue')
-    .select('uid,title,artist,type,status,url,storage_bucket,storage_path,submitted_by,created_at')
-    .neq('status', 'rejected')
-    .order('created_at', { ascending: true });
-  if (data) {
-    state.queue = data;
-    renderQueues();
-    const playing = data.find(t => t.status === 'playing');
-    renderNP(playing || null);
-  }
-}
-
+/* ── Queue: real-time Firestore subscription ── */
 function subscribeQueue() {
-  refreshQueue();
-  if (_queueChannel) { try { supabase.removeChannel(_queueChannel); } catch(_) {} }
-  _queueChannel = supabase
-    .channel('radio-standalone-changes')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'studio_queue' }, () => refreshQueue())
-    .subscribe();
+  if (_unsubQueue) { try { _unsubQueue(); } catch(_) {} _unsubQueue = null; }
+
+  const q = query(
+    collection(db, 'radio_submissions'),
+    where('status', 'in', ['pending','approved','playing']),
+    orderBy('created_at', 'asc'),
+  );
+
+  _unsubQueue = onSnapshot(q, snap => {
+    state.queue = snap.docs.map(d => ({ id: d.id, uid: d.id, ...d.data() }));
+    renderQueues();
+    const playing = state.queue.find(t => t.status === 'playing');
+    renderNP(playing || null);
+  }, err => console.warn('[Radio] Queue snapshot error:', err.message));
 }
 
 subscribeQueue();
@@ -501,9 +496,9 @@ function startProgress() {
 
 async function advanceQueue() {
   const current = state.queue.find(t => t.status === 'playing');
-  if (current) await supabase.from('studio_queue').update({ status: 'approved' }).eq('uid', current.uid).catch(() => {});
-  const next = state.queue.find(t => t.status === 'approved' && t.uid !== current?.uid);
-  if (next) await supabase.from('studio_queue').update({ status: 'playing' }).eq('uid', next.uid).catch(() => {});
+  if (current) await updateDoc(doc(db, 'radio_submissions', current.id), { status: 'approved', updated_at: serverTimestamp() }).catch(() => {});
+  const next = state.queue.find(t => t.status === 'approved' && t.id !== current?.id);
+  if (next) await updateDoc(doc(db, 'radio_submissions', next.id), { status: 'playing', updated_at: serverTimestamp() }).catch(() => {});
   state.progress = 0;
 }
 
@@ -558,20 +553,20 @@ function renderQueues() {
             <div class="mod-item-meta">${esc(t.artist||'Unknown')} · ${esc(t.type)}</div>
           </div>
           <div class="mod-actions">
-            <button class="mod-approve" onclick="moderateItem('${t.uid}','approve')">✓ Approve</button>
-            <button class="mod-reject"  onclick="moderateItem('${t.uid}','reject')">✕ Reject</button>
+            <button class="mod-approve" onclick="moderateItem('${t.id}','approve')">✓ Approve</button>
+            <button class="mod-reject"  onclick="moderateItem('${t.id}','reject')">✕ Reject</button>
           </div>
         </div>`).join('');
     }
   }
 }
 
-window.moderateItem = async function(uid, action) {
+window.moderateItem = async function(id, action) {
   const newStatus = action === 'approve' ? 'approved' : 'rejected';
-  await supabase.from('studio_queue').update({ status: newStatus }).eq('uid', uid).catch(() => {});
+  await updateDoc(doc(db, 'radio_submissions', id), { status: newStatus, updated_at: serverTimestamp() }).catch(() => {});
   if (action === 'approve') {
     const hasPlaying = state.queue.some(t => t.status === 'playing');
-    if (!hasPlaying) await supabase.from('studio_queue').update({ status: 'playing' }).eq('uid', uid).catch(() => {});
+    if (!hasPlaying) await updateDoc(doc(db, 'radio_submissions', id), { status: 'playing', updated_at: serverTimestamp() }).catch(() => {});
   }
   showToast(action === 'approve' ? '✓ Track approved' : 'Track rejected');
 };
@@ -593,8 +588,8 @@ if (submitBtn) {
     if (!rights) { showStatus(statusDiv, 'error', 'Please confirm you have rights to submit this content.'); return; }
 
     /* Require login for file uploads */
-    const { data: { session } } = await supabase.auth.getSession();
-    if (type === 'upload' && !session) {
+    const currentUser = auth.currentUser;
+    if (type === 'upload' && !currentUser) {
       showStatus(statusDiv, 'error', 'Please sign in to upload audio files.'); return;
     }
 
@@ -615,11 +610,11 @@ if (submitBtn) {
     submitBtn.disabled = true; submitBtn.textContent = 'Submitting…';
 
     try {
-      /* ── Step 1: Upload audio file to Storage (upload submissions only) ── */
+      /* ── Step 1: Upload audio file to Supabase Storage (unchanged bucket) ── */
       if (type === 'upload') {
         const file = fileInp.files[0];
         const ext  = file.name.split('.').pop().toLowerCase() || 'mp3';
-        storagePath = `${session.user.id}/${Date.now()}.${ext}`;
+        storagePath = `${currentUser.uid}/${Date.now()}.${ext}`;
 
         const progWrap = $('rsub-upload-progress-s');
         const progFill = $('rsub-progress-fill-s');
@@ -659,32 +654,33 @@ if (submitBtn) {
         if (progWrap) progWrap.style.display = 'none';
       }
 
-      /* ── Step 2: Insert submission record (only after successful upload) ── */
+      /* ── Step 2: Create submission in Firestore (only after successful upload) ── */
       const row = {
         title,
-        artist: artist || 'Unknown Artist',
+        artist:       artist || 'Unknown Artist',
         type,
         content_type: type === 'upload' ? 'aurenix_audio' : 'external_media',
         url,
         notes,
-        status: 'pending',
         rights_confirmed: rights,
-        submitted_by: session?.user?.id || null,
+        submitted_by:     currentUser?.uid || null,
       };
-      /* Persist storage path and bucket for reference */
+      /* Persist Supabase Storage path/bucket for the audio file reference */
       if (storagePath) {
         row.storage_bucket = RADIO_BUCKET;
         row.storage_path   = storagePath;
       }
 
-      const { error: insErr } = await supabase.from('studio_queue').insert(row);
-      if (insErr) {
-        /* Upload succeeded but DB insert failed — log so orphaned file can be cleaned up */
-        console.error('[Radio] DB insert error after upload (storagePath:', storagePath, '):', insErr);
-        if (storagePath) {
-          /* Best-effort cleanup of the orphaned uploaded file */
-          supabase.storage.from(RADIO_BUCKET).remove([storagePath]).catch(() => {});
-        }
+      try {
+        await addDoc(collection(db, 'radio_submissions'), {
+          ...row,
+          status:     'pending',
+          created_at: serverTimestamp(),
+          updated_at: serverTimestamp(),
+        });
+      } catch (insErr) {
+        /* Upload succeeded but Firestore insert failed — log orphaned file path */
+        console.error('[Radio] Firestore insert error after upload (storagePath:', storagePath, '):', insErr);
         throw insErr;
       }
 

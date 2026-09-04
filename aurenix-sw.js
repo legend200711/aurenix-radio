@@ -5,12 +5,12 @@
  * Provides:
  *  - App shell caching for offline/installable PWA
  *  - Cache-first for static assets
- *  - Network-first for API calls (Supabase)
+ *  - Network-only for Firebase/Supabase API calls
  *  - Background sync support
  */
 
-const CACHE_NAME    = 'aurenix-radio-v4';
-const SHELL_CACHE   = 'aurenix-shell-v4';
+const CACHE_NAME    = 'aurenix-radio-v5';
+const SHELL_CACHE   = 'aurenix-shell-v5';
 
 /* Static app shell — cached on install */
 const APP_SHELL = [
@@ -25,6 +25,7 @@ const APP_SHELL = [
   '/aurenix-auth.js',
   '/aurenix-admin.js',
   '/supabase-client.js',
+  '/firebase-client.js',
   '/aurenix-favicon.svg',
   '/aurenix-manifest.json',
 ];
@@ -73,6 +74,21 @@ self.addEventListener('fetch', (event) => {
 
   // Skip Supabase API calls — always network
   if (url.hostname.endsWith('supabase.co') || url.hostname.endsWith('supabase.in')) {
+    event.respondWith(networkOnly(event.request));
+    return;
+  }
+
+  // Skip Firebase API calls — always network
+  // Covers: Firestore, Auth, Firebase Hosting, Storage, Analytics
+  if (
+    url.hostname.endsWith('firebaseio.com')   ||
+    url.hostname.endsWith('firestore.googleapis.com') ||
+    url.hostname.endsWith('identitytoolkit.googleapis.com') ||
+    url.hostname.endsWith('securetoken.googleapis.com') ||
+    url.hostname.endsWith('firebaseapp.com')  ||
+    url.hostname.endsWith('googleapis.com')   ||
+    url.hostname === 'www.gstatic.com'
+  ) {
     event.respondWith(networkOnly(event.request));
     return;
   }

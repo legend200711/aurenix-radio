@@ -3,15 +3,20 @@
  * aurenix-community.js
  *
  * Real backend-connected community:
- *  - User profiles
- *  - Posts feed
+ *  - User profiles (Firestore `users`)
+ *  - Posts feed (Firestore `community`)
  *  - Likes/reactions
- *  - Comments
+ *  - Comments (Firestore `post_comments`)
  *  - Follow/unfollow
- *  - Notifications
+ *  - Notifications (Firestore `notifications`)
  */
 
-import { supabase, loadUserProfile, upsertUserProfile } from './supabase-client.js';
+import { loadUserProfile, upsertUserProfile } from './supabase-client.js';
+import {
+  db, doc, getDoc, setDoc, updateDoc, addDoc, deleteDoc,
+  collection, query, where, orderBy, limit, getDocs, onSnapshot,
+  serverTimestamp, increment,
+} from './firebase-client.js';
 
 /* ── Column name map for this project's schema ── */
 // users PK = uid (not id)
@@ -212,22 +217,21 @@ async function loadFeedTab() {
   content.innerHTML = `<div style="padding:40px; text-align:center; color:var(--text-muted); font-size:13px;">Loading feed…</div>`;
 
   try {
-    const { data, error } = await supabase
-      .from('community')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(30);
-    if (error) throw error;
-    renderFeed(content, data || []);
+    const q = query(collection(db, 'community'), orderBy('created_at', 'desc'), limit(30));
+    const snap = await getDocs(q);
+    renderFeed(content, snap.docs.map(d => ({ id: d.id, ...d.data() })));
   } catch(e) {
     content.innerHTML = `<div style="padding:40px; text-align:center; color:#ff6680;">Unable to load feed. Please try again.</div>`;
   }
 
-  // Subscribe to real-time post updates
-  if (_channel) { try { supabase.removeChannel(_channel); } catch(_) {} }
-  _channel = supabase.channel('community-posts-feed')
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'community' }, () => loadFeedTab())
-    .subscribe();
+  // Subscribe to real-time post updates via Firestore onSnapshot
+  if (_channel) { try { _channel(); } catch(_) {} }
+  const feedQ = query(collection(db, 'community'), orderBy('created_at', 'desc'), limit(30));
+  let _feedInitial = true;
+  _channel = onSnapshot(feedQ, snap => {
+    if (_feedInitial) { _feedInitial = false; return; }
+    loadFeedTab();
+  }, () => {});
 }
 
 function renderFeed(container, posts) {
@@ -287,7 +291,7 @@ async function handleLike(btn, postId) {
   const countEl = btn.querySelector('.post-like-count');
   const current = parseInt(countEl?.textContent || '0');
   if (countEl) countEl.textContent = current + 1;
-  await supabase.from('community').update({ likes: current + 1 }).eq('id', postId).catch(() => {});
+  await updateDoc(doc(db, 'community', postId), { likes: increment(1) }).catch(() => {});
 }
 
 function toggleComments(postId) {
@@ -304,8 +308,9 @@ function toggleComments(postId) {
 async function loadPostComments(postId, container) {
   container.innerHTML = `<div style="padding:10px; color:var(--text-muted); font-size:12px;">Loading comments…</div>`;
   try {
-    const { data } = await supabase.from('post_comments')
-      .select('*').eq('post_id', postId).order('created_at', { ascending: true }).limit(20);
+    const q = query(collection(db, 'post_comments'), where('post_id', '==', postId), orderBy('created_at', 'asc'), limit(20));
+    const snap = await getDocs(q);
+    const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
 
     container.innerHTML = `
       ${_user ? `
@@ -344,19 +349,19 @@ async function loadPostComments(postId, container) {
 async function submitPostComment(postId, text, container) {
   if (!text || !_user) return;
   const profile = window.AURENIX_AUTH?.getProfile();
-  const { error } = await supabase.from('post_comments').insert({
-    post_id:   postId,
-    user_id:   _user.id,
-    user_name: profile?.display_name || _user.email?.split('@')[0] || 'User',
-    text,
-  });
-  if (!error) {
+  try {
+    await addDoc(collection(db, 'post_comments'), {
+      post_id:    postId,
+      user_id:    _user.uid,
+      user_name:  profile?.display_name || _user.email?.split('@')[0] || 'User',
+      text,
+      created_at: serverTimestamp(),
+    });
+    await updateDoc(doc(db, 'community', postId), { comment_count: increment(1) }).catch(() => {});
     const input = document.getElementById(`post-comment-input-${postId}`);
     if (input) input.value = '';
     loadPostComments(postId, container);
-    // Increment comment count
-    supabase.rpc('increment_post_comments', { post_id: postId }).catch(() => {});
-  }
+  } catch(_) {}
 }
 
 /* ═══════════════════════════════════════════
@@ -372,15 +377,19 @@ async function handleNewPost(inputEl) {
   const statusEl = document.getElementById('community-post-status');
   if (btn) { btn.disabled = true; btn.textContent = 'Transmitting…'; }
 
-  const { error } = await supabase.from('community').insert({
-    uid:           _user.id,
-    author_name:   profile?.display_name || _user.email?.split('@')[0] || 'User',
-    author_handle: profile?.username     || '',
-    author_avatar: profile?.avatar       || '',
-    text,
-    likes:         0,
-    comment_count: 0,
-  });
+  let error = null;
+  try {
+    await addDoc(collection(db, 'community'), {
+      uid:           _user.uid,
+      author_name:   profile?.display_name || _user.email?.split('@')[0] || 'User',
+      author_handle: profile?.username     || '',
+      author_avatar: profile?.avatar       || '',
+      text,
+      likes:         0,
+      comment_count: 0,
+      created_at:    serverTimestamp(),
+    });
+  } catch(e) { error = e; }
 
   if (btn) { btn.disabled = false; btn.textContent = 'Transmit'; }
 
@@ -408,17 +417,17 @@ async function loadNotificationsTab() {
 
   content.innerHTML = `<div style="padding:20px; color:var(--text-muted);">Loading notifications…</div>`;
   try {
-    const { data } = await supabase.from('notifications')
-      .select('*').eq('uid', _user.id)
-      .order('created_at', { ascending: false }).limit(30);
+    const q = query(collection(db, 'notifications'), where('uid', '==', _user.uid), orderBy('created_at', 'desc'), limit(30));
+    const snap = await getDocs(q);
+    const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    if (!data?.length) {
+    if (!data.length) {
       content.innerHTML = `<div style="padding:60px; text-align:center; color:var(--text-muted);"><div style="font-size:36px; margin-bottom:14px;">🔔</div><div>No notifications yet.</div></div>`;
       return;
     }
 
-    // Mark as read
-    supabase.from('notifications').update({ read: true }).eq('uid', _user.id).eq('read', false).then(() => {});
+    // Mark as read (best effort, fire and forget)
+    snap.docs.filter(d => !d.data().read).forEach(d => updateDoc(d.ref, { read: true }).catch(() => {}));
 
     content.innerHTML = '<div class="community-notification-list"></div>';
     const list = content.querySelector('.community-notification-list');
@@ -453,13 +462,11 @@ async function loadMembersTab() {
   content.innerHTML = `<div style="padding:20px; color:var(--text-muted);">Loading members…</div>`;
 
   try {
-    const { data } = await supabase
-      .from('users')
-      .select('uid, display_name, username, bio, avatar, followers, is_live')
-      .order('updated_at', { ascending: false })
-      .limit(40);
+    const q = query(collection(db, 'users'), orderBy('updated_at', 'desc'), limit(40));
+    const snap = await getDocs(q);
+    const data = snap.docs.map(d => ({ uid: d.id, ...d.data() }));
 
-    if (!data?.length) { content.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);">No members yet.</div>'; return; }
+    if (!data.length) { content.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);">No members yet.</div>'; return; }
 
     content.innerHTML = '<div class="community-members-grid" id="members-grid"></div>';
     const grid = document.getElementById('members-grid');
@@ -477,7 +484,7 @@ async function loadMembersTab() {
           <div style="font-size:13px; font-weight:700; color:var(--text); margin-bottom:2px;">${esc(member.display_name || 'Unknown')}</div>
           ${member.username ? `<div style="font-size:11px; color:var(--text-muted);">@${esc(member.username)}</div>` : ''}
           <div style="font-size:10px; color:var(--text-muted); margin-top:4px;">${followerCount} followers</div>
-          ${_user && member.uid !== _user.id ? `<button class="btn btn-ghost btn-sm follow-btn" data-uid="${member.uid}" style="width:100%; margin-top:8px;">Follow</button>` : ''}
+          ${_user && member.uid !== _user.uid ? `<button class="btn btn-ghost btn-sm follow-btn" data-uid="${member.uid}" style="width:100%; margin-top:8px;">Follow</button>` : ''}
         </div>
       `;
       card.querySelectorAll('.follow-btn').forEach(btn => {
@@ -498,29 +505,32 @@ async function handleFollow(btn, targetUid) {
   try {
     // Update following array on current user
     const currentFollowing = _profile?.following || [];
-    if (currentFollowing.includes(targetUid)) { btn.textContent = 'Following'; return; }
+    if (currentFollowing.includes(targetUid)) { btn.textContent = '✓ Following'; btn.disabled = false; return; }
 
     const newFollowing = [...currentFollowing, targetUid];
-    await upsertUserProfile({ uid: _user.id, following: newFollowing });
+    await upsertUserProfile({ uid: _user.uid, following: newFollowing });
+    if (_profile) _profile.following = newFollowing;
 
-    // Update followers array on target user (append current user's uid)
-    const { data: targetData } = await supabase.from('users').select('followers').eq('uid', targetUid).single().catch(() => ({ data: null }));
-    const newFollowers = [...(targetData?.followers || [])];
-    if (!newFollowers.includes(_user.id)) newFollowers.push(_user.id);
-    await supabase.from('users').update({ followers: newFollowers }).eq('uid', targetUid).catch(() => {});
+    // Update followers array on target user in Firestore
+    const targetSnap = await getDoc(doc(db, 'users', targetUid)).catch(() => null);
+    const targetData = targetSnap?.exists() ? targetSnap.data() : null;
+    const newFollowers = [...new Set([...(targetData?.followers || []), _user.uid])];
+    await updateDoc(doc(db, 'users', targetUid), { followers: newFollowers, updated_at: serverTimestamp() }).catch(() => {});
 
     btn.textContent = '✓ Following';
     btn.classList.add('active');
 
-    // Notify target user
+    // Notify target user via Firestore
     const profile = window.AURENIX_AUTH?.getProfile();
-    await supabase.from('notifications').insert({
+    addDoc(collection(db, 'notifications'), {
       uid:          targetUid,
       type:         'follow',
-      from_uid:     _user.id,
+      from_uid:     _user.uid,
       from_name:    profile?.display_name || 'Someone',
       from_avatar:  profile?.avatar || '',
       body:         `${profile?.display_name || 'Someone'} started following you.`,
+      read:         false,
+      created_at:   serverTimestamp(),
     }).catch(() => {});
   } catch(e) {
     btn.disabled = false;
@@ -579,12 +589,16 @@ async function loadMyProfileTab() {
     const btn = document.getElementById('profile-save-btn');
     btn.disabled = true; btn.textContent = 'Saving…';
 
-    const { error } = await supabase.from('users').update({
-      display_name: name,
-      username:     username || undefined,
-      bio:          bio || '',
-      avatar:       avatar || '',
-    }).eq('uid', _user.id);
+    let error = null;
+    try {
+      await updateDoc(doc(db, 'users', _user.uid), {
+        display_name: name,
+        username:     username || undefined,
+        bio:          bio || '',
+        avatar:       avatar || '',
+        updated_at:   serverTimestamp(),
+      });
+    } catch(e) { error = e; }
 
     btn.disabled = false; btn.textContent = 'Save Profile';
 

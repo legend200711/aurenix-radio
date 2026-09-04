@@ -1,48 +1,55 @@
 /**
- * Shadow Nexus Wave — live.js
+ * AURENIX — live.js
  *
- * Supabase architecture:
+ * Backend architecture (post-migration):
  *
  *  Auth + Profiles:
- *    - Supabase Auth (replaces Firebase Auth)
- *    - users table (replaces Firestore `users/{uid}`)
+ *    - Firebase Authentication
+ *    - Firestore `users/{uid}` collection
  *
- *  Live Rooms (Postgres + Realtime):
- *    - live_rooms table (replaces Firestore `liveRooms/{uid}` + RTDB `liveRooms/{roomId}`)
+ *  Live Rooms (Firestore):
+ *    - Firestore `live_rooms/{roomId}` collection
+ *    - Real-time via onSnapshot
  *
- *  Chat:
- *    - live_messages table (replaces Firestore `liveRooms/{roomId}/liveMessages`)
- *    - Real-time via Supabase Realtime postgres_changes
+ *  Chat (Firestore):
+ *    - Firestore `live_messages` collection, ordered by created_at
+ *    - Real-time via onSnapshot (filtered to room_id)
  *
- *  WebRTC Signaling (Supabase Broadcast channels):
- *    - channel `live-signal-{roomId}` replaces RTDB `liveConnections/{roomId}`
- *    - channel `live-guests-{roomId}` replaces RTDB `liveGuests/{roomId}`
- *    - channel `live-guest-sig-{roomId}` replaces RTDB `guestSignaling/{roomId}`
- *    - channel `live-relay-sig-{roomId}` replaces RTDB `guestViewerSignaling/{roomId}`
+ *  WebRTC Signaling (Supabase Broadcast channels — KEPT):
+ *    - channel `live-signal-{roomId}`   → main viewer signaling
+ *    - channel `live-guests-{roomId}`   → guest presence
+ *    - channel `live-guest-sig-{roomId}` → guest WebRTC signaling
+ *    - channel `live-relay-sig-{roomId}` → guest relay signaling
+ *    - channel `live-presence-{roomId}` → viewer presence/count
  *
- *  Presence (Supabase Realtime Presence):
- *    - channel `live-presence-{roomId}` replaces RTDB `liveRooms/{roomId}/viewerPresence`
- *
- *  Likes:
- *    - live_rooms.likes column updated via RPC / upsert
- *
- *  Host (creator):
- *    1. Captures local camera + mic via getUserMedia.
- *    2. Inserts row into live_rooms (status: 'live').
- *    3. Broadcasts offer/ICE via Supabase Broadcast channel per viewer.
- *    4. Relays guest streams to all viewers via separate broadcast channels.
- *
- *  Viewer:
- *    1. Reads live_rooms row to confirm stream is live.
- *    2. Subscribes to viewer signal broadcast channel.
- *    3. Host detects join and sends WebRTC offer via broadcast.
- *    4. Viewer answers and receives the host stream.
+ *  NOTE: Supabase Realtime broadcast channels are intentionally kept
+ *        for WebRTC signaling — they have no Firebase equivalent.
+ *        Only DB (live_rooms, live_messages, etc.) moves to Firestore.
  */
 
 'use strict';
 
 import { supabase, onAuthChange, loadUserProfile, upsertUserProfile,
          getFeatureFlag, getAccessToken } from './supabase-client.js';
+
+/* ── Firestore helpers imported from firebase-client.js ── */
+import {
+  db          as _fbDb,
+  doc         as _fbDoc,
+  getDoc      as _fbGetDoc,
+  setDoc      as _fbSetDoc,
+  updateDoc   as _fbUpdateDoc,
+  addDoc      as _fbAddDoc,
+  deleteDoc   as _fbDeleteDoc,
+  collection  as _fbCollection,
+  query       as _fbQuery,
+  where       as _fbWhere,
+  orderBy     as _fbOrderBy,
+  limit       as _fbLimit,
+  getDocs     as _fbGetDocs,
+  onSnapshot  as _fbOnSnapshot,
+  serverTimestamp as _fbServerTs,
+} from './firebase-client.js';
 
 /* ── Supabase Realtime Broadcast helpers (replace Firebase RTDB) ── */
 
@@ -80,27 +87,50 @@ function _rtListen(channelName, event, handler) {
   return () => _removeChannel(channelName);
 }
 
-/** One-shot read via Postgres (replaces RTDB `get`). */
-async function _dbGet(table, id) {
-  const { data } = await supabase.from(table).select('*').eq('id', id).maybeSingle();
-  return data;
+/** One-shot read from Firestore (replaces Supabase _dbGet). */
+async function _dbGet(collection, id) {
+  try {
+    const snap = await _fbGetDoc(_fbDoc(_fbDb, collection, id));
+    return snap.exists() ? { id: snap.id, ...snap.data() } : null;
+  } catch (e) {
+    console.warn('[live] _dbGet', collection, e.message);
+    return null;
+  }
 }
 
-/** Upsert a row. */
-async function _dbSet(table, row) {
-  const { error } = await supabase.from(table).upsert(row, { onConflict: 'id' });
-  if (error) console.warn('[live] _dbSet', table, error.message);
+/** Set/upsert a Firestore document (replaces Supabase _dbSet). */
+async function _dbSet(collection, row) {
+  try {
+    const { id, ...fields } = row;
+    await _fbSetDoc(_fbDoc(_fbDb, collection, id), {
+      ...fields,
+      id,
+      updated_at: _fbServerTs(),
+    }, { merge: true });
+  } catch (e) {
+    console.warn('[live] _dbSet', collection, e.message);
+  }
 }
 
-/** Update fields on an existing row. */
-async function _dbUpdate(table, id, patch) {
-  const { error } = await supabase.from(table).update(patch).eq('id', id);
-  if (error) console.warn('[live] _dbUpdate', table, error.message);
+/** Update fields on a Firestore document (replaces Supabase _dbUpdate). */
+async function _dbUpdate(collection, id, patch) {
+  try {
+    await _fbUpdateDoc(_fbDoc(_fbDb, collection, id), {
+      ...patch,
+      updated_at: _fbServerTs(),
+    });
+  } catch (e) {
+    console.warn('[live] _dbUpdate', collection, e.message);
+  }
 }
 
-/** Delete a row. */
-async function _dbDelete(table, id) {
-  await supabase.from(table).delete().eq('id', id);
+/** Delete a Firestore document (replaces Supabase _dbDelete). */
+async function _dbDelete(collection, id) {
+  try {
+    await _fbDeleteDoc(_fbDoc(_fbDb, collection, id));
+  } catch (e) {
+    console.warn('[live] _dbDelete', collection, e.message);
+  }
 }
 
 /* ── Compatibility shims (keep internal code changes minimal) ── */
@@ -405,20 +435,21 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
-/* ── Load Supabase user profile ── */
+/* ── Load Firebase user profile from Firestore ── */
 async function _loadUserData() {
   try {
-    _userData = await loadUserProfile(_user.id);
+    _userData = await loadUserProfile(_user.uid);
     if (!_userData) {
       // Profile row missing — create it so the user never appears as "Unknown"
-      const fallbackName = _user.user_metadata?.full_name || _user.email?.split('@')[0] || 'Wave User';
+      const fallbackName = _user.displayName || _user.email?.split('@')[0] || 'Wave User';
       const profileData = {
-        id:                 _user.id,
+        uid:                _user.uid,
+        id:                 _user.uid,
         display_name:       fallbackName,
         display_name_lower: fallbackName.toLowerCase(),
         username:           '',
         email:              _user.email || '',
-        avatar:             _user.user_metadata?.avatar_url || '',
+        avatar:             _user.photoURL || '',
         bio:                '',
         role:               'member',
         followers:          [],
@@ -619,31 +650,35 @@ async function startLive() {
 
   // ── Kill any previous stuck live session for this user ──
   try {
-    const prevProfile = await loadUserProfile(_user.id);
+    const prevProfile = await loadUserProfile(_user.uid);
     const prevRoomId = prevProfile?.live_room_id;
     if (prevRoomId) {
       await _dbUpdate('live_rooms', prevRoomId, { status: 'ended', is_live: false, ended_at: new Date().toISOString() });
       // Clean up signaling channels
       _removeChannel(`live-signal-${prevRoomId}`);
     }
-    await _dbUpdate('users', _user.id, { is_live: false, live_room_id: null });
-    // Clean up any orphaned live posts
-    await supabase.from('posts').delete()
-      .eq('uid', _user.id).eq('type', 'live');
+    await _dbUpdate('users', _user.uid, { is_live: false, live_room_id: null });
+    // Clean up any orphaned live posts in Firestore
+    try {
+      const orphanQ = _fbQuery(_fbCollection(_fbDb, 'posts'),
+        _fbWhere('uid', '==', _user.uid), _fbWhere('type', '==', 'live'));
+      const orphanSnap = await _fbGetDocs(orphanQ);
+      orphanSnap.forEach(d => _fbDeleteDoc(d.ref).catch(() => {}));
+    } catch(_) {}
   } catch (_) {}
 
   const titleVal = (D.setupTitle?.value || '').trim();
   if (D.goLiveBtn) { D.goLiveBtn.disabled = true; D.goLiveBtn.textContent = 'Going Live…'; }
 
-  // Sanitize uid — strip any chars forbidden in RTDB keys (. # $ / [ ])
-  const _safeUid = _user.id.replace(/[.#$/\[\]]/g, '_');
+  // Sanitize uid — strip any chars forbidden in channel names (. # $ / [ ])
+  const _safeUid = _user.uid.replace(/[.#$/\[\]]/g, '_');
   _roomId = `${_safeUid}_${Date.now().toString(36)}`;
 
-  _roomHostId = _user.id;   // creator is always their own host
+  _roomHostId = _user.uid;   // creator is always their own host
 
   const creatorData = {
     id:            _roomId,
-    host_id:       _user.id,
+    host_id:       _user.uid,
     host_name:     _getDisplayName(_userData, _user),
     host_username: _userData.username || '',
     host_avatar:   _userData.avatar || '',
@@ -729,7 +764,7 @@ async function startLive() {
   // ── Publish host's own presence to guest broadcast channel ──
   try {
     await _rtBroadcast(`live-guests-${_roomId}`, 'presence', {
-      uid:      _user.id,
+      uid:      _user.uid,
       name:     creatorData.host_name,
       avatar:   creatorData.host_avatar,
       isHost:   true,
@@ -756,7 +791,7 @@ async function startLive() {
 
   // ── Non-critical side-work ──
   try {
-    await _dbUpdate('users', _user.id, { is_live: true, live_room_id: _roomId });
+    await _dbUpdate('users', _user.uid, { is_live: true, live_room_id: _roomId });
   } catch (_) {}
   // _createLiveFeedPost intentionally omitted — live sessions must not create
   // feed posts; they appear only in the story bar and Live Hub.
@@ -854,7 +889,7 @@ function _subscribeViewerCount() {
   if (_viewerCountUnsub) { try { _viewerCountUnsub(); } catch(_) {} _viewerCountUnsub = null; }
 
   const presenceCh = supabase.channel(`live-presence-${_roomId}`, {
-    config: { presence: { key: _user.id } }
+    config: { presence: { key: _user.uid } }
   });
 
   let _lastMirroredViewers = -1;
@@ -1025,21 +1060,22 @@ async function endLive() {
 
   /* ── Clear live status from user profile ── */
   try {
-    await _dbUpdate('users', _user.id, { is_live: false, live_room_id: null });
+    await _dbUpdate('users', _user.uid, { is_live: false, live_room_id: null });
   } catch (_) {}
 
   /* ── Delete live feed post (safety net) ── */
   if (_feedPostId) {
-    await supabase.from('posts').delete().eq('id', _feedPostId).catch(() => {});
+    try { await _fbDeleteDoc(_fbDoc(_fbDb, 'posts', _feedPostId)); } catch(_) {}
     _feedPostId = null;
   }
 
-  /* ── Mark share posts as ended ── */
+  /* ── Mark share posts as ended in Firestore ── */
   try {
-    await supabase.from('posts')
-      .update({ is_live: false })
-      .eq('live_room_id', _endedRoomId)
-      .eq('type', 'live_share');
+    const shareQ = _fbQuery(_fbCollection(_fbDb, 'posts'),
+      _fbWhere('live_room_id', '==', _endedRoomId),
+      _fbWhere('type', '==', 'live_share'));
+    const shareSnap = await _fbGetDocs(shareQ);
+    shareSnap.forEach(d => _fbUpdateDoc(d.ref, { is_live: false }).catch(() => {}));
   } catch (_) {}
 
   /* ── Schedule room deletion after 5 min ── */
@@ -1062,14 +1098,14 @@ async function endLive() {
 }
 
 /* ═══════════════════════════════════════════════════
-   LIVE FEED POST — posts table
+   LIVE FEED POST — Firestore `posts` collection
    ═══════════════════════════════════════════════════ */
 async function _createLiveFeedPost(creatorData) {
   if (!_user || !_roomId) return;
   try {
-    const { data } = await supabase.from('posts').insert({
+    const ref = await _fbAddDoc(_fbCollection(_fbDb, 'posts'), {
       type:          'live',
-      uid:           _user.id,
+      uid:           _user.uid,
       author_name:   creatorData.host_name     || '',
       author_handle: creatorData.host_username || '',
       author_avatar: creatorData.host_avatar   || '',
@@ -1078,25 +1114,26 @@ async function _createLiveFeedPost(creatorData) {
       title:         creatorData.title || 'Shadow Nexus Wave',
       text:          (creatorData.host_name || '') + ' is Live now 🔴',
       likes:         0,
-    }).select('id').single();
-    if (data) _feedPostId = data.id;
+      created_at:    _fbServerTs(),
+    });
+    _feedPostId = ref.id;
   } catch (_) {}
 }
 
 /* ═══════════════════════════════════════════════════
-   LIVE STORY — stories table
+   LIVE STORY — Firestore `stories` collection
    ═══════════════════════════════════════════════════ */
 function _liveStoryId() {
-  return `live_${_user.id}`;
+  return `live_${_user.uid}`;
 }
 
 async function _createLiveStory(creatorData) {
   if (!_user || !_roomId) return;
   const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
   try {
-    await supabase.from('stories').upsert({
+    await _fbSetDoc(_fbDoc(_fbDb, 'stories', _liveStoryId()), {
       id:            _liveStoryId(),
-      uid:           _user.id,
+      uid:           _user.uid,
       author_name:   creatorData.host_name     || '',
       author_handle: creatorData.host_username || '',
       author_avatar: creatorData.host_avatar   || '',
@@ -1104,31 +1141,31 @@ async function _createLiveStory(creatorData) {
       live_room_id:  _roomId,
       title:         creatorData.title || 'Shadow Nexus Wave',
       expires_at:    expiresAt,
-    }, { onConflict: 'id' });
+    }, { merge: true });
   } catch (_) {}
 }
 
 async function _deleteLiveStory() {
   if (!_user) return;
   try {
-    await supabase.from('stories').delete().eq('id', _liveStoryId());
+    await _fbDeleteDoc(_fbDoc(_fbDb, 'stories', _liveStoryId()));
   } catch (_) {}
 }
 
 /* ═══════════════════════════════════════════════════
-   FOLLOWER LIVE NOTIFICATIONS — notifications table
+   FOLLOWER LIVE NOTIFICATIONS — Firestore `notifications`
    ═══════════════════════════════════════════════════ */
 async function _notifyFollowersLive(creatorData) {
   if (!_user) return;
   try {
-    const profile = await loadUserProfile(_user.id);
+    const profile = await loadUserProfile(_user.uid);
     if (!profile) return;
     const followers = profile.followers || [];
     if (!followers.length) return;
 
     const notifBase = {
       type:        'live',
-      from_uid:    _user.id,
+      from_uid:    _user.uid,
       from_name:   creatorData.host_name   || '',
       from_avatar: creatorData.host_avatar || '',
       room_id:     _roomId,
@@ -1137,10 +1174,14 @@ async function _notifyFollowersLive(creatorData) {
       body:        `${creatorData.host_name || ''} is live: ${creatorData.title || 'Shadow Nexus Wave'}`,
       url:         'live.html#watch=' + _roomId,
       read:        false,
+      created_at:  _fbServerTs(),
     };
 
-    const rows = followers.map(fId => ({ ...notifBase, recipient_id: fId }));
-    await supabase.from('notifications').insert(rows);
+    // Write one Firestore notification per follower
+    await Promise.all(followers.map(fId =>
+      _fbAddDoc(_fbCollection(_fbDb, 'notifications'), { ...notifBase, uid: fId, recipient_id: fId })
+        .catch(() => {})
+    ));
   } catch (_) {}
 }
 
@@ -1211,48 +1252,39 @@ async function _startViewer() {
     (async () => {
       try {
         const presenceCh = _getChannel(`live-presence-${_roomId}`);
-        await presenceCh.track({ user_id: _user.id, joined_at: Date.now() });
+        await presenceCh.track({ user_id: _user.uid, joined_at: Date.now() });
 
         // No native onDisconnect in Supabase — Realtime auto-removes presence on disconnect
         if (_viewerPresenceHeartbeatInterval) clearInterval(_viewerPresenceHeartbeatInterval);
         _viewerPresenceHeartbeatInterval = setInterval(() => {
           if (_viewerLeftFlag || !_roomId) { clearInterval(_viewerPresenceHeartbeatInterval); return; }
-          presenceCh.track({ user_id: _user.id, hb: Date.now() }).catch(() => {});
+          presenceCh.track({ user_id: _user.uid, hb: Date.now() }).catch(() => {});
         }, _VIEWER_PRESENCE_HB_MS);
       } catch (_) {}
     })();
   }
 
-  /* ── Watch for stream ending + viewer/like counts via Supabase Realtime ── */
-  const watchCh = supabase
-    .channel(`live-room-watch-${_roomId}`)
-    .on('postgres_changes', {
-      event: 'UPDATE',
-      schema: 'public',
-      table: 'live_rooms',
-      filter: `id=eq.${_roomId}`,
-    }, payload => {
-      const d = payload.new || {};
-      const vText = '👁 ' + (d.viewers || 0);
-      const lText = '❤️ ' + (d.likes   || 0);
-      if (D.viewerCount && D.viewerCount.textContent !== vText) D.viewerCount.textContent = vText;
-      if (D.likeCount   && D.likeCount.textContent   !== lText) D.likeCount.textContent   = lText;
-      if (d.guest_layout  && d.guest_layout  !== _guestLayout)  { _guestLayout  = d.guest_layout;  _applyGuestLayout(); }
-      if (d.guest_box_size && d.guest_box_size !== _guestBoxSize) { _guestBoxSize = d.guest_box_size; _applyGuestLayout(); }
-      if (d.status === 'ended') {
-        _showEndedOverlay(false, 'Stream ended', `${roomData.host_name || 'Creator'} has ended the live stream.`);
-      }
-    })
-    .on('postgres_changes', {
-      event: 'DELETE',
-      schema: 'public',
-      table: 'live_rooms',
-      filter: `id=eq.${_roomId}`,
-    }, () => {
+  /* ── Watch for stream ending + viewer/like counts via Firestore onSnapshot ── */
+  const watchUnsub = _fbOnSnapshot(_fbDoc(_fbDb, 'live_rooms', _roomId), snap => {
+    if (!snap.exists()) {
       _showEndedOverlay(false, 'Stream ended', 'The live stream has ended.');
-    })
-    .subscribe();
-  _roomWatchRef = watchCh; // used in _viewerLeave to clean up
+      return;
+    }
+    const d = snap.data() || {};
+    const vText = '👁 ' + (d.viewers || 0);
+    const lText = '❤️ ' + (d.likes   || 0);
+    if (D.viewerCount && D.viewerCount.textContent !== vText) D.viewerCount.textContent = vText;
+    if (D.likeCount   && D.likeCount.textContent   !== lText) D.likeCount.textContent   = lText;
+    if (d.guest_layout   && d.guest_layout   !== _guestLayout)  { _guestLayout   = d.guest_layout;   _applyGuestLayout(); }
+    if (d.guest_box_size && d.guest_box_size !== _guestBoxSize) { _guestBoxSize = d.guest_box_size; _applyGuestLayout(); }
+    if (d.status === 'ended') {
+      _showEndedOverlay(false, 'Stream ended', `${roomData.host_name || 'Creator'} has ended the live stream.`);
+    }
+  }, () => {
+    _showEndedOverlay(false, 'Stream ended', 'The live stream has ended.');
+  });
+  // Store as a callable ref so _viewerLeave can clean it up
+  _roomWatchRef = { unsubscribe: watchUnsub };
 
   // Fix: start frozen video watchdog — auto-refresh tracks if video freezes
   _startFrozenVideoWatchdog(() => roomData);
@@ -1280,7 +1312,7 @@ async function _startViewer() {
       (async () => {
         try {
           const presCh = _getChannel(`live-presence-${_roomId}`);
-          await presCh.track({ uid: _user.id, joinedAt: Date.now() });
+          await presCh.track({ uid: _user.uid, joinedAt: Date.now() });
         } catch(_) {}
       })();
     }
@@ -1332,7 +1364,7 @@ async function _viewerLeave() {
   if (_guestStream || _guestPc) {
     if (_guestPc) { try { _guestPc.close(); } catch(_){} _guestPc = null; }
     if (_user && _roomId) {
-      _rtBroadcast(`live-guests-${_roomId}`, 'guest-leave', { uid: _user.id }).catch(() => {});
+      _rtBroadcast(`live-guests-${_roomId}`, 'guest-leave', { uid: _user.uid }).catch(() => {});
     }
     if (_guestStream) { try { _guestStream.getTracks().forEach(t => t.stop()); } catch(_){} _guestStream = null; }
   }
@@ -1349,13 +1381,16 @@ async function _viewerLeave() {
     _layoutSyncUnsub = null;
   }
 
-  // Tear down room-watch channel
-  if (_roomWatchRef) { try { supabase.removeChannel(_roomWatchRef); } catch(_) {} _roomWatchRef = null; }
+  // Tear down room-watch Firestore listener
+  if (_roomWatchRef) {
+    try { if (typeof _roomWatchRef.unsubscribe === 'function') _roomWatchRef.unsubscribe(); } catch(_) {}
+    _roomWatchRef = null;
+  }
 
-  // Clean up any pending box request
+  // Clean up any pending box request in Firestore
   if (_user && _roomId) {
-    const requestId = `${_roomId}_${_user.id}`;
-    await supabase.from('box_requests').delete().eq('id', requestId).catch(() => {});
+    const requestId = `${_roomId}_${_user.uid}`;
+    _fbDeleteDoc(_fbDoc(_fbDb, 'box_requests', requestId)).catch(() => {});
   }
   if (_guestStatusUnsub) { try { _guestStatusUnsub(); } catch(_){} _guestStatusUnsub = null; }
 
@@ -1375,7 +1410,7 @@ async function _viewerLeave() {
   // Remove viewer's per-viewer signaling slot so host tears down its peer
   if (_user && _roomId) {
     // Signal viewer leave to host via broadcast
-    _rtBroadcast(`live-signal-${_roomId}`, 'viewer-leave', { uid: _user.id }).catch(() => {});
+    _rtBroadcast(`live-signal-${_roomId}`, 'viewer-leave', { uid: _user.uid }).catch(() => {});
   }
 
   /* ── Stop viewer presence heartbeat ── */
@@ -1390,6 +1425,7 @@ async function _viewerLeave() {
       const presenceCh = _channels[`live-presence-${_roomId}`];
       if (presenceCh) presenceCh.untrack().catch(() => {});
     } catch (_) {}
+    // Note: keep channel alive for Supabase Presence counting — host removes it
     _removeChannel(`live-presence-${_roomId}`);
   }
 }
@@ -1408,7 +1444,7 @@ function _setupViewerControls(roomData) {
   const hostId         = roomData.host_id;
   if (!followBtn || !followLabel || !hostId) return;
   // Don't show follow button on your own stream
-  if (_user && _user.id === hostId) return;
+  if (_user && _user.uid === hostId) return;
 
   followBtn.style.display = 'flex';
 
@@ -1417,6 +1453,7 @@ function _setupViewerControls(roomData) {
   if (_user && _userData && Array.isArray(_userData.following)) {
     _liveFollowing = _userData.following.includes(hostId);
   }
+  // Also check viewers' own uid equality
   function _updateLiveFollowBtn() {
     followLabel.textContent = _liveFollowing ? '✓ Following' : 'Follow';
     followBtn.style.opacity = _liveFollowing ? '0.7' : '1';
@@ -1425,44 +1462,51 @@ function _setupViewerControls(roomData) {
 
   followBtn.addEventListener('click', async () => {
     if (!_user) { toast('Sign in to follow creators.'); return; }
-    if (!hostId || hostId === _user.id) return;
+    if (!hostId || hostId === _user.uid) return;
     followBtn.disabled = true;
     try {
       if (_liveFollowing) {
-        // Remove follower/following from both user rows (array operations via RPC or manual fetch+update)
-        await supabase.from('users').update({
-          followers: (_userData.followers || []).filter(id => id !== _user.id)
-        }).eq('id', hostId);
-        await supabase.from('users').update({
-          following: (_userData.following || []).filter(id => id !== hostId)
-        }).eq('id', _user.id);
+        // Unfollow — remove from both Firestore user docs
+        await _fbUpdateDoc(_fbDoc(_fbDb, 'users', hostId), {
+          followers: (_userData.followers || []).filter(id => id !== _user.uid),
+          updated_at: _fbServerTs(),
+        });
+        await _fbUpdateDoc(_fbDoc(_fbDb, 'users', _user.uid), {
+          following: (_userData.following || []).filter(id => id !== hostId),
+          updated_at: _fbServerTs(),
+        });
+        if (_userData) _userData.following = (_userData.following || []).filter(id => id !== hostId);
         _liveFollowing = false;
         toast('Unfollowed.');
       } else {
-        const myFollowers = (_userData.followers || []);
-        const myFollowing = (_userData.following || []);
-        await supabase.from('users').update({
-          followers: [...new Set([...myFollowers, _user.id])]
-        }).eq('id', hostId);
-        await supabase.from('users').update({
-          following: [...new Set([...myFollowing, hostId])]
-        }).eq('id', _user.id);
+        // Follow — add to both Firestore user docs
+        await _fbUpdateDoc(_fbDoc(_fbDb, 'users', hostId), {
+          followers: [...new Set([...(_userData.followers || []), _user.uid])],
+          updated_at: _fbServerTs(),
+        });
+        await _fbUpdateDoc(_fbDoc(_fbDb, 'users', _user.uid), {
+          following: [...new Set([...(_userData.following || []), hostId])],
+          updated_at: _fbServerTs(),
+        });
+        if (_userData) _userData.following = [...new Set([...(_userData.following || []), hostId])];
         _liveFollowing = true;
         toast('Following ' + (roomData.host_name || 'creator') + '!');
 
-        // Send follow notification
+        // Send follow notification to Firestore
         const myName   = _getDisplayName(_userData, _user);
         const myAvatar = _userData?.avatar || '';
-        await supabase.from('notifications').insert({
+        _fbAddDoc(_fbCollection(_fbDb, 'notifications'), {
           type:         'follow',
+          uid:          hostId,
           recipient_id: hostId,
-          from_uid:     _user.id,
+          from_uid:     _user.uid,
           from_name:    myName,
           from_avatar:  myAvatar,
           title:        myName + ' started following you.',
           body:         myName + ' started following you.',
           url:          'aurenix.html#community',
           read:         false,
+          created_at:   _fbServerTs(),
         }).catch(() => {});
       }
       _updateLiveFollowBtn();
@@ -1827,7 +1871,7 @@ async function _viewerSubscribeGuestRelay(guestUid) {
   // Don't subscribe if already have a relay for this guest
   if (_viewerRelayPeers[guestUid]) return;
   // Don't subscribe if this is the viewer's own guest box (they see their own video directly)
-  if (guestUid === _user.id) return;
+  if (guestUid === _user.uid) return;
   // Prevent concurrent calls for the same guest (race condition guard)
   if (_viewerRelayPending.has(guestUid)) return;
   _viewerRelayPending.add(guestUid);
@@ -1839,7 +1883,7 @@ async function _viewerSubscribeGuestRelay(guestUid) {
   await new Promise(resolve => {
     const _timeout = setTimeout(() => resolve(null), 10000);
     const _unsub = _rtListen(relayCh, 'relay-offer', (payload) => {
-      if (payload.guestUid !== guestUid || payload.viewerUid !== _user.id) return;
+      if (payload.guestUid !== guestUid || payload.viewerUid !== _user.uid) return;
       clearTimeout(_timeout);
       try { _unsub(); } catch(_) {}
       relayData = payload;
@@ -1851,7 +1895,7 @@ async function _viewerSubscribeGuestRelay(guestUid) {
     _viewerRelayPending.delete(guestUid);
     // No relay offer yet — watch for next offer from host (re-subscribe once)
     _rtListen(relayCh, 'relay-offer', (payload) => {
-      if (payload.guestUid !== guestUid || payload.viewerUid !== _user.id) return;
+      if (payload.guestUid !== guestUid || payload.viewerUid !== _user.uid) return;
       _viewerSubscribeGuestRelay(guestUid);
     });
     return;
@@ -1917,7 +1961,7 @@ async function _viewerSubscribeGuestRelay(guestUid) {
   pc.onicecandidate = async (e) => {
     if (!e.candidate) return;
     if (!_answerWritten) { _pendingCands.push(e.candidate.toJSON()); return; }
-    try { await _rtBroadcast(relayCh, 'relay-candidate', { guestUid, viewerUid: _user.id, from: 'viewer', candidate: e.candidate.toJSON() }); } catch(_) {}
+    try { await _rtBroadcast(relayCh, 'relay-candidate', { guestUid, viewerUid: _user.uid, from: 'viewer', candidate: e.candidate.toJSON() }); } catch(_) {}
   };
 
   let answer;
@@ -1929,17 +1973,17 @@ async function _viewerSubscribeGuestRelay(guestUid) {
   _viewerRelayPending.delete(guestUid);
 
   try {
-    await _rtBroadcast(relayCh, 'relay-answer', { guestUid, viewerUid: _user.id, answer: { type: answer.type, sdp: answer.sdp } });
+    await _rtBroadcast(relayCh, 'relay-answer', { guestUid, viewerUid: _user.uid, answer: { type: answer.type, sdp: answer.sdp } });
     _answerWritten = true;
   } catch(e) { _viewerTeardownRelayPeer(guestUid); return; }
 
   for (const c of _pendingCands) {
-    try { await _rtBroadcast(relayCh, 'relay-candidate', { guestUid, viewerUid: _user.id, from: 'viewer', candidate: c }); } catch(_) {}
+    try { await _rtBroadcast(relayCh, 'relay-candidate', { guestUid, viewerUid: _user.uid, from: 'viewer', candidate: c }); } catch(_) {}
   }
 
   // Listen for additional host ICE candidates
   relay.sigUnsub = _rtListen(relayCh, 'relay-candidate', async (payload) => {
-    if (payload.guestUid !== guestUid || payload.viewerUid !== _user.id) return;
+    if (payload.guestUid !== guestUid || payload.viewerUid !== _user.uid) return;
     if (payload.from !== 'host') return;
     const r = _viewerRelayPeers[guestUid];
     if (!r || !r.pc.remoteDescription) return;
@@ -2013,7 +2057,7 @@ async function _startViewerWebRTC(roomData) {
 
     // Listen for host-offer event targeted at this viewer
     sigCh.on('broadcast', { event: 'host-offer' }, msg => {
-      if (msg.payload?.uid === _user.id) {
+      if (msg.payload?.uid === _user.uid) {
         _offerPayload = msg.payload.offer;
         resolve();
       }
@@ -2021,7 +2065,7 @@ async function _startViewerWebRTC(roomData) {
 
     // Join signal — host will create a peer and send an offer
     await _rtBroadcast(`live-signal-${_roomId}`, 'viewer-join', {
-      uid: _user.id, sessionId
+      uid: _user.uid, sessionId
     }).catch(() => {});
 
     // Timeout after 15 s
@@ -2115,7 +2159,7 @@ async function _startViewerWebRTC(roomData) {
     if (!e.candidate) return;
     if (!_answerWritten) { _pendingCands.push(e.candidate.toJSON()); return; }
     _rtBroadcast(`live-signal-${_roomId}`, 'viewer-ice', {
-      uid: _user.id, candidate: e.candidate.toJSON()
+      uid: _user.uid, candidate: e.candidate.toJSON()
     }).catch(() => {});
   };
 
@@ -2125,13 +2169,13 @@ async function _startViewerWebRTC(roomData) {
 
   try {
     await _rtBroadcast(`live-signal-${_roomId}`, 'viewer-answer', {
-      uid: _user.id, answer: { type: answer.type, sdp: answer.sdp }
+      uid: _user.uid, answer: { type: answer.type, sdp: answer.sdp }
     });
     _answerWritten = true;
   } catch(e) { _showConnBanner('Waiting for stream…', ''); return; }
 
   for (const c of _pendingCands) {
-    _rtBroadcast(`live-signal-${_roomId}`, 'viewer-ice', { uid: _user.id, candidate: c }).catch(() => {});
+    _rtBroadcast(`live-signal-${_roomId}`, 'viewer-ice', { uid: _user.uid, candidate: c }).catch(() => {});
   }
 
   // Listen for host ICE candidates
@@ -2141,14 +2185,14 @@ async function _startViewerWebRTC(roomData) {
   _rtcSignalUnsub = () => _removeChannel(`live-signal-${_roomId}`);
 
   sigCh.on('broadcast', { event: 'host-ice' }, msg => {
-    if (msg.payload?.uid !== _user.id) return;
+    if (msg.payload?.uid !== _user.uid) return;
     if (_rtcPc && _rtcPc.remoteDescription) {
       _rtcPc.addIceCandidate(new RTCIceCandidate(msg.payload.candidate)).catch(() => {});
     }
   });
 
   sigCh.on('broadcast', { event: 'host-offer' }, async msg => {
-    if (msg.payload?.uid !== _user.id) return;
+    if (msg.payload?.uid !== _user.uid) return;
     const d = msg.payload;
     if (d.offer && d.offer.sdp && d.offer.sdp !== _lastSeenOfferSdp) {
       _lastSeenOfferSdp = d.offer.sdp;
@@ -2404,42 +2448,38 @@ function _scheduleViewerReconnect(roomData) {
 }
 
 /* ═══════════════════════════════════════════════════
-   CHAT — live_messages table + Supabase Realtime
+   CHAT — Firestore `live_messages` collection
    ═══════════════════════════════════════════════════ */
 function _subscribeChat() {
   if (!_roomId) return;
   if (_chatUnsub) { try { _chatUnsub(); } catch(_){} _chatUnsub = null; }
 
-  // Fetch recent messages first
-  supabase
-    .from('live_messages')
-    .select('*')
-    .eq('room_id', _roomId)
-    .order('created_at', { ascending: true })
-    .limit(100)
-    .then(({ data }) => {
-      if (data) data.forEach(msg => _appendChatMsg(_normMsg(msg)));
-    });
+  // Firestore onSnapshot — streams recent messages and new inserts in real time
+  const chatQ = _fbQuery(
+    _fbCollection(_fbDb, 'live_messages'),
+    _fbWhere('room_id', '==', _roomId),
+    _fbOrderBy('created_at', 'asc'),
+    _fbLimit(100),
+  );
 
-  // Subscribe to new messages
-  const chatCh = supabase
-    .channel(`live-chat-${_roomId}`)
-    .on('postgres_changes', {
-      event: 'INSERT',
-      schema: 'public',
-      table: 'live_messages',
-      filter: `room_id=eq.${_roomId}`,
-    }, payload => {
-      _appendChatMsg(_normMsg(payload.new));
-    })
-    .subscribe(status => {
-      if (status === 'CHANNEL_ERROR') {
-        console.warn('[Chat] Realtime error — retrying in 5 s');
-        setTimeout(() => { if (_roomId && !_viewerLeftFlag) _subscribeChat(); }, 5000);
-      }
-    });
-
-  _chatUnsub = () => supabase.removeChannel(chatCh);
+  let _initialLoad = true;
+  _chatUnsub = _fbOnSnapshot(chatQ, snap => {
+    if (_initialLoad) {
+      // First snapshot: render all existing messages
+      _initialLoad = false;
+      snap.docs.forEach(d => _appendChatMsg(_normMsg({ id: d.id, ...d.data() })));
+    } else {
+      // Subsequent snapshots: only handle added documents
+      snap.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          _appendChatMsg(_normMsg({ id: change.doc.id, ...change.doc.data() }));
+        }
+      });
+    }
+  }, err => {
+    console.warn('[Chat] Firestore onSnapshot error — retrying in 5 s:', err.message);
+    setTimeout(() => { if (_roomId && !_viewerLeftFlag) _subscribeChat(); }, 5000);
+  });
 }
 
 /** Normalize a live_messages row to the shape _buildChatMsgEl expects. */
@@ -2558,12 +2598,13 @@ async function sendChat() {
 
   _chatSending = true;
   try {
-    await supabase.from('live_messages').insert({
-      room_id:   _roomId,
-      user_id:   _user.id,
-      user_name: _userData.display_name || _userData.username || 'Guest',
+    await _fbAddDoc(_fbCollection(_fbDb, 'live_messages'), {
+      room_id:    _roomId,
+      user_id:    _user.uid,
+      user_name:  _userData.display_name || _userData.username || 'Guest',
       text,
-      type:      'chat',
+      type:       'chat',
+      created_at: _fbServerTs(),
     });
   } catch (e) {
     toast('Could not send message.');
@@ -2589,7 +2630,7 @@ async function sendLike() {
   (async () => {
     try {
       const ch = _getChannel(`live-presence-${_roomId}`);
-      await ch.send({ type: 'broadcast', event: 'like', payload: { uid: _user.id } });
+      await ch.send({ type: 'broadcast', event: 'like', payload: { uid: _user.uid } });
     } catch (_) {}
   })();
 
@@ -2693,7 +2734,7 @@ function _openShareModal() {
   if (old) old.remove();
 
   const url      = _buildLiveUrl();
-  const name     = snxGetDisplayName(_userData, _user);
+  const name     = _getDisplayName(_userData, _user);
   const shareMsg = `${name} is Live Now 🔴 — Watch: ${url}`;
 
   const modal = document.createElement('div');
@@ -2753,9 +2794,9 @@ function _openShareModal() {
   modal.querySelector('#_snxShareToFeed').addEventListener('click', async () => {
     _closeShareModal();
     try {
-      await supabase.from('posts').insert({
+      await _fbAddDoc(_fbCollection(_fbDb, 'posts'), {
         type:          'live_share',
-        uid:           _user.id,
+        uid:           _user.uid,
         author_name:   _userData?.display_name || _userData?.username || '',
         author_handle: _userData?.username     || '',
         author_avatar: _userData?.avatar       || '',
@@ -2763,6 +2804,7 @@ function _openShareModal() {
         is_live:       true,
         text:          shareMsg,
         likes:         0,
+        created_at:    _fbServerTs(),
       });
       toast('📣 Shared to Feed!');
     } catch (e) {
@@ -3240,17 +3282,18 @@ async function _viewerRequestBox() {
 
   const viewerName   = _userData.display_name || _userData.username || _user.email?.split('@')[0] || 'Guest';
   const viewerAvatar = _userData.avatar || '';
-  const requestId    = `${_roomId}_${_user.id}`;
+  const requestId    = `${_roomId}_${_user.uid}`;
 
-  // ── Write to Supabase box_requests ──
+  // ── Write to Firestore box_requests ──
   try {
-    await supabase.from('box_requests').upsert({
+    await _fbSetDoc(_fbDoc(_fbDb, 'box_requests', requestId), {
       id:          requestId,
       room_id:     _roomId,
-      viewer_uid:  _user.id,
+      viewer_uid:  _user.uid,
       viewer_name: viewerName,
       status:      'pending',
-    }, { onConflict: 'id' });
+      created_at:  _fbServerTs(),
+    }, { merge: true });
   } catch (e) {
     toast('❌ Could not send request. Please try again.');
     return;
@@ -3259,7 +3302,7 @@ async function _viewerRequestBox() {
   // ── Signal host via broadcast ──
   try {
     await _rtBroadcast(`live-guest-sig-${_roomId}`, 'guest-request', {
-      uid:       _user.id,
+      uid:       _user.uid,
       name:      viewerName,
       avatar:    viewerAvatar,
       requestId,
@@ -3275,55 +3318,50 @@ async function _viewerRequestBox() {
   if (D.btnRequestBoxLabel) D.btnRequestBoxLabel.textContent = 'Waiting…';
   toast('📺 Request sent to host!');
 
-  // ── Watch box_requests status for host response (Supabase Realtime) ──
+  // ── Watch box_requests status for host response (Firestore onSnapshot) ──
   if (_guestStatusUnsub) { try { _guestStatusUnsub(); } catch(_){} _guestStatusUnsub = null; }
 
-  const statusCh = supabase
-    .channel(`box-request-${requestId}`)
-    .on('postgres_changes', {
-      event: 'UPDATE',
-      schema: 'public',
-      table: 'box_requests',
-      filter: `id=eq.${requestId}`,
-    }, async payload => {
-      const status = payload.new?.status;
+  // Firestore listener fires immediately with current data, then on every update
+  const _stopDbWatch = _fbOnSnapshot(_fbDoc(_fbDb, 'box_requests', requestId), async snap => {
+    if (!snap.exists()) return;
+    const status = snap.data()?.status;
 
-      if (status === 'accepted') {
-        if (btn) { btn.classList.remove('pending'); btn.style.display = 'none'; }
-        toast('✅ Accepted! Joining as guest…');
-        _guestStatusUnsub && _guestStatusUnsub();
-        _guestStatusUnsub = null;
-        await _guestJoinAsViewer();
+    if (status === 'accepted') {
+      if (btn) { btn.classList.remove('pending'); btn.style.display = 'none'; }
+      toast('✅ Accepted! Joining as guest…');
+      if (_guestStatusUnsub) { _guestStatusUnsub(); _guestStatusUnsub = null; }
+      await _guestJoinAsViewer();
 
-      } else if (status === 'declined') {
-        if (btn) btn.classList.remove('pending');
-        if (D.btnRequestBoxLabel) D.btnRequestBoxLabel.textContent = 'Request a Box';
-        toast('Request declined.');
-        _guestStatusUnsub && _guestStatusUnsub();
-        _guestStatusUnsub = null;
-        await supabase.from('box_requests').delete().eq('id', requestId).catch(() => {});
-      }
-    })
-    // Also listen via broadcast for instant host response
-    .on('broadcast', { event: 'request-response' }, async msg => {
-      if (msg.payload?.requestId !== requestId) return;
-      if (msg.payload?.status === 'accepted') {
-        if (btn) { btn.classList.remove('pending'); btn.style.display = 'none'; }
-        toast('✅ Accepted! Joining as guest…');
-        _guestStatusUnsub && _guestStatusUnsub();
-        _guestStatusUnsub = null;
-        await _guestJoinAsViewer();
-      } else if (msg.payload?.status === 'declined') {
-        if (btn) btn.classList.remove('pending');
-        if (D.btnRequestBoxLabel) D.btnRequestBoxLabel.textContent = 'Request a Box';
-        toast('Request declined.');
-        _guestStatusUnsub && _guestStatusUnsub();
-        _guestStatusUnsub = null;
-      }
-    })
-    .subscribe();
+    } else if (status === 'declined') {
+      if (btn) btn.classList.remove('pending');
+      if (D.btnRequestBoxLabel) D.btnRequestBoxLabel.textContent = 'Request a Box';
+      toast('Request declined.');
+      if (_guestStatusUnsub) { _guestStatusUnsub(); _guestStatusUnsub = null; }
+      _fbDeleteDoc(_fbDoc(_fbDb, 'box_requests', requestId)).catch(() => {});
+    }
+  });
 
-  _guestStatusUnsub = () => supabase.removeChannel(statusCh);
+  // Also listen via Supabase Broadcast for an instant host response (no DB round-trip)
+  const _statusCh = _getChannel(`box-request-${requestId}`);
+  _statusCh.on('broadcast', { event: 'request-response' }, async msg => {
+    if (msg.payload?.requestId !== requestId) return;
+    if (msg.payload?.status === 'accepted') {
+      if (btn) { btn.classList.remove('pending'); btn.style.display = 'none'; }
+      toast('✅ Accepted! Joining as guest…');
+      if (_guestStatusUnsub) { _guestStatusUnsub(); _guestStatusUnsub = null; }
+      await _guestJoinAsViewer();
+    } else if (msg.payload?.status === 'declined') {
+      if (btn) btn.classList.remove('pending');
+      if (D.btnRequestBoxLabel) D.btnRequestBoxLabel.textContent = 'Request a Box';
+      toast('Request declined.');
+      if (_guestStatusUnsub) { _guestStatusUnsub(); _guestStatusUnsub = null; }
+    }
+  });
+
+  _guestStatusUnsub = () => {
+    _stopDbWatch();
+    _removeChannel(`box-request-${requestId}`);
+  };
 }
 
 /* ── VIEWER: Guest cam toggle ── */
@@ -3336,9 +3374,9 @@ function _toggleGuestCam() {
   const icon = D.btnGuestCam && D.btnGuestCam.querySelector('span:first-child');
   if (icon) icon.textContent = _guestCamOn ? '📷' : '🚫';
   // Broadcast cam state so host and other viewers see the change
-  if (_user && _roomId) _rtBroadcast(`live-guests-${_roomId}`, 'guest-cam', { uid: _user.id, camOn: _guestCamOn }).catch(() => {});
+  if (_user && _roomId) _rtBroadcast(`live-guests-${_roomId}`, 'guest-cam', { uid: _user.uid, camOn: _guestCamOn }).catch(() => {});
   if (_user && _roomId) {
-    const g = _guestPresence[_user.id];
+    const g = _guestPresence[_user.uid];
     if (g) { g.camOn = _guestCamOn; }
   }
 }
@@ -3354,9 +3392,9 @@ function _toggleGuestMic() {
   if (icon) icon.textContent = _guestMicOn ? '🎤' : '🔇';
   toast(_guestMicOn ? 'Mic on' : 'Mic muted');
   // Broadcast mic state so host and other viewers see the change
-  if (_user && _roomId) _rtBroadcast(`live-guests-${_roomId}`, 'guest-mic', { uid: _user.id, micOn: _guestMicOn }).catch(() => {});
+  if (_user && _roomId) _rtBroadcast(`live-guests-${_roomId}`, 'guest-mic', { uid: _user.uid, micOn: _guestMicOn }).catch(() => {});
   if (_user && _roomId) {
-    const g = _guestPresence[_user.id];
+    const g = _guestPresence[_user.uid];
     if (g) { g.micOn = _guestMicOn; }
   }
 }
@@ -3413,15 +3451,15 @@ function _guestDoLeave() {
   }
 
   // Broadcast departure so grid updates for everyone instantly.
-  if (_user && _roomId) {
+  if (_user?.uid && _roomId) {
     // Broadcast departure so everyone's grid updates instantly
-    _rtBroadcast(`live-guests-${_roomId}`, 'guest-leave', { uid: _user.id }).catch(() => {});
-    delete _guestPresence[_user.id];
-    // Clean up box request
-    const requestId = `${_roomId}_${_user.id}`;
-    supabase.from('box_requests').delete().eq('id', requestId).catch(() => {});
+    _rtBroadcast(`live-guests-${_roomId}`, 'guest-leave', { uid: _user.uid }).catch(() => {});
+    delete _guestPresence[_user.uid];
+    // Clean up box request in Firestore
+    const requestId = `${_roomId}_${_user.uid}`;
+    _fbDeleteDoc(_fbDoc(_fbDb, 'box_requests', requestId)).catch(() => {});
     // Signal host to remove via guest-sig channel
-    _rtBroadcast(`live-guest-sig-${_roomId}`, 'guest-leave', { uid: _user.id }).catch(() => {});
+    _rtBroadcast(`live-guest-sig-${_roomId}`, 'guest-leave', { uid: _user.uid }).catch(() => {});
   }
 
   // Stop local guest media tracks
@@ -3493,7 +3531,7 @@ async function _guestJoinAsViewer() {
   const _waitForOffer = () => new Promise((resolve, reject) => {
     const _to = setTimeout(() => reject(new Error('offer timeout')), MAX_WAIT);
     const _unsub = _rtListen(guestSigCh, 'guest-offer', (payload) => {
-      if (payload.guestUid !== _user.id) return;
+      if (payload.guestUid !== _user.uid) return;
       clearTimeout(_to);
       try { _unsub(); } catch(_) {}
       resolve(payload);
@@ -3515,7 +3553,7 @@ async function _guestJoinAsViewer() {
   guestPc.onicecandidate = async (e) => {
     if (!e.candidate) return;
     if (!_answerWritten) { _pendingCands.push(e.candidate.toJSON()); return; }
-    try { await _rtBroadcast(guestSigCh, 'guest-candidate', { guestUid: _user.id, from: 'guest', candidate: e.candidate.toJSON() }); } catch(_) {}
+    try { await _rtBroadcast(guestSigCh, 'guest-candidate', { guestUid: _user.uid, from: 'guest', candidate: e.candidate.toJSON() }); } catch(_) {}
   };
 
   try {
@@ -3526,20 +3564,20 @@ async function _guestJoinAsViewer() {
   await guestPc.setLocalDescription(answer);
 
   try {
-    await _rtBroadcast(guestSigCh, 'guest-answer', { guestUid: _user.id, answer: { type: answer.type, sdp: answer.sdp } });
+    await _rtBroadcast(guestSigCh, 'guest-answer', { guestUid: _user.uid, answer: { type: answer.type, sdp: answer.sdp } });
     _answerWritten = true;
   } catch(e) { toast('Connection error.'); guestPc.close(); guestStream.getTracks().forEach(t=>t.stop()); return; }
 
   // Flush pending candidates
   for (const c of _pendingCands) {
-    try { await _rtBroadcast(guestSigCh, 'guest-candidate', { guestUid: _user.id, from: 'guest', candidate: c }); } catch(_) {}
+    try { await _rtBroadcast(guestSigCh, 'guest-candidate', { guestUid: _user.uid, from: 'guest', candidate: c }); } catch(_) {}
   }
   _pendingCands.length = 0;
 
   // Listen for more host ICE candidates — store unsub so _guestDoLeave can clean up
   if (_guestSigUnsub) { try { _guestSigUnsub(); } catch(_) {} _guestSigUnsub = null; }
   _guestSigUnsub = _rtListen(guestSigCh, 'guest-candidate', async (payload) => {
-    if (payload.guestUid !== _user.id || payload.from !== 'host') return;
+    if (payload.guestUid !== _user.uid || payload.from !== 'host') return;
     try { await guestPc.addIceCandidate(new RTCIceCandidate(payload.candidate)); } catch(_) {}
   });
 
@@ -3549,10 +3587,10 @@ async function _guestJoinAsViewer() {
   // ── Publish own presence via Broadcast so everyone (incl. self) sees this box ──
   const guestName   = _userData?.display_name || _userData?.displayName || _user.email?.split('@')[0] || 'Guest';
   const guestAvatar = _userData?.avatar || _userData?.profile_picture || _userData?.profilePicture || '';
-  _guestPresence[_user.id] = { uid: _user.id, name: guestName, avatar: guestAvatar, camOn: true, micOn: true, joinedAt: Date.now(), hb: Date.now() };
+  _guestPresence[_user.uid] = { uid: _user.uid, name: guestName, avatar: guestAvatar, camOn: true, micOn: true, joinedAt: Date.now(), hb: Date.now() };
   try {
     await _rtBroadcast(`live-guests-${_roomId}`, 'guest-join', {
-      uid: _user.id, name: guestName, avatar: guestAvatar, camOn: true, micOn: true, joinedAt: Date.now(),
+      uid: _user.uid, name: guestName, avatar: guestAvatar, camOn: true, micOn: true, joinedAt: Date.now(),
     });
   } catch(_) {}
 
@@ -3561,8 +3599,8 @@ async function _guestJoinAsViewer() {
   _guestHeartbeatInterval = setInterval(() => {
     if (!_user || !_roomId || !_guestStream) { clearInterval(_guestHeartbeatInterval); return; }
     const hb = Date.now();
-    if (_guestPresence[_user.id]) _guestPresence[_user.id].hb = hb;
-    _rtBroadcast(`live-guests-${_roomId}`, 'guest-hb', { uid: _user.id, hb }).catch(() => {});
+    if (_guestPresence[_user.uid]) _guestPresence[_user.uid].hb = hb;
+    _rtBroadcast(`live-guests-${_roomId}`, 'guest-hb', { uid: _user.uid, hb }).catch(() => {});
   }, _HEARTBEAT_INTERVAL_MS);
 
   // ── Subscribe to full guest grid (viewer sees all boxes including own) ──
@@ -3594,7 +3632,7 @@ async function _guestJoinAsViewer() {
   // can tear it down and prevent it from firing again on a future rejoin.
   if (_guestRemovedUnsub) { try { _guestRemovedUnsub(); } catch(_) {} _guestRemovedUnsub = null; }
   _guestRemovedUnsub = _rtListen(`live-guest-sig-${_roomId}`, 'guest-removed', (payload) => {
-    if (payload.guestUid !== _user.id) return;
+    if (payload.guestUid !== _user.uid) return;
     // Unsubscribe immediately so it only fires once
     if (_guestRemovedUnsub) { try { _guestRemovedUnsub(); } catch(_) {} _guestRemovedUnsub = null; }
     toast('The host removed you from the guest box.');
@@ -3631,8 +3669,8 @@ async function _guestJoinAsViewer() {
         try { guestPc.close(); } catch(_) {}
         if (_guestStream) { try { _guestStream.getTracks().forEach(t => t.stop()); } catch(_) {} _guestStream = null; }
         if (_user && _roomId) {
-          delete _guestPresence[_user.id];
-          _rtBroadcast(`live-guests-${_roomId}`, 'guest-leave', { uid: _user.id }).catch(() => {});
+          delete _guestPresence[_user.uid];
+          _rtBroadcast(`live-guests-${_roomId}`, 'guest-leave', { uid: _user.uid }).catch(() => {});
         }
         // Re-submit a fresh box request to trigger the full rejoin flow
         await _viewerRequestBox();
@@ -3714,37 +3752,65 @@ function _hostListenForGuestRequests() {
   // Start the stale-guest watchdog — cleans up ghost boxes every 10 s
   _startHostGuestWatchdog();
 
-  // ── Supabase Realtime: listen for new/updated box_requests rows ──
-  const reqChannel = supabase
-    .channel(`host-box-requests-${_roomId}`)
-    .on('postgres_changes', {
-      event: '*',
-      schema: 'public',
-      table: 'box_requests',
-      filter: `room_id=eq.${_roomId}`,
-    }, (payload) => {
-      const d = payload.new;
-      if (!d || d.status !== 'pending') return;
-      const viewerId = d.viewer_uid;
-      console.log('[BoxRequest] Request received by host from viewer:', viewerId, 'name:', d.viewer_name);
-      if (_shownReqUids.has(viewerId) && !_guestPeers[viewerId]) {
-        _shownReqUids.delete(viewerId);
+  // ── Firestore + Broadcast: listen for new box_requests for this room ──
+  // Use Supabase Broadcast for real-time guest-request signals,
+  // with Firestore onSnapshot as the source-of-truth fallback.
+
+  // Broadcast listener (fast path) — viewer sends 'guest-request' on guest-sig channel
+  const sigCh = _getChannel(`live-guest-sig-${_roomId}`);
+  sigCh.on('broadcast', { event: 'guest-request' }, (msg) => {
+    const d = msg.payload || {};
+    if (!d.uid || d.status !== 'pending') return;
+    console.log('[BoxRequest] Request received by host (broadcast) from viewer:', d.uid, 'name:', d.name);
+    if (_shownReqUids.has(d.uid) && !_guestPeers[d.uid]) {
+      _shownReqUids.delete(d.uid);
+    }
+    if (!_shownReqUids.has(d.uid)) {
+      _shownReqUids.add(d.uid);
+      _hostShowRequestCard({
+        uid:       d.uid,
+        name:      d.name || 'Guest',
+        avatar:    d.avatar || '',
+        requestId: d.requestId || `${_roomId}_${d.uid}`,
+        status:    'pending',
+      });
+    }
+  });
+
+  // Firestore onSnapshot fallback — catches requests from viewers who may have missed the broadcast
+  const reqQ = _fbQuery(
+    _fbCollection(_fbDb, 'box_requests'),
+    _fbWhere('room_id', '==', _roomId),
+    _fbWhere('status', '==', 'pending'),
+  );
+
+  let _reqInitialSeed = true;
+  const _reqUnsub = _fbOnSnapshot(reqQ, snap => {
+    if (_reqInitialSeed) { _reqInitialSeed = false; return; } // skip initial snapshot
+    snap.docChanges().forEach(change => {
+      if (change.type !== 'added') return;
+      const d = change.doc.data();
+      if (!d.viewer_uid) return;
+      console.log('[BoxRequest] Request received by host (Firestore) from viewer:', d.viewer_uid, 'name:', d.viewer_name);
+      if (_shownReqUids.has(d.viewer_uid) && !_guestPeers[d.viewer_uid]) {
+        _shownReqUids.delete(d.viewer_uid);
       }
-      if (!_shownReqUids.has(viewerId)) {
-        _shownReqUids.add(viewerId);
+      if (!_shownReqUids.has(d.viewer_uid)) {
+        _shownReqUids.add(d.viewer_uid);
         _hostShowRequestCard({
-          uid:       viewerId,
-          name:      d.viewer_name,
+          uid:       d.viewer_uid,
+          name:      d.viewer_name || 'Guest',
           avatar:    '',
-          requestId: d.id,
+          requestId: d.id || `${_roomId}_${d.viewer_uid}`,
           status:    'pending',
         });
       }
-    })
-    .subscribe();
+    });
+  }, () => { /* swallow errors */ });
 
   _guestReqUnsub = () => {
-    try { supabase.removeChannel(reqChannel); } catch(_) {}
+    _reqUnsub();
+    _removeChannel(`live-guest-sig-${_roomId}`);
     _shownReqUids.clear();
   };
 }
@@ -3828,9 +3894,9 @@ async function _hostAcceptGuest(req) {
 
   console.log('[BoxRequest] Host accepting guest:', guestUid, 'name:', req.name);
 
-  // ── Update Supabase box_requests status to "accepted" ──
+  // ── Update Firestore box_requests status to "accepted" ──
   try {
-    await supabase.from('box_requests').update({ status: 'accepted' }).eq('id', requestId);
+    await _fbUpdateDoc(_fbDoc(_fbDb, 'box_requests', requestId), { status: 'accepted', updated_at: _fbServerTs() });
     console.log('[BoxRequest] box_requests status → accepted');
   } catch (e) {
     console.error('[BoxRequest] Could not update box_requests (accepted):', e);
@@ -3925,16 +3991,16 @@ async function _hostDeclineGuest(guestUid, requestId) {
   const reqId = requestId || `${_roomId}_${guestUid}`;
   console.log('[BoxRequest] Host declining guest:', guestUid);
 
-  // ── Update Supabase box_requests status to "declined" then clean up after 5s ──
+  // ── Update Firestore box_requests status to "declined" then clean up after 5 s ──
   try {
-    await supabase.from('box_requests').update({ status: 'declined' }).eq('id', reqId);
+    await _fbUpdateDoc(_fbDoc(_fbDb, 'box_requests', reqId), { status: 'declined', updated_at: _fbServerTs() });
     console.log('[BoxRequest] box_requests status → declined, viewer will be notified');
   } catch (e) {
     console.error('[BoxRequest] Could not update box_requests (declined):', e);
   }
 
   setTimeout(async () => {
-    try { await supabase.from('box_requests').delete().eq('id', reqId); } catch(_) {}
+    try { await _fbDeleteDoc(_fbDoc(_fbDb, 'box_requests', reqId)); } catch(_) {}
   }, 5000);
 }
 
@@ -4059,7 +4125,7 @@ function _addHostCellToGrid() {
 
   const nameEl = document.createElement('div');
   nameEl.className = 'guest-cell-name';
-  nameEl.textContent = snxGetDisplayName(_userData, _user) + ' (You)';
+  nameEl.textContent = _getDisplayName(_userData, _user) + ' (You)';
   cell.appendChild(nameEl);
 
   grid.insertBefore(cell, grid.firstChild);
@@ -4136,9 +4202,9 @@ function _hostDoRemoveGuest(uid) {
   // Remove guest presence via Broadcast so viewers' grids update instantly
   delete _guestPresence[uid];
   _rtBroadcast(`live-guests-${_roomId}`, 'guest-leave', { uid }).catch(() => {});
-  // Clean up Supabase box_request
+  // Clean up Firestore box_request
   const requestId = `${_roomId}_${uid}`;
-  try { supabase.from('box_requests').delete().eq('id', requestId).catch(() => {}); } catch(_) {}
+  _fbDeleteDoc(_fbDoc(_fbDb, 'box_requests', requestId)).catch(() => {});
 
   const grid = D.guestGrid;
   if (!grid) return;
@@ -4208,9 +4274,11 @@ function _teardownAllGuestPeers() {
     D.guestGrid.classList.remove('has-guests');
     D.guestGrid.dataset.count = '0';
   }
-  // Clean up all pending Supabase box_requests for this room
+  // Clean up all pending Firestore box_requests for this room
   if (_roomId) {
-    supabase.from('box_requests').delete().eq('room_id', _roomId).catch(() => {});
+    _fbGetDocs(_fbQuery(_fbCollection(_fbDb, 'box_requests'), _fbWhere('room_id', '==', _roomId)))
+      .then(snap => snap.forEach(d => _fbDeleteDoc(d.ref).catch(() => {})))
+      .catch(() => {});
     // Clear in-memory guest presence
     for (const uid of Object.keys(_guestPresence)) { delete _guestPresence[uid]; }
   }
@@ -4746,42 +4814,38 @@ function _aiSafetyStartMonitor() {
   _aiSafetyStopMonitor();
   if (!_roomId || _mode !== 'creator') return;
 
-  // Subscribe to new live_messages via Supabase Realtime postgres_changes
-  // Seed seen IDs first from the last 50 messages so we don't alert on history
-  supabase
-    .from('live_messages')
-    .select('id')
-    .eq('room_id', _roomId)
-    .order('created_at', { ascending: false })
-    .limit(50)
-    .then(({ data }) => {
-      if (data) data.forEach(r => _aiSafetySeenIds.add(r.id));
-    });
+  // Use Firestore onSnapshot — seeded with initial snapshot IDs so history is skipped
+  let _initialSeed = true;
 
-  const aiChannel = supabase
-    .channel(`ai-safety-chat-${_roomId}`)
-    .on('postgres_changes', {
-      event: 'INSERT',
-      schema: 'public',
-      table: 'live_messages',
-      filter: `room_id=eq.${_roomId}`,
-    }, (payload) => {
-      const d = payload.new;
-      if (!d) return;
-      const msgId = d.id;
+  const aiQ = _fbQuery(
+    _fbCollection(_fbDb, 'live_messages'),
+    _fbWhere('room_id', '==', _roomId),
+    _fbOrderBy('created_at', 'asc'),
+    _fbLimit(50),
+  );
+
+  const _unsub = _fbOnSnapshot(aiQ, snap => {
+    if (_initialSeed) {
+      // First snapshot: seed all existing IDs so we don't alert on history
+      _initialSeed = false;
+      snap.docs.forEach(d => _aiSafetySeenIds.add(d.id));
+      return;
+    }
+    snap.docChanges().forEach(change => {
+      if (change.type !== 'added') return;
+      const d = change.doc.data();
+      const msgId = change.doc.id;
       if (_aiSafetySeenIds.has(msgId)) return;
       _aiSafetySeenIds.add(msgId);
       if (d.type === 'system') return;
-      if (d.user_id === _user?.id) return;
+      if (d.user_id === _user?.uid) return;
       const hit = _liveScanText(d.text || '');
       if (!hit) return;
       _aiSafetyShowWarning(hit, { text: d.text, userName: d.user_name, userId: d.user_id }, msgId);
-    })
-    .subscribe();
+    });
+  }, () => { /* swallow errors silently */ });
 
-  _aiSafetyChatUnsub = () => {
-    try { supabase.removeChannel(aiChannel); } catch(_) {}
-  };
+  _aiSafetyChatUnsub = _unsub;
 }
 
 /* Show the private warning popup to the host */
@@ -4841,12 +4905,13 @@ function _aiSafetyShowWarning(rule, msgData, docId) {
       if (action === 'warn') {
         // Send a system warning message visible to everyone in chat
         try {
-          await supabase.from('live_messages').insert({
+          await _fbAddDoc(_fbCollection(_fbDb, 'live_messages'), {
             room_id:    _roomId,
-            user_id:    _user.id,
+            user_id:    'safety_bot',
             user_name:  'Safety Bot',
             text:       `⚠️ Please keep the community safe and respectful.`,
             type:       'system',
+            created_at: _fbServerTs(),
           });
         } catch(_) {}
         toast('⚠️ Warning sent to chat.');
@@ -4854,10 +4919,9 @@ function _aiSafetyShowWarning(rule, msgData, docId) {
       }
 
       if (action === 'delete') {
-        // Delete the flagged message from Supabase
+        // Delete the flagged message from Firestore
         try {
-          const { error } = await supabase.from('live_messages').delete().eq('id', docId);
-          if (error) throw error;
+          await _fbDeleteDoc(_fbDoc(_fbDb, 'live_messages', docId));
           toast('🗑 Comment removed.');
         } catch(_) {
           toast('Could not remove comment.');
@@ -4881,10 +4945,8 @@ function _aiSafetyShowWarning(rule, msgData, docId) {
         if (_guestPeers[msgUserId]) {
           _hostDoRemoveGuest(msgUserId);
         }
-        // Delete the flagged message as well
-        try {
-          await supabase.from('live_messages').delete().eq('id', docId);
-        } catch(_) {}
+        // Delete the flagged message from Firestore
+        _fbDeleteDoc(_fbDoc(_fbDb, 'live_messages', docId)).catch(() => {});
         toast('🚫 Guest removed.');
       }
     });
@@ -4996,12 +5058,13 @@ async function _shadowBotPost() {
   ];
 
   try {
-    await supabase.from('live_messages').insert({
-      room_id:   _roomId,
-      user_id:   'shadow_bot',
-      user_name: 'Shadow Bot',
-      text:      msg,
-      type:      'system',
+    await _fbAddDoc(_fbCollection(_fbDb, 'live_messages'), {
+      room_id:    _roomId,
+      user_id:    'shadow_bot',
+      user_name:  'Shadow Bot',
+      text:       msg,
+      type:       'system',
+      created_at: _fbServerTs(),
     });
   } catch(_) {}
 }

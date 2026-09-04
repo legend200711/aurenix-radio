@@ -3,13 +3,20 @@
  * aurenix-media.js
  *
  * Real backend-connected media section:
- *  - Video/audio upload to Supabase Storage
- *  - Browse/search media items
- *  - Views, likes, comments
+ *  - Video/audio upload to Supabase Storage `aurenix-media` (STAYS Supabase — do not change)
+ *  - Browse/search media items (Firestore `media_files`)
+ *  - Views, likes, comments (Firestore `media_comments`)
  *  - Admin moderation
  */
 
-import { supabase, getUser } from './supabase-client.js';
+/* Supabase client kept for `aurenix-media` Storage bucket ONLY */
+import { supabase } from './supabase-client.js';
+import {
+  db, doc, getDoc, setDoc, updateDoc, addDoc, deleteDoc,
+  collection, query, where, orderBy, limit, getDocs, onSnapshot,
+  serverTimestamp, increment,
+} from './firebase-client.js';
+import { auth as _fbAuth } from './firebase-client.js';
 
 let _mounted  = false;
 let _user     = null;
@@ -19,6 +26,8 @@ const PAGE_SIZE = 12;
 
 window.addEventListener('aurenix:authchange', (e) => {
   _user = e.detail.user;
+  // Normalise: Firebase user uses .uid; keep backward compat via .id alias
+  if (_user && !_user.id) _user.id = _user.uid;
 });
 
 window.addEventListener('aurenix:navigate', (e) => {
@@ -188,25 +197,30 @@ async function loadFeed(page = 0, search = '', append = false) {
   }
 
   try {
-    let query = supabase
-      .from('media_files')
-      .select('id, title, description, file_name, owner_uid, file_type, url, views, likes, uploaded_at')
-      .eq('status', 'approved')
-      .order('uploaded_at', { ascending: false })
-      .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+    let q = query(
+      collection(db, 'media_files'),
+      where('status', '==', 'approved'),
+      orderBy('uploaded_at', 'desc'),
+      limit(PAGE_SIZE + 1), // fetch one extra to detect if there are more pages
+    );
 
+    const snap = await getDocs(q);
+    let docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    // Client-side search filter (Firestore doesn't support ilike)
     if (search.trim()) {
-      query = query.ilike('title', `%${search.trim()}%`);
+      const s = search.trim().toLowerCase();
+      docs = docs.filter(d => (d.title || '').toLowerCase().includes(s));
     }
 
-    const { data, error } = await query;
-    if (error) throw error;
+    const hasMore = docs.length > PAGE_SIZE;
+    const data = hasMore ? docs.slice(0, PAGE_SIZE) : docs;
 
     const loadMore = document.getElementById('media-load-more');
-    if (loadMore) loadMore.style.display = (data && data.length === PAGE_SIZE) ? '' : 'none';
+    if (loadMore) loadMore.style.display = hasMore ? '' : 'none';
 
     if (!append) grid.innerHTML = '';
-    if (!data || !data.length) {
+    if (!data.length) {
       if (!append) grid.innerHTML = `
         <div style="padding:60px 24px; text-align:center; color:var(--text-muted);">
           <div style="font-size:40px; margin-bottom:14px;">▶</div>
@@ -269,15 +283,15 @@ async function openViewer(item) {
   modal.style.display = 'flex';
   document.body.style.overflow = 'hidden';
 
-  // Increment view count (fire and forget)
-  supabase.rpc('increment_media_views', { item_id: item.id }).catch(() => {});
+  // Increment view count in Firestore (fire and forget)
+  updateDoc(doc(db, 'media_files', item.id), { views: increment(1) }).catch(() => {});
 
-  // Fetch full item with url — real DB uses 'url' column in 'media_files'
+  // Fetch full item with url from Firestore if not already present
   let mediaUrl = item.url || '';
   if (!mediaUrl) {
     try {
-      const { data } = await supabase.from('media_files').select('url').eq('id', item.id).single();
-      mediaUrl = data?.url || '';
+      const snap = await getDoc(doc(db, 'media_files', item.id));
+      mediaUrl = snap.exists() ? (snap.data().url || '') : '';
     } catch(_) {}
   }
 
@@ -317,7 +331,7 @@ async function openViewer(item) {
       likeBtn.dataset.liked = 'true';
       const current = parseInt(likeBtn.textContent.replace(/\D/g,'')) || 0;
       likeBtn.textContent = `♥ ${current + 1}`;
-      await supabase.from('media_files').update({ likes: current + 1 }).eq('id', item.id).catch(() => {});
+      await updateDoc(doc(db, 'media_files', item.id), { likes: increment(1) }).catch(() => {});
     });
   }
 
@@ -347,13 +361,17 @@ async function loadComments(itemId, container) {
       const text = input?.value?.trim();
       if (!text) return;
       const profile = window.AURENIX_AUTH?.getProfile();
-      const { error } = await supabase.from('media_comments').insert({
-        media_id: itemId,
-        user_id: _user.id,
-        user_name: profile?.display_name || _user.email?.split('@')[0] || 'User',
-        text,
-      });
-      if (!error) { if (input) input.value = ''; loadCommentList(itemId); }
+      try {
+        await addDoc(collection(db, 'media_comments'), {
+          media_id:   itemId,
+          user_id:    _user.uid,
+          user_name:  profile?.display_name || _user.email?.split('@')[0] || 'User',
+          text,
+          created_at: serverTimestamp(),
+        });
+        if (input) input.value = '';
+        loadCommentList(itemId);
+      } catch(_) {}
     });
   }
   loadCommentList(itemId);
@@ -363,12 +381,10 @@ async function loadCommentList(itemId) {
   const list = document.getElementById('viewer-comment-list');
   if (!list) return;
   try {
-    const { data } = await supabase.from('media_comments')
-      .select('id, user_name, text, created_at')
-      .eq('media_id', itemId)
-      .order('created_at', { ascending: false })
-      .limit(20);
-    if (!data || !data.length) { list.innerHTML = '<div style="color:var(--text-muted); font-size:13px;">No comments yet.</div>'; return; }
+    const q = query(collection(db, 'media_comments'), where('media_id', '==', itemId), orderBy('created_at', 'desc'), limit(20));
+    const snap = await getDocs(q);
+    const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (!data.length) { list.innerHTML = '<div style="color:var(--text-muted); font-size:13px;">No comments yet.</div>'; return; }
     list.innerHTML = data.map(c => `
       <div style="padding:8px 0; border-bottom:1px solid rgba(74,69,96,0.2);">
         <div style="display:flex; align-items:baseline; gap:8px; margin-bottom:2px;">
@@ -420,7 +436,7 @@ async function handleMediaUpload() {
 
   try {
     const profile = window.AURENIX_AUTH?.getProfile();
-    const uid     = _user.id;
+    const uid     = _user.uid;
     const ext     = file.name.split('.').pop()?.toLowerCase() || 'mp4';
     const mtype   = file.type.startsWith('audio/') ? 'audio' : 'video';
     const storagePath = `media/${uid}/${Date.now()}.${ext}`;
@@ -451,8 +467,8 @@ async function handleMediaUpload() {
 
     barEl.style.width = '90%'; pctEl.textContent = '90%';
 
-    // Insert metadata row — use real media_files schema
-    const { error: insertErr } = await supabase.from('media_files').insert({
+    // Insert metadata into Firestore media_files collection
+    await addDoc(collection(db, 'media_files'), {
       title,
       description:   desc,
       owner_uid:     uid,
@@ -465,8 +481,8 @@ async function handleMediaUpload() {
       status:        'approved', // auto-approved for now; admins can remove
       views:         0,
       likes:         0,
+      uploaded_at:   serverTimestamp(),
     });
-    if (insertErr) throw insertErr;
 
     barEl.style.width = '100%'; pctEl.textContent = '100%';
     showUploadStatus(statusEl, 'success', '✓ Media uploaded successfully!');
