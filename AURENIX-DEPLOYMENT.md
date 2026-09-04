@@ -42,14 +42,23 @@ const SUPABASE_ANON_KEY = 'YOUR_ANON_KEY';
 
 ### 2. Supabase Storage Buckets
 
-Create two buckets in **Storage**:
+Run **`aurenix-radio-storage.sql`** in the Supabase SQL Editor. It will:
 
-| Bucket | Public | Max Size | MIME Types |
-|--------|--------|----------|------------|
-| `aurenix-media` | ✓ | 200 MB | `video/*, audio/*, image/*` |
-| `aurenix-radio` | ✓ | 50 MB | `audio/*` |
+- Create the `aurenix-radio` bucket (50 MB, audio/* types, **private**)
+- Create the `aurenix-media` bucket (200 MB, video/audio/image, **private**)
+- Apply all Storage RLS policies
+- Add `storage_bucket` and `storage_path` columns to `radio_queue`
+- Tighten `radio_queue` INSERT policy (file uploads require authentication)
 
-Storage policies are already applied by `AURENIX-RUN-IN-SUPABASE.sql` — no additional SQL needed.
+| Bucket | Public | Max Size | Used by |
+|--------|--------|----------|---------|
+| `aurenix-radio` | ✗ (private) | 50 MB | Radio audio submissions |
+| `aurenix-media` | ✗ (private) | 200 MB | Media uploads |
+
+> **Important:** Both buckets are **private** (not globally public). Uploaded files
+> are stored under `<user_id>/<timestamp>.<ext>`. Only authenticated users can read
+> their own files. Public playback of approved tracks is served via the stored URL.
+> Do **not** make these buckets globally public — that would expose pending/rejected audio.
 
 ### 3. Admin Account
 

@@ -304,16 +304,25 @@
 
           <div id="rsub-file-group-s">
             <div class="field-group">
-              <label class="field-label">Audio File</label>
-              <div id="rsub-file-drop-s"
-                style="border:1px dashed var(--border-metal); border-radius:var(--radius); padding:22px; text-align:center; cursor:pointer;"
-                role="button" aria-label="Click to select or drop audio file">
-                <div style="font-size:26px; margin-bottom:6px;">🎵</div>
-                <div style="font-size:12px; color:var(--text-dim);" id="rsub-filename-s">Click to select or drop audio file</div>
-                <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">MP3, WAV, AAC, FLAC (max 50 MB)</div>
+                <label class="field-label">Audio File</label>
+                <div id="rsub-file-drop-s"
+                  style="border:1px dashed var(--border-metal); border-radius:var(--radius); padding:22px; text-align:center; cursor:pointer;"
+                  role="button" aria-label="Click to select or drop audio file">
+                  <div style="font-size:26px; margin-bottom:6px;">🎵</div>
+                  <div style="font-size:12px; color:var(--text-dim);" id="rsub-filename-s">Click to select or drop audio file</div>
+                  <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">MP3, WAV, AAC, FLAC (max 50 MB)</div>
+                </div>
+                <input type="file" id="rsub-file-s" accept="audio/*" style="display:none;" aria-label="Select audio file">
+                <!-- Upload progress bar (hidden until upload begins) -->
+                <div id="rsub-upload-progress-s" style="display:none; margin-top:10px;">
+                  <div style="font-size:11px; color:var(--text-dim); margin-bottom:5px; display:flex; justify-content:space-between;">
+                    <span>Uploading…</span><span id="rsub-progress-pct-s">0%</span>
+                  </div>
+                  <div style="height:4px; background:var(--border); border-radius:2px; overflow:hidden;">
+                    <div id="rsub-progress-fill-s" style="height:100%; width:0%; background:var(--gold); transition:width 0.2s;"></div>
+                  </div>
+                </div>
               </div>
-              <input type="file" id="rsub-file-s" accept="audio/*" style="display:none;" aria-label="Select audio file">
-            </div>
           </div>
 
           <div class="hidden" id="rsub-url-group-s">
@@ -340,9 +349,10 @@
           </div>
 
           <div style="background:rgba(184,134,11,0.06); border:1px solid rgba(184,134,11,0.15); border-radius:var(--radius); padding:10px 12px; margin-bottom:16px; font-size:11px; color:var(--text-dim); line-height:1.6;">
-            ⚠️ By submitting you confirm ownership or rights to share this content.
-            All submissions are moderated before entering the public queue.
-            YouTube links use official embed playback only.
+            <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer;">
+              <input type="checkbox" id="rsub-rights-s" style="margin-top:2px; accent-color:var(--gold);" aria-required="true">
+              <span>⚠️ I confirm I own or have the right to share this content. All submissions are moderated before entering the public queue. YouTube links use official embed playback only.</span>
+            </label>
           </div>
 
           <div id="rsub-status-s" style="display:none; padding:10px 12px; border-radius:var(--radius); margin-bottom:12px; font-size:13px;"></div>
@@ -567,6 +577,8 @@ window.moderateItem = async function(id, action) {
 };
 
 /* ── Submit form ── */
+const RADIO_BUCKET = 'aurenix-radio';
+
 const submitBtn = $('rsub-submit-btn-s');
 if (submitBtn) {
   submitBtn.addEventListener('click', async () => {
@@ -574,15 +586,24 @@ if (submitBtn) {
     const title = ($('rsub-title-s')?.value || '').trim();
     const artist = ($('rsub-artist-s')?.value || '').trim();
     const notes  = ($('rsub-notes-s')?.value || '').trim();
+    const rights = $('rsub-rights-s')?.checked || false;
     const statusDiv = $('rsub-status-s');
 
     if (!title) { showStatus(statusDiv, 'error', 'Track title is required.'); return; }
+    if (!rights) { showStatus(statusDiv, 'error', 'Please confirm you have rights to submit this content.'); return; }
+
+    /* Require login for file uploads */
+    const { data: { session } } = await supabase.auth.getSession();
+    if (type === 'upload' && !session) {
+      showStatus(statusDiv, 'error', 'Please sign in to upload audio files.'); return;
+    }
 
     let url = '';
+    let storagePath = null;
+
     if (type === 'upload') {
       if (!fileInp?.files?.[0]) { showStatus(statusDiv, 'error', 'Please select an audio file.'); return; }
       if (fileInp.files[0].size > 50*1024*1024) { showStatus(statusDiv, 'error', 'File exceeds 50 MB.'); return; }
-      url = `[file:${fileInp.files[0].name}]`;
     } else {
       url = ($('rsub-url-s')?.value || '').trim();
       if (!url) { showStatus(statusDiv, 'error', 'Please enter a URL.'); return; }
@@ -592,21 +613,89 @@ if (submitBtn) {
     }
 
     submitBtn.disabled = true; submitBtn.textContent = 'Submitting…';
+
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const { error } = await supabase.from('radio_queue').insert({
-        title, artist: artist || 'Unknown Artist', type, url, notes,
-        status: 'pending', submitted_by: session?.user?.id || null,
-      });
-      if (error) throw error;
+      /* ── Step 1: Upload audio file to Storage (upload submissions only) ── */
+      if (type === 'upload') {
+        const file = fileInp.files[0];
+        const ext  = file.name.split('.').pop().toLowerCase() || 'mp3';
+        storagePath = `${session.user.id}/${Date.now()}.${ext}`;
+
+        const progWrap = $('rsub-upload-progress-s');
+        const progFill = $('rsub-progress-fill-s');
+        const progPct  = $('rsub-progress-pct-s');
+        if (progWrap) progWrap.style.display = '';
+
+        submitBtn.textContent = 'Uploading…';
+
+        const { error: upErr } = await supabase.storage
+          .from(RADIO_BUCKET)
+          .upload(storagePath, file, {
+            cacheControl: '3600',
+            upsert: false,
+            onUploadProgress: p => {
+              const pct = p.total ? Math.round((p.loaded / p.total) * 100) : 0;
+              if (progFill) progFill.style.width = pct + '%';
+              if (progPct)  progPct.textContent  = pct + '%';
+            },
+          });
+
+        if (upErr) {
+          console.error('[Radio] Storage upload error:', upErr);
+          if (progWrap) progWrap.style.display = 'none';
+          showStatus(statusDiv, 'error', 'Unable to upload your music. Please try again.');
+          submitBtn.disabled = false; submitBtn.textContent = '◉ Submit to AURENIX Radio';
+          return;
+        }
+
+        if (progFill) progFill.style.width = '100%';
+        if (progPct)  progPct.textContent  = '100%';
+
+        /* Get the storage URL for this file (not publicly readable yet — stored for admin use) */
+        const { data: urlData } = supabase.storage.from(RADIO_BUCKET).getPublicUrl(storagePath);
+        url = urlData?.publicUrl || '';
+
+        submitBtn.textContent = 'Saving…';
+        if (progWrap) progWrap.style.display = 'none';
+      }
+
+      /* ── Step 2: Insert submission record (only after successful upload) ── */
+      const row = {
+        title,
+        artist: artist || 'Unknown Artist',
+        type,
+        url,
+        notes,
+        status: 'pending',
+        submitted_by: session?.user?.id || null,
+      };
+      /* Persist storage path and bucket for reference */
+      if (storagePath) {
+        row.storage_bucket = RADIO_BUCKET;
+        row.storage_path   = storagePath;
+      }
+
+      const { error: insErr } = await supabase.from('radio_queue').insert(row);
+      if (insErr) {
+        /* Upload succeeded but DB insert failed — log clearly so we can fix orphaned file */
+        console.error('[Radio] DB insert error after upload (storagePath:', storagePath, '):', insErr);
+        if (storagePath) {
+          /* Best-effort cleanup of the orphaned uploaded file */
+          supabase.storage.from(RADIO_BUCKET).remove([storagePath]).catch(() => {});
+        }
+        throw insErr;
+      }
+
       submitBtn.disabled = false; submitBtn.textContent = '◉ Submit to AURENIX Radio';
       showStatus(statusDiv, 'success', '✓ Submitted! Your track is pending moderation.');
       ['rsub-title-s','rsub-artist-s','rsub-notes-s','rsub-url-s'].forEach(id => { const el = $(id); if (el) el.value = ''; });
       if (fileInp) fileInp.value = '';
       if (filenameLbl) filenameLbl.textContent = 'Click to select or drop audio file';
+      const rc = $('rsub-rights-s'); if (rc) rc.checked = false;
     } catch(e) {
+      console.error('[Radio] Submission error:', e);
       submitBtn.disabled = false; submitBtn.textContent = '◉ Submit to AURENIX Radio';
-      showStatus(statusDiv, 'error', 'Submission failed: ' + (e.message || 'Unknown error'));
+      showStatus(statusDiv, 'error', 'Submission failed: ' + (e.message || 'Please try again.'));
     }
   });
 }

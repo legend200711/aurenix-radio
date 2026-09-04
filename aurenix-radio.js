@@ -1602,7 +1602,7 @@ async function _handleSubmission() {
       const fileName = `${_currentUser.id}/${Date.now()}.${ext}`;
 
       const { data: upData, error: upErr } = await supabase.storage
-        .from('radio-audio')
+        .from('aurenix-radio')
         .upload(fileName, fileToUpload, {
           cacheControl: '3600',
           upsert: false,
@@ -1616,7 +1616,7 @@ async function _handleSubmission() {
       if (upErr) throw upErr;
 
       const { data: { publicUrl } } = supabase.storage
-        .from('radio-audio')
+        .from('aurenix-radio')
         .getPublicUrl(fileName);
       url = publicUrl;
       if (progWrap) progWrap.style.display = 'none';
