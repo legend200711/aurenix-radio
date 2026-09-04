@@ -1599,7 +1599,7 @@ async function _handleSubmission() {
       if (progWrap) progWrap.style.display = '';
 
       const ext      = fileToUpload.name.split('.').pop() || 'mp3';
-      const fileName = `${_currentUser.id}/${Date.now()}.${ext}`;
+      const fileName = `radio/${_currentUser.id}/${Date.now()}.${ext}`;
 
       const { data: upData, error: upErr } = await supabase.storage
         .from('aurenix-radio')
@@ -1620,6 +1620,29 @@ async function _handleSubmission() {
         .getPublicUrl(fileName);
       url = publicUrl;
       if (progWrap) progWrap.style.display = 'none';
+    }
+
+    // Ensure the authenticated user has a profile row in the users table.
+    // studio_queue_uid_fkey references users(uid/id), so the profile row must
+    // exist before the studio_queue INSERT is attempted.
+    {
+      const { data: existing } = await supabase
+        .from('users')
+        .select('id')
+        .eq('id', _currentUser.id)
+        .maybeSingle();
+
+      if (!existing) {
+        const handle = (_currentUser.email || '').split('@')[0].replace(/[^a-z0-9_]/gi, '_');
+        await supabase.from('users').upsert({
+          id:           _currentUser.id,
+          uid:          _currentUser.id,
+          email:        _currentUser.email || '',
+          display_name: handle,
+          username:     handle,
+          role:         'member',
+        }, { onConflict: 'id' });
+      }
     }
 
     const row = {

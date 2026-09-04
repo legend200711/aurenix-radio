@@ -97,26 +97,57 @@ export function onAuthChange(cb) {
  * @returns {Promise<Record<string, any> | null>}
  */
 export async function loadUserProfile(uid) {
+  // The canonical users table uses `id` as PK (references auth.users).
+  // Some deployments also have a `uid` column; try `id` first, fall back to `uid`.
   const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('id', uid)
+    .maybeSingle();
+  if (error) console.warn('[Supabase] loadUserProfile error:', error.message);
+  if (data) return data;
+
+  // Fallback for deployments where uid is the stored column
+  const { data: data2, error: err2 } = await supabase
     .from('users')
     .select('*')
     .eq('uid', uid)
     .maybeSingle();
-  if (error) console.warn('[Supabase] loadUserProfile error:', error.message);
-  return data;
+  if (err2) console.warn('[Supabase] loadUserProfile (uid fallback) error:', err2.message);
+  return data2 ?? null;
 }
 
 /**
  * Upsert (create-or-update) a user profile row.
- * @param {Record<string, any>} profile  — must include `uid`
+ * @param {Record<string, any>} profile  — must include `uid` or `id`
+ *
+ * The users table primary key is `id` (uuid references auth.users).
+ * Some callers pass `uid` instead of `id`; normalise both directions so
+ * the upsert always targets the correct PK column.
  */
 export async function upsertUserProfile(profile) {
-  // Map 'id' to 'uid' for compatibility with existing code that uses 'id'
-  if (profile.id && !profile.uid) { profile = { ...profile, uid: profile.id }; delete profile.id; }
+  // Normalise: whichever of `id` / `uid` is present, set both so the row
+  // lands correctly whether the live table uses `id` or `uid` as PK.
+  const authId = profile.id || profile.uid;
+  if (!authId) {
+    console.warn('[Supabase] upsertUserProfile: no id/uid provided');
+    return;
+  }
+  const normalised = { ...profile, id: authId, uid: authId };
+
+  // Try PK = 'id' first (canonical schema).  If the table was created with
+  // 'uid' as PK instead, the fallback below catches the conflict error.
   const { error } = await supabase
     .from('users')
-    .upsert(profile, { onConflict: 'uid' });
-  if (error) console.warn('[Supabase] upsertUserProfile error:', error.message);
+    .upsert(normalised, { onConflict: 'id' });
+
+  if (error) {
+    // Fallback: some deployments have uid as the unique/PK column.
+    const { error: err2 } = await supabase
+      .from('users')
+      .upsert(normalised, { onConflict: 'uid' });
+    if (err2) console.warn('[Supabase] upsertUserProfile error:', err2.message);
+  }
 }
 
 /**
