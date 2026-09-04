@@ -1,0 +1,167 @@
+// ═══════════════════════════════════════════════════════════════════
+// AURENIX — Firestore Security Rules
+// firestore.rules
+//
+// Deploy via Firebase CLI:
+//   firebase deploy --only firestore:rules
+//
+// Or paste into Firebase Console:
+//   https://console.firebase.google.com/project/remix-studio-4bf8a/firestore/rules
+//
+// Architecture:
+//   - Firebase Authentication is the sole identity provider
+//   - The ONLY administrator is christijerina46@gmail.com
+//   - Users cannot elevate their own permissions
+//   - Public listeners can read approved/playing station state
+// ═══════════════════════════════════════════════════════════════════
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ────────────────────────────────────────────────────────────
+    // HELPERS
+    // ────────────────────────────────────────────────────────────
+
+    // Returns true only for the verified administrator account.
+    // emailVerified is checked so the account cannot be spoofed
+    // by someone who only knows the email address.
+    function isAdmin() {
+      return request.auth != null
+          && request.auth.token.email == 'christijerina46@gmail.com'
+          && request.auth.token.email_verified == true;
+    }
+
+    // Returns true when the requesting user is authenticated.
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Returns true when the requesting user owns this document.
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // USERS — /users/{uid}
+    // ────────────────────────────────────────────────────────────
+    match /users/{uid} {
+      // Anyone can read public profiles
+      allow read: if true;
+
+      // Users can create/update their own profile
+      allow create: if isOwner(uid);
+
+      // Users can update their own profile, but cannot change their role
+      // unless they are the admin. Admin can update any profile.
+      allow update: if isAdmin()
+                    || (isOwner(uid)
+                        && !('role' in request.resource.data)
+                        // Prevent self-elevation: role field must not change
+                        // (if it IS present it must match existing role)
+                        || (isOwner(uid)
+                            && request.resource.data.role == resource.data.role));
+
+      allow delete: if isAdmin();
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // RADIO SUBMISSIONS — /radio_submissions/{submissionId}
+    // ────────────────────────────────────────────────────────────
+    match /radio_submissions/{submissionId} {
+
+      // Public can only read APPROVED or PLAYING submissions
+      allow read: if resource.data.status == 'approved'
+                  || resource.data.status == 'playing'
+                  || isAdmin()
+                  || (isSignedIn() && resource.data.submitted_by == request.auth.uid);
+
+      // Authenticated users can create their own submissions.
+      // Status MUST be 'pending' on create — users cannot self-approve.
+      allow create: if isSignedIn()
+                    && request.resource.data.submitted_by == request.auth.uid
+                    && request.resource.data.status == 'pending';
+
+      // Users can update their OWN PENDING submissions (metadata only).
+      // They CANNOT change: status, submitted_by, rights_confirmed.
+      allow update: if isAdmin()
+                    || (isSignedIn()
+                        && resource.data.submitted_by == request.auth.uid
+                        && resource.data.status == 'pending'
+                        && request.resource.data.status == 'pending'
+                        && request.resource.data.submitted_by == resource.data.submitted_by
+                        && request.resource.data.rights_confirmed == resource.data.rights_confirmed);
+
+      // Only admin can delete submissions
+      allow delete: if isAdmin();
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // RADIO STATION — /radio_station/live
+    // This is a singleton document: id is always 'live'.
+    // ────────────────────────────────────────────────────────────
+    match /radio_station/{docId} {
+      // All visitors (including unauthenticated) can read station state.
+      // This is required for the public radio player.
+      allow read: if true;
+
+      // Only write through the Firebase client's advanceStation() function,
+      // which uses a server-side transaction with race-condition guards.
+      // The station can only be advanced if you're signed in (any listener
+      // can act as the station clock, but not anonymous visitors).
+      // Admin can always write.
+      allow write: if isAdmin() || isSignedIn();
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // COPYRIGHT REPORTS — /radio_reports/{reportId}
+    // ────────────────────────────────────────────────────────────
+    match /radio_reports/{reportId} {
+      // Only admin can read reports (contact info is sensitive)
+      allow read: if isAdmin();
+
+      // Anyone (including unauthenticated) can submit a report.
+      // This matches the open-report behaviour from the Supabase RLS.
+      allow create: if true;
+
+      // Only admin can update (resolve/takedown) reports
+      allow update: if isAdmin();
+
+      allow delete: if isAdmin();
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // RADIO PLAYS — /radio_plays/{playId}  (anonymous play tracking)
+    // ────────────────────────────────────────────────────────────
+    match /radio_plays/{playId} {
+      // Only admin can read play history
+      allow read: if isAdmin();
+
+      // Anyone (signed in or anonymous) can log a play
+      allow create: if true;
+
+      // No updates or deletes by non-admins
+      allow update, delete: if isAdmin();
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // MODERATION LOGS — /moderation_logs/{logId}
+    // Written by admin actions, never by users.
+    // ────────────────────────────────────────────────────────────
+    match /moderation_logs/{logId} {
+      allow read:   if isAdmin();
+      allow write:  if isAdmin();
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // DENY ALL UNMATCHED PATHS
+    // Explicit deny prevents accidental access to any collection
+    // not listed above.
+    // ────────────────────────────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+  }
+}

@@ -3,40 +3,75 @@
  * aurenix-radio.js
  *
  * Station model:
- *  • ONE authoritative station state in Supabase (radio_station table).
- *  • All listeners calculate: position = NOW() - track_started_at
- *  • advance_radio_station() RPC prevents race conditions.
+ *  • ONE authoritative station state in Firestore (radio_station/live).
+ *  • All listeners calculate: position = Date.now() - track_started_at.toMillis()
+ *  • advanceStation() uses a Firestore transaction to prevent race conditions.
  *  • Media Session API for lock-screen / BT / OS controls.
  *  • visibilitychange / pageshow reconnect — never restarts from 0:00.
  *  • PWA install prompt exposed as "Install AURENIX" button.
  *
  * Content model:
  *  AURENIX AUDIO   — uploaded files the submitter owns/has rights to.
+ *                    Audio stored in existing Supabase Storage (aurenix-radio bucket).
+ *                    Metadata stored in Firestore radio_submissions collection.
  *                    Eligible for continuous audio playback + seek-to-position.
  *  EXTERNAL MEDIA  — YouTube, Spotify, other third-party links.
  *                    Played ONLY through official embed/link.
  *                    Audio is NEVER downloaded, extracted, or rebroadcast.
  *
+ * ██████████████████████████████████████████████████████████████████
+ * STORAGE NOTE:
+ *  Audio files are stored in the EXISTING Supabase Storage bucket.
+ *  The `url` field on each submission is the Supabase Storage public URL.
+ *  The `storage_path` field is the Supabase Storage object path.
+ *  DO NOT upload audio to Firebase Storage.
+ *  DO NOT change the Supabase Storage bucket or paths.
+ * ██████████████████████████████████████████████████████████████████
+ *
  * Security:
  *  - Only approved/playing tracks appear in the public queue.
- *  - No service-role credentials in this file.
- *  - advance_radio_station is a SECURITY DEFINER RPC; the anon key suffices.
+ *  - No Firebase service-account credentials in this file.
+ *  - Firestore Security Rules enforce all access control server-side.
  */
 
-import { supabase } from './supabase-client.js';
+import {
+  db,
+  subscribeStation,
+  fetchStationState,
+  advanceStation,
+  getApprovedSubmissions,
+  createSubmission,
+  getUserSubmissions,
+  submitReport,
+  onSnapshot,
+  collection,
+  query,
+  where,
+  orderBy,
+  limit,
+  getDocs,
+  doc,
+  updateDoc,
+  increment,
+  addDoc,
+  serverTimestamp,
+  Timestamp,
+} from './firebase-client.js';
+
+import { uploadAudioFile } from './supabase-client.js';
 
 /* ════════════════════════════════════
    MODULE-LEVEL STATE
 ════════════════════════════════════ */
 let _initialized        = false;
-let _queueChannel       = null;
-let _stationChannel     = null;
+let _queueUnsub         = null;   // Firestore queue listener unsubscribe fn
+let _stationUnsub       = null;   // Firestore station listener unsubscribe fn
 let _currentUser        = null;
 let _activeTab          = 'player';
 let _searchDebounce     = null;
 let _playedThisSession  = new Set();
-let _advanceLock        = false;   // prevent simultaneous advance calls
-let _deferredInstall    = null;    // beforeinstallprompt event
+let _advanceLock        = false;
+let _deferredInstall    = null;
 let _mediaSessionActive = false;
 
 const state = {
@@ -44,9 +79,9 @@ const state = {
   muted:        false,
   volume:       80,
   progress:     0,
-  queue:        [],        // AURENIX AUDIO rows (approved + playing)
+  queue:        [],        // Firestore radio_submissions rows (approved + playing)
   nowPlaying:   null,
-  station:      null,      // last fetched radio_station row
+  station:      null,      // last fetched radio_station/live doc data
 };
 
 let _audioEl       = null;
@@ -59,7 +94,6 @@ let _progressTimer = null;
 window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault();
   _deferredInstall = e;
-  // Show install button if it exists in the rendered shell
   const btn = document.getElementById('radio-install-btn');
   if (btn) btn.style.display = '';
 });
@@ -94,7 +128,7 @@ window.addEventListener('aurenix:navigate', e => {
       _subscribeQueue();
     }
   } else if (e.detail.page !== 'mysubs' && e.detail.page !== 'admin') {
-    _detachChannels();
+    _detachListeners();
   }
 });
 
@@ -117,13 +151,10 @@ function _autoInit() {
    BACKGROUND / VISIBILITY HANDLING
 ════════════════════════════════════ */
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    _onReturnToForeground();
-  }
+  if (document.visibilityState === 'visible') _onReturnToForeground();
 });
 
 window.addEventListener('pageshow', e => {
-  // bfcache restore
   if (e.persisted) _onReturnToForeground();
 });
 
@@ -133,10 +164,8 @@ window.addEventListener('online', () => {
 
 async function _onReturnToForeground() {
   if (!_initialized) return;
-  // Re-subscribe channels if they dropped
   _subscribeStation();
   _subscribeQueue();
-  // Fetch fresh station state and resync
   await _syncToStation();
 }
 
@@ -165,13 +194,11 @@ function _registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   navigator.serviceWorker.register('/aurenix-sw.js', { scope: '/' })
     .then(reg => {
-      // Check for updates
       reg.addEventListener('updatefound', () => {
         const nw = reg.installing;
         if (!nw) return;
         nw.addEventListener('statechange', () => {
           if (nw.state === 'installed' && navigator.serviceWorker.controller) {
-            // New version available — show subtle update notice
             _setPlayerStatus('Update available — refresh to get the latest AURENIX.');
           }
         });
@@ -198,87 +225,58 @@ function _createAudioElement() {
 }
 
 /* ════════════════════════════════════
-   STATION SUBSCRIPTION
-   Reads radio_station singleton row and
-   subscribes to Realtime updates.
+   STATION SUBSCRIPTION (Firestore real-time)
 ════════════════════════════════════ */
 function _subscribeStation() {
-  if (_stationChannel) return;
-  _stationChannel = supabase
-    .channel('radio-station-live')
-    .on('postgres_changes', {
-      event:  '*',
-      schema: 'public',
-      table:  'radio_station',
-    }, payload => {
-      // Station state changed (new track, idle, etc.)
-      const row = payload.new;
-      if (row) _applyStationState(row);
-    })
-    .subscribe();
-
-  // Fetch current state immediately
-  _fetchStationState();
-}
-
-async function _fetchStationState() {
-  try {
-    const { data } = await supabase
-      .from('radio_station')
-      .select('*')
-      .eq('id', 'live')
-      .single();
-    if (data) _applyStationState(data);
-  } catch (_) {}
+  if (_stationUnsub) return;  // already subscribed
+  _stationUnsub = subscribeStation(stationData => {
+    if (stationData) _applyStationState(stationData);
+  });
+  // Also fetch immediately so the player loads before the first Firestore event
+  fetchStationState().then(data => { if (data) _applyStationState(data); });
 }
 
 /**
- * Apply a radio_station row to the local player.
- * This is the core of the shared-station logic:
- *   current position = serverNow - track_started_at
+ * Apply a radio_station document to the local player.
+ * Core of the shared-station logic:
+ *   current position = Date.now() - track_started_at.toMillis()
  */
-function _applyStationState(row) {
-  state.station = row;
+function _applyStationState(data) {
+  state.station = data;
 
-  if (row.station_status === 'idle' || !row.current_track_id) {
-    // Station is idle — stop playback and show idle UI
+  if (data.station_status === 'idle' || !data.current_track_id) {
     _renderNowPlaying(null);
     if (_audioEl && !_audioEl.paused) { _audioEl.pause(); _audioEl.src = ''; }
     _clearYtFrame();
-    state.playing   = false;
+    state.playing    = false;
     state.nowPlaying = null;
     _syncPlayBtn();
     _setPlayerStatus('Station idle — next track soon');
     return;
   }
 
-  const track       = row.current_track;
-  const startedAt   = new Date(row.track_started_at).getTime();
-  const serverNow   = Date.now(); // small drift acceptable; see NOTE below
-  const elapsedSec  = Math.max(0, (serverNow - startedAt) / 1000);
-  const duration    = row.duration_sec || null;
-
-  // NOTE: We use Date.now() as the server clock proxy.
-  // track_started_at is a DB server timestamp (UTC).
-  // Typical client-server clock drift is <2 s which is imperceptible.
-  // We deliberately do NOT attempt NTP correction; the browser's clock
-  // is accurate enough for radio sync purposes.
-
+  const track = data.current_track;
   if (!track) return;
 
-  // Detect track change
-  const trackChanged = !state.nowPlaying || state.nowPlaying.uid !== track.uid;
+  // track_started_at is a Firestore Timestamp — convert to ms
+  const startedAtMs = data.track_started_at?.toMillis
+    ? data.track_started_at.toMillis()
+    : (typeof data.track_started_at === 'number' ? data.track_started_at : Date.now());
+  const elapsedSec = Math.max(0, (Date.now() - startedAtMs) / 1000);
+  const duration   = data.duration_sec || null;
+
+  // Detect track change — Firestore uses `id` not `uid`
+  const trackChanged = !state.nowPlaying || state.nowPlaying.id !== track.id;
 
   state.nowPlaying = track;
   _renderNowPlaying(track);
 
   if (track.type !== 'upload') {
-    // External media — show card/embed, no seek possible
     if (trackChanged) _handleExternalTrack(track);
     return;
   }
 
-  // AURENIX AUDIO — seek to current station position
+  // AURENIX AUDIO — audio URL is the Supabase Storage public URL
   if (!track.url || track.url.startsWith('[')) {
     _setPlayerStatus('Audio unavailable');
     _showStartCTA(false);
@@ -290,10 +288,8 @@ function _applyStationState(row) {
     _audioEl.volume = state.volume / 100;
     _audioEl.muted  = state.muted;
 
-    // Attempt to seek and autoplay at current station position
     _audioEl.addEventListener('loadedmetadata', function _onMeta() {
       _audioEl.removeEventListener('loadedmetadata', _onMeta);
-      // Clamp seek to valid range
       const seekTo = duration
         ? Math.min(elapsedSec, duration - 0.5)
         : elapsedSec;
@@ -305,7 +301,7 @@ function _applyStationState(row) {
         _syncPlayBtn();
         _hideCTA();
         _updateMediaSession();
-        if (trackChanged) _trackPlay(track.uid);
+        if (trackChanged) _trackPlay(track.id);
       }).catch(() => {
         state.playing = false;
         _syncPlayBtn();
@@ -315,11 +311,9 @@ function _applyStationState(row) {
 
     _audioEl.load();
   } else {
-    // Same track already loaded — just verify position is not wildly off
     const actualElapsed = _audioEl.currentTime;
     const drift = Math.abs(actualElapsed - elapsedSec);
     if (drift > 5) {
-      // More than 5 s off — resync
       try { _audioEl.currentTime = elapsedSec; } catch (_) {}
     }
     if (_audioEl.paused && state.playing) {
@@ -332,82 +326,52 @@ function _applyStationState(row) {
    SYNC ON RETURN (visibility / reconnect)
 ════════════════════════════════════ */
 async function _syncToStation() {
-  if (!state.station) {
-    await _fetchStationState();
-    return;
-  }
-  // Re-fetch to get the freshest timestamp
-  await _fetchStationState();
+  const data = await fetchStationState();
+  if (data) _applyStationState(data);
 }
 
 /* ════════════════════════════════════
-   QUEUE SUBSCRIPTION
+   QUEUE SUBSCRIPTION (Firestore real-time)
 ════════════════════════════════════ */
 function _subscribeQueue() {
-  if (_queueChannel) return;
-  _queueChannel = supabase
-    .channel('radio-public-queue')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'studio_queue' }, () => {
-      _refreshQueue();
-    })
-    .subscribe();
-  _refreshQueue();
-}
+  if (_queueUnsub) return;
+  const q = query(
+    collection(db, 'radio_submissions'),
+    where('status', 'in', ['approved', 'playing']),
+    orderBy('updated_at', 'asc'),
+  );
+  _queueUnsub = onSnapshot(q, snap => {
+    const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    state.queue = docs.filter(t => t.content_type === 'aurenix_audio' || t.type === 'upload');
+    _renderQueue();
 
-async function _refreshQueue() {
-  try {
-    const { data } = await supabase
-      .from('studio_queue')
-      .select('uid, title, artist, album, genre, type, content_type, url, artwork_url, status, play_count, likes, updated_at')
-      .in('status', ['approved', 'playing'])
-      .order('updated_at', { ascending: true });
-
-    if (data) {
-      state.queue = data.filter(t => t.content_type === 'aurenix_audio' || t.type === 'upload');
-      _renderQueue();
-
-      // If station has no state yet, try starting the first track
-      if (state.station && state.station.station_status === 'idle') {
-        const first = state.queue.find(t => t.status === 'approved' || t.status === 'playing');
-        if (first) _attemptStationStart(first);
-      }
+    if (state.station && state.station.station_status === 'idle') {
+      const first = state.queue.find(t => t.status === 'approved' || t.status === 'playing');
+      if (first) _attemptStationStart(first);
     }
-  } catch (_) {}
+  });
+  // Initial fetch (snapshot fires immediately on first attach, but just in case)
+  getApprovedSubmissions().then(docs => {
+    if (!state.queue.length) {
+      state.queue = docs.filter(t => t.content_type === 'aurenix_audio' || t.type === 'upload');
+      _renderQueue();
+    }
+  }).catch(() => {});
 }
 
-function _detachChannels() {
-  if (_queueChannel) {
-    try { supabase.removeChannel(_queueChannel); } catch (_) {}
-    _queueChannel = null;
-  }
-  if (_stationChannel) {
-    try { supabase.removeChannel(_stationChannel); } catch (_) {}
-    _stationChannel = null;
-  }
+function _detachListeners() {
+  if (_queueUnsub)   { try { _queueUnsub();   } catch (_) {} _queueUnsub   = null; }
+  if (_stationUnsub) { try { _stationUnsub(); } catch (_) {} _stationUnsub = null; }
 }
 
 /* ════════════════════════════════════
    STATION START (first track)
-   Called when station is idle and queue has tracks.
-   Uses advance_radio_station RPC to set initial state.
 ════════════════════════════════════ */
 async function _attemptStationStart(firstTrack) {
   if (_advanceLock) return;
   _advanceLock = true;
   try {
-    const nextIdx  = state.queue.findIndex(t => t.uid === firstTrack.uid);
-    const nextNext = state.queue[nextIdx + 1] || null;
-
-    await supabase.rpc('advance_radio_station', {
-      p_finished_track_id: null,
-      p_next_track_id:     firstTrack.uid,
-      p_next_track_json:   _trackSnapshot(firstTrack),
-      p_next_next_id:      nextNext?.uid || null,
-      p_next_next_json:    nextNext ? _trackSnapshot(nextNext) : null,
-      p_queue_json:        state.queue.map(_trackSnapshot),
-      p_duration_sec:      null,
-    });
-    // Realtime will fire and call _applyStationState
+    await advanceStation(null, firstTrack, state.queue, null);
   } catch (_) {}
   _advanceLock = false;
 }
@@ -415,7 +379,6 @@ async function _attemptStationStart(firstTrack) {
 /* ════════════════════════════════════
    ADVANCE QUEUE
    Called when current track ends.
-   Uses advance_radio_station RPC.
 ════════════════════════════════════ */
 async function _advanceQueue() {
   if (_advanceLock) return;
@@ -427,49 +390,26 @@ async function _advanceQueue() {
   state.playing = false;
   _syncPlayBtn();
 
-  const finishedId  = state.nowPlaying?.uid || null;
-  const currentIdx  = state.queue.findIndex(t => t.uid === finishedId);
+  const finishedId  = state.nowPlaying?.id || null;
+  const currentIdx  = state.queue.findIndex(t => t.id === finishedId);
   const next        = state.queue[currentIdx + 1] || state.queue.find(t => t.status === 'approved');
-  const nextNextIdx = next ? state.queue.findIndex(t => t.uid === next.uid) : -1;
-  const nextNext    = nextNextIdx >= 0 ? state.queue[nextNextIdx + 1] || null : null;
 
   try {
-    const { data } = await supabase.rpc('advance_radio_station', {
-      p_finished_track_id: finishedId,
-      p_next_track_id:     next?.uid || null,
-      p_next_track_json:   next ? _trackSnapshot(next) : null,
-      p_next_next_id:      nextNext?.uid || null,
-      p_next_next_json:    nextNext ? _trackSnapshot(nextNext) : null,
-      p_queue_json:        state.queue.map(_trackSnapshot),
-      p_duration_sec:      next ? (_audioEl?.duration || null) : null,
-    });
-    // If this client didn't win the race, data.advanced === false.
-    // Either way, Realtime will broadcast the updated state to everyone.
-    if (data && !data.advanced) {
+    const result = await advanceStation(
+      finishedId,
+      next || null,
+      state.queue,
+      next ? (_audioEl?.duration || null) : null,
+    );
+    if (result && !result.advanced) {
       // Another client already advanced — fetch fresh state
-      await _fetchStationState();
+      await _syncToStation();
     }
   } catch (_) {
-    // Fallback: fetch current state
-    await _fetchStationState();
+    await _syncToStation();
   }
 
   _advanceLock = false;
-}
-
-function _trackSnapshot(t) {
-  if (!t) return null;
-  return {
-    uid:         t.uid,
-    title:       t.title       || '',
-    artist:      t.artist      || '',
-    album:       t.album       || null,
-    artwork_url: t.artwork_url || null,
-    url:         t.url         || '',
-    type:        t.type        || 'upload',
-    genre:       t.genre       || null,
-    likes:       t.likes       || 0,
-  };
 }
 
 /* ════════════════════════════════════
@@ -504,17 +444,12 @@ function _bindPlayerControls() {
   });
 }
 
-/**
- * Resume if already loaded, or join the current station position.
- */
 function _resumeOrJoin() {
-  if (_audioEl && _audioEl.src && !_audioEl.paused) return; // already playing
+  if (_audioEl && _audioEl.src && !_audioEl.paused) return;
   if (_audioEl && _audioEl.src && _audioEl.paused) {
-    // Same track, just unpaused — resync position then resume
     _syncToStation();
     return;
   }
-  // No audio loaded — join station
   _syncToStation();
 }
 
@@ -528,7 +463,6 @@ function _pauseAudio() {
 }
 
 function _goToPrev() {
-  // In station mode, "prev" rejoins current track from station position
   _syncToStation();
 }
 
@@ -560,7 +494,7 @@ function _playYouTube(track) {
   state.playing = true;
   _syncPlayBtn();
   _hideCTA();
-  _trackPlay(track.uid);
+  _trackPlay(track.id);
 }
 
 function _showExternalMediaCard(track) {
@@ -646,23 +580,11 @@ function _updateMediaSession() {
 
   if (!_mediaSessionActive) {
     _mediaSessionActive = true;
-
-    navigator.mediaSession.setActionHandler('play', () => {
-      _resumeOrJoin();
-    });
-    navigator.mediaSession.setActionHandler('pause', () => {
-      _pauseAudio();
-    });
-    navigator.mediaSession.setActionHandler('nexttrack', () => {
-      _advanceQueue();
-    });
-    navigator.mediaSession.setActionHandler('previoustrack', () => {
-      _syncToStation(); // rejoin current station position
-    });
-    navigator.mediaSession.setActionHandler('stop', () => {
-      _pauseAudio();
-    });
-    // seekto / seekbackward / seekforward — only for AURENIX AUDIO
+    navigator.mediaSession.setActionHandler('play',          () => _resumeOrJoin());
+    navigator.mediaSession.setActionHandler('pause',         () => _pauseAudio());
+    navigator.mediaSession.setActionHandler('nexttrack',     () => _advanceQueue());
+    navigator.mediaSession.setActionHandler('previoustrack', () => _syncToStation());
+    navigator.mediaSession.setActionHandler('stop',          () => _pauseAudio());
     navigator.mediaSession.setActionHandler('seekto', details => {
       if (_audioEl && isFinite(details.seekTime)) {
         try { _audioEl.currentTime = details.seekTime; } catch (_) {}
@@ -695,7 +617,6 @@ function _onTimeUpdate() {
   if (dur) dur.textContent = _fmtTime(_audioEl.duration);
   state.progress = pct;
 
-  // Update Media Session position state
   if ('mediaSession' in navigator && _audioEl.duration && isFinite(_audioEl.duration)) {
     try {
       navigator.mediaSession.setPositionState({
@@ -708,25 +629,24 @@ function _onTimeUpdate() {
 }
 
 /* ════════════════════════════════════
-   PLAY TRACKING
+   PLAY TRACKING  (Firestore radio_plays)
 ════════════════════════════════════ */
-async function _trackPlay(trackUid) {
-  if (!trackUid || _playedThisSession.has(trackUid)) return;
-  _playedThisSession.add(trackUid);
+async function _trackPlay(trackId) {
+  if (!trackId || _playedThisSession.has(trackId)) return;
+  _playedThisSession.add(trackId);
   try {
-    supabase.rpc('increment_radio_play_count', { track_uid: trackUid }).catch(() => {
-      supabase.from('studio_queue').select('play_count').eq('uid', trackUid).single()
-        .then(({ data }) => {
-          if (data) supabase.from('studio_queue')
-            .update({ play_count: (data.play_count || 0) + 1 })
-            .eq('uid', trackUid).catch(() => {});
-        });
-    });
+    // Increment play_count on the submission doc
+    updateDoc(doc(db, 'radio_submissions', trackId), {
+      play_count: increment(1),
+    }).catch(() => {});
+
+    // Log a play record (no PII — session ID only)
     const sessionId = _getSessionId();
-    supabase.from('radio_plays').insert({
-      track_uid:  trackUid,
-      session_id: sessionId,
-      user_uid:   _currentUser?.id || null,
+    addDoc(collection(db, 'radio_plays'), {
+      submission_id: trackId,
+      session_id:    sessionId,
+      user_uid:      _currentUser?.uid || null,
+      played_at:     serverTimestamp(),
     }).catch(() => {});
   } catch (_) {}
 }
@@ -739,17 +659,17 @@ async function _likeCurrentTrack() {
   if (!_currentUser) { window.AURENIX_AUTH?.openModal('login'); return; }
   const likeBtn = $id('radio-like-btn');
   if (likeBtn?.dataset.liked === 'true') return;
-  const track    = state.nowPlaying;
-  const newLikes = (track.likes || 0) + 1;
+  const track = state.nowPlaying;
   if (likeBtn) { likeBtn.dataset.liked = 'true'; likeBtn.style.color = '#ff6680'; }
   const likesEl = $id('radio-track-likes');
-  if (likesEl) likesEl.textContent = newLikes;
-  await supabase.from('studio_queue')
-    .update({ likes: newLikes }).eq('uid', track.uid).catch(() => {});
+  if (likesEl) likesEl.textContent = (track.likes || 0) + 1;
+  updateDoc(doc(db, 'radio_submissions', track.id), {
+    likes: increment(1),
+  }).catch(() => {});
 }
 
 /* ════════════════════════════════════
-   COPYRIGHT REPORT FORM
+   COPYRIGHT REPORT FORM  (Firestore radio_reports)
 ════════════════════════════════════ */
 function _openCopyrightReport() {
   const track = state.nowPlaying;
@@ -821,17 +741,15 @@ function _openCopyrightReport() {
     btn.disabled = true; btn.textContent = 'Submitting…';
 
     try {
-      const { error } = await supabase.from('copyright_reports').insert({
-        track_uid:     track.uid,
-        track_title:   track.title,
-        track_artist:  track.artist || null,
+      await submitReport({
+        submission_id:  track.id,
+        track_title:    track.title,
+        track_artist:   track.artist || null,
         reason,
         details,
-        contact_email: contact || null,
-        reporter_uid:  _currentUser?.id || null,
-        status:        'open',
+        contact_email:  contact || null,
+        reporter_uid:   _currentUser?.uid || null,
       });
-      if (error) throw error;
       _showFormStatus(statusEl, 'success', '✓ Report submitted. The AURENIX team will review it.');
       btn.textContent = 'Submitted';
       setTimeout(() => overlay.remove(), 4000);
@@ -931,10 +849,10 @@ function _renderQueue() {
 
   list.innerHTML = '';
   visible.forEach((t, i) => {
-    const isPlaying = t.uid === state.nowPlaying?.uid || t.status === 'playing';
+    const isPlaying = t.id === state.nowPlaying?.id || t.status === 'playing';
     const item = document.createElement('div');
     item.className = 'radio-queue-item' + (isPlaying ? ' rqi-active' : '');
-    item.dataset.uid = t.uid;
+    item.dataset.id = t.id;
     item.innerHTML = `
       <div class="rqi-num">${isPlaying ? '▶' : i + 1}</div>
       ${t.artwork_url
@@ -1057,7 +975,7 @@ function _renderRadioShell() {
               </div>
             </div>
 
-            <!-- Install PWA button (hidden until beforeinstallprompt fires) -->
+            <!-- Install PWA button -->
             <div style="margin-top:10px; text-align:center;" id="radio-install-wrap">
               <button id="radio-install-btn" class="btn btn-ghost btn-sm" style="display:none;" aria-label="Install AURENIX app">
                 ⬇ Install AURENIX
@@ -1101,8 +1019,6 @@ function _renderRadioShell() {
 
               <!-- Submit form -->
               <div id="rsub-form-body">
-
-                <!-- Submission type -->
                 <div class="field-group">
                   <label class="field-label" for="rsub-type">Submission Type</label>
                   <select class="field-select" id="rsub-type">
@@ -1114,7 +1030,6 @@ function _renderRadioShell() {
                   <div id="rsub-type-notice" class="rsub-type-notice"></div>
                 </div>
 
-                <!-- File upload -->
                 <div id="rsub-file-group" class="field-group">
                   <label class="field-label">Audio File</label>
                   <div class="rsub-drop-zone" id="rsub-file-drop" role="button" tabindex="0" aria-label="Click to select audio file">
@@ -1125,14 +1040,12 @@ function _renderRadioShell() {
                   <input type="file" id="rsub-file" accept="audio/*,.mp3,.wav,.aac,.flac,.ogg" style="display:none;" aria-label="Select audio file">
                 </div>
 
-                <!-- External URL -->
                 <div id="rsub-url-group" class="field-group hidden">
                   <label class="field-label" for="rsub-url">URL</label>
                   <input class="field-input" type="url" id="rsub-url" placeholder="https://…">
                   <div class="field-hint" id="rsub-url-hint"></div>
                 </div>
 
-                <!-- Track metadata -->
                 <div class="field-group">
                   <label class="field-label" for="rsub-title">Track Title <span style="color:var(--blood)">*</span></label>
                   <input class="field-input" type="text" id="rsub-title" placeholder="Track name" maxlength="120" required>
@@ -1187,7 +1100,7 @@ function _renderRadioShell() {
                   </div>
                 </div>
 
-                <!-- External media notice — shown for non-uploads -->
+                <!-- External media notice -->
                 <div id="rsub-external-notice" class="rsub-external-notice" style="display:none;">
                   <div class="rsub-ext-icon" aria-hidden="true">🔗</div>
                   <div>
@@ -1285,19 +1198,17 @@ function _bindTabBar() {
 
 /* ════════════════════════════════════
    DISCOVER / SEARCH TAB
+   Uses Firestore radio_submissions collection.
 ════════════════════════════════════ */
 async function _loadDiscover() {
   const popList = $id('radio-popular-list');
   if (popList) {
     popList.innerHTML = '<div style="padding:14px; color:var(--text-muted); font-size:13px;">Loading…</div>';
     try {
-      const { data } = await supabase
-        .from('studio_queue')
-        .select('uid, title, artist, genre, type, content_type, artwork_url, play_count, likes')
-        .in('status', ['approved', 'playing'])
-        .order('play_count', { ascending: false })
-        .limit(10);
-      _renderDiscoverList(popList, data || [], 'No tracks yet.');
+      const q = query(collection(db, 'radio_submissions'), where('status', 'in', ['approved', 'playing']), orderBy('play_count', 'desc'), limit(10));
+      const snap = await getDocs(q);
+      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      _renderDiscoverList(popList, data, 'No tracks yet.');
     } catch (_) {
       popList.innerHTML = '<div style="padding:14px; color:#ff6680; font-size:13px;">Unable to load.</div>';
     }
@@ -1320,7 +1231,7 @@ async function _loadDiscover() {
 }
 
 async function _doSearch() {
-  const q         = ($id('radio-search-input')?.value || '').trim();
+  const q         = ($id('radio-search-input')?.value || '').trim().toLowerCase();
   const genre     = document.querySelector('.radio-genre-chip.active')?.dataset.genre || '';
   const resultsEl = $id('radio-search-results');
   const countEl   = $id('radio-search-count');
@@ -1329,19 +1240,17 @@ async function _doSearch() {
   resultsEl.innerHTML = '<div style="padding:14px; color:var(--text-muted); font-size:13px;">Searching…</div>';
 
   try {
-    let query = supabase
-      .from('studio_queue')
-      .select('uid, title, artist, genre, type, content_type, artwork_url, play_count, likes')
-      .in('status', ['approved', 'playing'])
-      .order('play_count', { ascending: false })
-      .limit(30);
-
-    if (q)     query = query.or(`title.ilike.%${q}%,artist.ilike.%${q}%`);
-    if (genre) query = query.eq('genre', genre);
-
-    const { data } = await query;
-    if (countEl) countEl.textContent = data?.length ? data.length + ' results' : '';
-    _renderDiscoverList(resultsEl, data || [], q ? 'No results found.' : 'Search for tracks or artists.');
+    // Firestore does not support full-text search; filter client-side from approved set
+    const all = await getApprovedSubmissions();
+    let filtered = all;
+    if (genre) filtered = filtered.filter(t => t.genre === genre);
+    if (q) filtered = filtered.filter(t =>
+      (t.title  || '').toLowerCase().includes(q) ||
+      (t.artist || '').toLowerCase().includes(q)
+    );
+    filtered = filtered.slice(0, 30);
+    if (countEl) countEl.textContent = filtered.length ? filtered.length + ' results' : '';
+    _renderDiscoverList(resultsEl, filtered, q ? 'No results found.' : 'Search for tracks or artists.');
   } catch (_) {
     resultsEl.innerHTML = '<div style="padding:14px; color:#ff6680; font-size:13px;">Search unavailable.</div>';
   }
@@ -1400,13 +1309,7 @@ async function loadMySubmissions() {
   container.innerHTML = '<div style="padding:20px; color:var(--text-muted);">Loading your submissions…</div>';
 
   try {
-    const { data, error } = await supabase
-      .from('studio_queue')
-      .select('uid, title, artist, type, content_type, status, genre, created_at, updated_at')
-      .eq('submitted_by', _currentUser.id)
-      .order('updated_at', { ascending: false });
-
-    if (error) throw error;
+    const data = await getUserSubmissions(_currentUser.uid);
 
     if (!data?.length) {
       container.innerHTML = `
@@ -1445,11 +1348,12 @@ async function loadMySubmissions() {
         ? ({ youtube: 'YouTube', spotify: 'Spotify', external: 'External' }[sub.type] || 'External')
         : 'AURENIX AUDIO';
       const typeCls = isExternal ? 'rdi-badge-external' : 'rdi-badge-aurenix';
+      const dateStr = _fmtDate(sub.updated_at?.toDate ? sub.updated_at.toDate().toISOString() : sub.updated_at);
 
       row.innerHTML = `
         <div class="rqi-info" style="flex:1;">
           <div class="rqi-title">${esc(sub.title)}</div>
-          <div class="rqi-meta">${esc(sub.artist || 'Unknown')} · Submitted ${_fmtDate(sub.updated_at)}</div>
+          <div class="rqi-meta">${esc(sub.artist || 'Unknown')} · Submitted ${dateStr}</div>
         </div>
         <div class="rqi-right" style="gap:6px;">
           <span class="rdi-source-badge ${typeCls}">${typeLabel}</span>
@@ -1550,6 +1454,19 @@ function _setDroppedFile(file) {
   if (lbl) lbl.textContent = file.name;
 }
 
+/**
+ * Handle radio submission.
+ *
+ * ████████████████████████████████████████████████████████████████
+ * STORAGE ARCHITECTURE:
+ *  1. Audio file uploads go to EXISTING Supabase Storage bucket.
+ *  2. ONLY AFTER the Storage upload succeeds, a Firestore document
+ *     is created containing the Supabase Storage URL + path.
+ *  3. If Firestore creation fails after a successful upload, the
+ *     upload is marked as orphaned in console so it can be cleaned up.
+ *  4. Audio is NEVER uploaded to Firebase Storage.
+ * ████████████████████████████████████████████████████████████████
+ */
 async function _handleSubmission() {
   const type    = $id('rsub-type')?.value    || 'upload';
   const title   = ($id('rsub-title')?.value  || '').trim();
@@ -1570,6 +1487,7 @@ async function _handleSubmission() {
   if (!artist) { _showFormStatus(statusEl, 'error', 'Artist name is required.'); return; }
 
   let url = '';
+  let storagePath = null;
   let fileToUpload = null;
   let contentType  = 'aurenix_audio';
 
@@ -1592,60 +1510,37 @@ async function _handleSubmission() {
 
   try {
     if (fileToUpload) {
-      // Upload to Supabase Storage
+      // ─────────────────────────────────────────────────────────
+      // STEP 1: Upload to EXISTING Supabase Storage bucket.
+      //         Audio NEVER goes to Firebase Storage.
+      // ─────────────────────────────────────────────────────────
       const progWrap = $id('rsub-upload-progress');
       const progFill = $id('rsub-progress-fill');
       const progPct  = $id('rsub-progress-pct');
       if (progWrap) progWrap.style.display = '';
 
-      const ext      = fileToUpload.name.split('.').pop() || 'mp3';
-      const fileName = `radio/${_currentUser.id}/${Date.now()}.${ext}`;
+      const result = await uploadAudioFile(
+        _currentUser.uid,
+        fileToUpload,
+        pct => {
+          if (progFill) progFill.style.width = pct + '%';
+          if (progPct)  progPct.textContent  = pct + '%';
+        },
+      );
+      url         = result.publicUrl;
+      storagePath = result.storagePath;
 
-      const { data: upData, error: upErr } = await supabase.storage
-        .from('aurenix-radio')
-        .upload(fileName, fileToUpload, {
-          cacheControl: '3600',
-          upsert: false,
-          onUploadProgress: p => {
-            const pct = Math.round((p.loaded / p.total) * 100);
-            if (progFill) progFill.style.width = pct + '%';
-            if (progPct)  progPct.textContent  = pct + '%';
-          },
-        });
-
-      if (upErr) throw upErr;
-
-      const { data: { publicUrl } } = supabase.storage
-        .from('aurenix-radio')
-        .getPublicUrl(fileName);
-      url = publicUrl;
       if (progWrap) progWrap.style.display = 'none';
+
+      // ─────────────────────────────────────────────────────────
+      // STEP 2: Create Firestore submission document.
+      //         If this fails, log the orphaned storage path so
+      //         it can be manually cleaned up. Do NOT silently
+      //         claim success.
+      // ─────────────────────────────────────────────────────────
     }
 
-    // Ensure the authenticated user has a profile row in the users table.
-    // studio_queue_uid_fkey references users(uid/id), so the profile row must
-    // exist before the studio_queue INSERT is attempted.
-    {
-      const { data: existing } = await supabase
-        .from('users')
-        .select('id')
-        .eq('id', _currentUser.id)
-        .maybeSingle();
-
-      if (!existing) {
-        const handle = (_currentUser.email || '').split('@')[0].replace(/[^a-z0-9_]/gi, '_');
-        await supabase.from('users').upsert({
-          id:           _currentUser.id,
-          uid:          _currentUser.id,
-          email:        _currentUser.email || '',
-          display_name: handle,
-          username:     handle,
-          role:         'member',
-        }, { onConflict: 'id' });
-      }
-    }
-
-    const row = {
+    const submissionData = {
       title,
       artist,
       album:            album    || null,
@@ -1654,19 +1549,32 @@ async function _handleSubmission() {
       type,
       content_type:     contentType,
       url,
+      storage_path:     storagePath,
+      storage_bucket:   storagePath ? 'aurenix-radio' : null,
       notes,
-      status:           'pending',
       rights_confirmed: rights,
-      submitted_by:     _currentUser.id,
+      submitted_by:     _currentUser.uid,
+      play_count:       0,
+      likes:            0,
+      // status is forced to 'pending' inside createSubmission()
     };
 
-    const { error: insErr } = await supabase.from('studio_queue').insert(row);
-    if (insErr) throw insErr;
+    const docId = await createSubmission(submissionData);
+    console.log('[Radio] Submission created. Firestore ID:', docId);
 
     _showFormStatus(statusEl, 'success', '✓ Submitted! Moderators will review your track shortly.');
     _resetSubmitForm();
   } catch (err) {
     console.error('[Radio] submission error:', err?.message || err);
+
+    // If a file was already uploaded to Supabase Storage but Firestore failed,
+    // log the orphaned path clearly so it can be found and cleaned up.
+    if (storagePath) {
+      console.error('[Radio] ORPHANED UPLOAD — Storage upload succeeded but Firestore failed.',
+        'Orphaned path:', storagePath,
+        'User:', _currentUser.uid);
+    }
+
     _showFormStatus(statusEl, 'error', 'Submission failed: ' + (err?.message || 'Please try again.'));
   }
 

@@ -1,19 +1,31 @@
 /**
- * AURENIX RADIO — Admin Dashboard
+ * AURENIX RADIO — Admin Dashboard (Firebase)
  * aurenix-admin.js
  *
  * SECURITY:
- *  - All admin operations require Supabase session with email === ADMIN_EMAIL
- *    AND email_confirmed_at set (verified email).
- *  - Server-side RLS policies enforce this independently of JS.
- *  - This module verifies admin identity directly from Supabase auth on every
+ *  - All admin operations require a Firebase session with
+ *    email === ADMIN_EMAIL AND emailVerified === true.
+ *  - Firestore Security Rules enforce this independently of JS.
+ *  - This module re-verifies admin identity from Firebase Auth on every
  *    sensitive operation — never trusts localStorage or URL params.
- *  - No service-role keys are present in this file.
+ *  - No Firebase service-account/private keys are present in this file.
  *
  * Scope: Radio Queue moderation + Copyright Reports only.
  */
 
-import { supabase } from './supabase-client.js';
+import {
+  auth,
+  db,
+  getAllSubmissions,
+  updateSubmission,
+  getAllReports,
+  updateReport,
+  getUserSubmissions,
+  collection,
+  query,
+  where,
+  getDocs,
+} from './firebase-client.js';
 
 const ADMIN_EMAIL = 'christijerina46@gmail.com';
 
@@ -41,15 +53,22 @@ window.addEventListener('aurenix:navigate', (e) => {
 });
 
 /* ═══════════════════════════════════════════
+   ADMIN IDENTITY CHECK
+   Re-verified from Firebase Auth on every sensitive call.
+═══════════════════════════════════════════ */
+function _verifyAdmin() {
+  const user = auth.currentUser;
+  return !!(user && user.email === ADMIN_EMAIL && user.emailVerified);
+}
+
+/* ═══════════════════════════════════════════
    MY SUBMISSIONS PAGE (standalone page)
-   Renders the user's own submissions with status.
 ═══════════════════════════════════════════ */
 async function mountMySubsPage() {
   const container = document.getElementById('mysubs-page-content');
   if (!container) return;
 
-  // Re-verify user from Supabase (not from memory)
-  const { data: { user } } = await supabase.auth.getUser();
+  const user = auth.currentUser;
 
   if (!user) {
     container.innerHTML = `
@@ -65,13 +84,7 @@ async function mountMySubsPage() {
   container.innerHTML = `<div style="padding:20px; color:var(--text-muted); font-size:13px; letter-spacing:1px;">Loading your submissions…</div>`;
 
   try {
-    const { data, error } = await supabase
-      .from('studio_queue')
-      .select('uid, title, artist, type, content_type, status, genre, notes, created_at, updated_at')
-      .eq('submitted_by', user.id)
-      .order('updated_at', { ascending: false });
-
-    if (error) throw error;
+    const data = await getUserSubmissions(user.uid);
 
     if (!data?.length) {
       container.innerHTML = `
@@ -117,11 +130,12 @@ async function mountMySubsPage() {
         ? ({ youtube: 'YouTube', spotify: 'Spotify', external: 'External' }[sub.type] || 'External')
         : 'AURENIX AUDIO';
       const typeCls = isExternal ? 'rdi-badge-external' : 'rdi-badge-aurenix';
+      const dateStr = fmtDate(sub.created_at?.toDate ? sub.created_at.toDate().toISOString() : sub.created_at);
 
       row.innerHTML = `
         <div class="rqi-info" style="flex:1; min-width:0;">
           <div class="rqi-title">${esc(sub.title)}</div>
-          <div class="rqi-meta">${esc(sub.artist || 'Unknown')}${sub.genre ? ' · ' + esc(sub.genre) : ''} · Submitted ${fmtDate(sub.created_at)}</div>
+          <div class="rqi-meta">${esc(sub.artist || 'Unknown')}${sub.genre ? ' · ' + esc(sub.genre) : ''} · Submitted ${dateStr}</div>
           ${sub.notes ? `<div style="font-size:11px; color:var(--text-muted); margin-top:3px; font-style:italic;">"${esc(sub.notes)}"</div>` : ''}
         </div>
         <div class="rqi-right" style="gap:6px; flex-shrink:0;">
@@ -146,9 +160,8 @@ async function mountAdmin() {
   const container = document.getElementById('admin-content');
   if (!container) return;
 
-  // Re-verify directly from Supabase — never trust client-side state alone
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user || user.email !== ADMIN_EMAIL || !user.email_confirmed_at) {
+  // Re-verify directly from Firebase Auth — never trust client-side state alone
+  if (!_verifyAdmin()) {
     renderAccessDenied(container);
     return;
   }
@@ -241,21 +254,19 @@ function bindAdminTabs(container) {
    STATS
 ═══════════════════════════════════════════ */
 async function loadAdminData() {
-  // Re-verify before fetching admin stats
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user || user.email !== ADMIN_EMAIL) return;
+  if (!_verifyAdmin()) return;
 
   try {
-    const [pendingRes, approvedRes, reportsRes, usersRes] = await Promise.all([
-      supabase.from('studio_queue').select('uid', { count: 'exact', head: true }).eq('status', 'pending'),
-      supabase.from('studio_queue').select('uid', { count: 'exact', head: true }).in('status', ['approved', 'playing']),
-      supabase.from('copyright_reports').select('id', { count: 'exact', head: true }).eq('status', 'open'),
-      supabase.from('users').select('id', { count: 'exact', head: true }),
+    const [pendingSnap, approvedSnap, reportsSnap, usersSnap] = await Promise.all([
+      getDocs(query(collection(db, 'radio_submissions'), where('status', '==', 'pending'))),
+      getDocs(query(collection(db, 'radio_submissions'), where('status', 'in', ['approved', 'playing']))),
+      getDocs(query(collection(db, 'radio_reports'),     where('status', '==', 'open'))),
+      getDocs(collection(db, 'users')),
     ]);
-    setStat('admin-stat-pending',  pendingRes.count  ?? '—');
-    setStat('admin-stat-approved', approvedRes.count ?? '—');
-    setStat('admin-stat-reports',  reportsRes.count  ?? '—');
-    setStat('admin-stat-users',    usersRes.count    ?? '—');
+    setStat('admin-stat-pending',  pendingSnap.size  ?? '—');
+    setStat('admin-stat-approved', approvedSnap.size ?? '—');
+    setStat('admin-stat-reports',  reportsSnap.size  ?? '—');
+    setStat('admin-stat-users',    usersSnap.size    ?? '—');
   } catch (_) {}
 }
 
@@ -273,9 +284,7 @@ async function loadRadioPanel() {
   const panel = document.getElementById('admin-panel-radio');
   if (!panel) return;
 
-  // Always re-verify admin before loading sensitive data
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user || user.email !== ADMIN_EMAIL || !user.email_confirmed_at) {
+  if (!_verifyAdmin()) {
     panel.innerHTML = '<div style="padding:20px; color:#ff6680;">ACCESS DENIED — administrator account required.</div>';
     return;
   }
@@ -283,12 +292,8 @@ async function loadRadioPanel() {
   panel.innerHTML = `<div style="padding:20px; color:var(--text-muted); font-size:13px;">Loading radio queue…</div>`;
 
   try {
-    const { data, error } = await supabase
-      .from('studio_queue')
-      .select('uid, title, artist, album, genre, type, content_type, url, artwork_url, notes, status, play_count, likes, submitted_by, rights_confirmed, created_at, updated_at')
-      .order('updated_at', { ascending: false });
-    if (error) throw error;
-    renderRadioPanel(panel, data || []);
+    const data = await getAllSubmissions();
+    renderRadioPanel(panel, data);
   } catch (e) {
     panel.innerHTML = `<div style="padding:20px; color:#ff6680;">Unable to load radio queue: ${esc(e.message || '')}</div>`;
   }
@@ -372,6 +377,15 @@ function buildRadioModItem(item, filter) {
       : `<span class="admin-rights-missing"   title="No rights confirmation on record">⚠ No rights confirmation</span>`;
   }
 
+  // Storage path — shown for AURENIX AUDIO so admin can verify file exists
+  const storageHtml = item.storage_path
+    ? `<div style="font-size:10px; color:var(--text-muted); margin-top:2px;">
+        📦 Supabase Storage: <code style="font-size:10px; opacity:0.7;">${esc(item.storage_path)}</code>
+       </div>`
+    : '';
+
+  const dateStr = fmtDate(item.created_at?.toDate ? item.created_at.toDate().toISOString() : item.created_at);
+
   div.innerHTML = `
     <div class="admin-radio-item-info" style="flex:1; min-width:200px;">
       <div class="admin-radio-item-title">${esc(item.title)}</div>
@@ -379,7 +393,7 @@ function buildRadioModItem(item, filter) {
         ${esc(item.artist || 'Unknown')}
         ${item.album ? ' · <em>' + esc(item.album) + '</em>' : ''}
         ${item.genre ? ' · ' + esc(item.genre) : ''}
-        · ${fmtDate(item.created_at)}
+        · ${dateStr}
       </div>
       <div style="display:flex; gap:8px; margin-top:5px; flex-wrap:wrap; align-items:center;">
         <span class="rdi-source-badge ${contentTypeCls}" style="font-size:10px;">${contentTypeLabel}</span>
@@ -388,6 +402,7 @@ function buildRadioModItem(item, filter) {
       ${item.notes ? `<div style="font-size:11px; color:var(--text-muted); margin-top:4px; font-style:italic;">
         Note: "${esc(item.notes)}"
       </div>` : ''}
+      ${storageHtml}
       <div style="display:flex; gap:10px; margin-top:4px;">
         ${item.play_count ? `<span style="font-size:10px; color:var(--text-muted);">▶ ${item.play_count} plays</span>` : ''}
         ${item.likes      ? `<span style="font-size:10px; color:var(--text-muted);">♥ ${item.likes}</span>` : ''}
@@ -396,14 +411,14 @@ function buildRadioModItem(item, filter) {
     <div class="admin-radio-item-actions" style="flex-wrap:wrap; gap:5px;">
       <span class="rqi-badge ${statusCls}">${item.status}</span>
       ${filter === 'pending' ? `
-        <button class="btn-mod-approve" data-uid="${item.uid}" title="Approve — add to AURENIX Radio">✓ Approve</button>
-        <button class="btn-mod-reject"  data-uid="${item.uid}" title="Reject this submission">✕ Reject</button>
+        <button class="btn-mod-approve" data-id="${item.id}" title="Approve — add to AURENIX Radio">✓ Approve</button>
+        <button class="btn-mod-reject"  data-id="${item.id}" title="Reject this submission">✕ Reject</button>
       ` : ''}
       ${filter === 'approved' ? `
-        <button class="btn-mod-takedown" data-uid="${item.uid}" title="Remove from public queue">⛔ Takedown</button>
+        <button class="btn-mod-takedown" data-id="${item.id}" title="Remove from public queue">⛔ Takedown</button>
       ` : ''}
       ${(filter === 'rejected' || filter === 'removed') ? `
-        <button class="btn-mod-approve btn-mod-restore" data-uid="${item.uid}" title="Restore to approved">↩ Restore</button>
+        <button class="btn-mod-approve btn-mod-restore" data-id="${item.id}" title="Restore to approved">↩ Restore</button>
       ` : ''}
     </div>
   `;
@@ -411,31 +426,30 @@ function buildRadioModItem(item, filter) {
   div.querySelectorAll('.btn-mod-approve').forEach(btn => {
     btn.addEventListener('click', () => {
       const isRestore = btn.classList.contains('btn-mod-restore');
-      moderateRadio(btn.dataset.uid, isRestore ? 'restore' : 'approve');
+      moderateRadio(btn.dataset.id, isRestore ? 'restore' : 'approve');
     });
   });
 
   div.querySelectorAll('.btn-mod-reject').forEach(btn => {
     btn.addEventListener('click', () => {
       if (!confirm('Reject this submission? The submitter will see it as rejected.')) return;
-      moderateRadio(btn.dataset.uid, 'reject');
+      moderateRadio(btn.dataset.id, 'reject');
     });
   });
 
   div.querySelectorAll('.btn-mod-takedown').forEach(btn => {
     btn.addEventListener('click', () => {
       if (!confirm('TAKEDOWN: Immediately remove this track from the public AURENIX Radio catalog? It will be hidden from all queues and discovery. The moderation record is preserved.')) return;
-      moderateRadio(btn.dataset.uid, 'remove');
+      moderateRadio(btn.dataset.id, 'remove');
     });
   });
 
   return div;
 }
 
-async function moderateRadio(uid, action) {
-  // Always re-verify server-side before any mutation
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user || user.email !== ADMIN_EMAIL || !user.email_confirmed_at) {
+async function moderateRadio(submissionId, action) {
+  // Re-verify server-side before any mutation
+  if (!_verifyAdmin()) {
     alert('ACCESS DENIED — administrator account required.');
     return;
   }
@@ -444,15 +458,17 @@ async function moderateRadio(uid, action) {
   const newStatus = statusMap[action];
   if (!newStatus) return;
 
-  const { error } = await supabase.from('studio_queue')
-    .update({ status: newStatus }).eq('uid', uid);
-
-  if (error) {
-    alert('Unable to update: ' + error.message);
-    return;
+  try {
+    await updateSubmission(submissionId, {
+      status:      newStatus,
+      reviewed_by: auth.currentUser?.email || ADMIN_EMAIL,
+      reviewed_at: new Date().toISOString(),
+    });
+    loadRadioPanel();
+    loadAdminData();
+  } catch (err) {
+    alert('Unable to update: ' + (err.message || err));
   }
-  loadRadioPanel();
-  loadAdminData();
 }
 
 /* ═══════════════════════════════════════════
@@ -463,20 +479,13 @@ async function loadReportsPanel() {
   if (!panel) return;
   panel.innerHTML = `<div style="padding:20px; color:var(--text-muted); font-size:13px;">Loading copyright reports…</div>`;
 
-  // Always re-verify admin
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user || user.email !== ADMIN_EMAIL || !user.email_confirmed_at) {
+  if (!_verifyAdmin()) {
     panel.innerHTML = '<div style="padding:20px; color:#ff6680;">ACCESS DENIED — administrator account required.</div>';
     return;
   }
 
   try {
-    const { data, error } = await supabase
-      .from('copyright_reports')
-      .select('id, track_uid, track_title, track_artist, reason, details, status, created_at')
-      .order('created_at', { ascending: false })
-      .limit(200);
-    if (error) throw error;
+    const data = await getAllReports();
 
     if (!data || !data.length) {
       panel.innerHTML = `
@@ -515,6 +524,7 @@ async function loadReportsPanel() {
       const row = document.createElement('div');
       row.className = 'admin-radio-item admin-report-item';
       const isOpen = report.status === 'open';
+      const dateStr = fmtDate(report.created_at?.toDate ? report.created_at.toDate().toISOString() : report.created_at);
 
       row.innerHTML = `
         <div class="admin-radio-item-info" style="flex:1; min-width:200px;">
@@ -522,42 +532,40 @@ async function loadReportsPanel() {
           <div class="admin-radio-item-meta">
             ${esc(report.track_artist || '')}
             · ${reasonLabels[report.reason] || esc(report.reason)}
-            · ${fmtDate(report.created_at)}
+            · ${dateStr}
           </div>
           <div style="font-size:12px; color:var(--text); margin-top:5px; line-height:1.5;">
             ${esc(report.details)}
           </div>
           <div style="font-size:10px; color:var(--text-muted); margin-top:4px;">
-            Track UID: <code style="font-size:10px; opacity:0.7;">${esc(report.track_uid || '—')}</code>
+            Submission ID: <code style="font-size:10px; opacity:0.7;">${esc(report.submission_id || '—')}</code>
           </div>
         </div>
         <div class="admin-radio-item-actions" style="flex-wrap:wrap; gap:5px; align-items:flex-start;">
           <span class="rqi-badge ${isOpen ? 'rqi-pending' : 'rqi-approved'}">${isOpen ? 'Open' : 'Resolved'}</span>
           ${isOpen ? `
-            <button class="btn-report-takedown" data-track-uid="${esc(report.track_uid || '')}" data-report-id="${report.id}" title="Remove track and resolve report">⛔ Takedown Track</button>
-            <button class="btn-report-resolve"  data-report-id="${report.id}" title="Mark as reviewed/resolved without removal">✓ Resolve</button>
+            <button class="btn-report-takedown" data-submission-id="${esc(report.submission_id || '')}" data-report-id="${esc(report.id)}" title="Remove track and resolve report">⛔ Takedown Track</button>
+            <button class="btn-report-resolve"  data-report-id="${esc(report.id)}" title="Mark as reviewed/resolved without removal">✓ Resolve</button>
           ` : ''}
         </div>
       `;
 
       row.querySelectorAll('.btn-report-takedown').forEach(btn => {
         btn.addEventListener('click', async () => {
-          const trackUid = btn.dataset.trackUid;
+          const subId    = btn.dataset.submissionId;
           const reportId = btn.dataset.reportId;
           if (!confirm('TAKEDOWN: Remove the reported track from the public AURENIX Radio catalog and mark this report as resolved?')) return;
           btn.disabled = true; btn.textContent = 'Processing…';
 
-          // Re-verify admin
-          const { data: { user: u } } = await supabase.auth.getUser();
-          if (!u || u.email !== ADMIN_EMAIL || !u.email_confirmed_at) {
+          if (!_verifyAdmin()) {
             alert('ACCESS DENIED'); btn.disabled = false; btn.textContent = '⛔ Takedown Track'; return;
           }
 
           try {
-            if (trackUid) {
-              await supabase.from('studio_queue').update({ status: 'removed' }).eq('uid', trackUid);
+            if (subId) {
+              await updateSubmission(subId, { status: 'removed' });
             }
-            await supabase.from('copyright_reports').update({ status: 'resolved_takedown' }).eq('id', reportId);
+            await updateReport(reportId, { status: 'resolved_takedown' });
             loadReportsPanel();
             loadAdminData();
           } catch (_) {
@@ -573,14 +581,12 @@ async function loadReportsPanel() {
           if (!confirm('Mark this report as resolved without removing the track?')) return;
           btn.disabled = true; btn.textContent = 'Resolving…';
 
-          // Re-verify admin
-          const { data: { user: u } } = await supabase.auth.getUser();
-          if (!u || u.email !== ADMIN_EMAIL || !u.email_confirmed_at) {
+          if (!_verifyAdmin()) {
             alert('ACCESS DENIED'); btn.disabled = false; btn.textContent = '✓ Resolve'; return;
           }
 
           try {
-            await supabase.from('copyright_reports').update({ status: 'resolved' }).eq('id', reportId);
+            await updateReport(reportId, { status: 'resolved' });
             loadReportsPanel();
             loadAdminData();
           } catch (_) {

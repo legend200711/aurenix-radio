@@ -1,9 +1,9 @@
 /**
- * AURENIX — Authentication System
+ * AURENIX — Authentication System (Firebase)
  * aurenix-auth.js
  *
  * Handles:
- *  - Auth state management (Supabase)
+ *  - Auth state management (Firebase Authentication)
  *  - Login / Register modal
  *  - Admin detection (christijerina46@gmail.com)
  *  - Nav user pill update
@@ -11,15 +11,28 @@
  *  - Global window.AURENIX_AUTH export
  *
  * SECURITY NOTE:
- *  Admin identity is verified via the email in the Supabase JWT.
- *  All sensitive operations are enforced server-side via Row Level Security.
- *  This file handles the UI layer only — it never grants real access.
+ *  Admin identity is verified via the email stored in the Firebase JWT.
+ *  All sensitive database operations are enforced server-side via Firestore
+ *  Security Rules. This file handles the UI layer only — it never grants
+ *  real access on its own.
+ *
+ *  Firebase Authentication is the sole identity provider.
+ *  Supabase is used ONLY for Storage (audio file uploads).
  */
 
-import { supabase, onAuthChange, loadUserProfile, upsertUserProfile }
-  from './supabase-client.js';
+import {
+  auth,
+  onAuthChange,
+  loadUserProfile,
+  upsertUserProfile,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
+  signOut as firebaseSignOut,
+  updateProfile,
+} from './firebase-client.js';
 
-/* ── Admin email — server side must also enforce this ── */
+/* ── Admin email — Firestore Security Rules also enforce this ── */
 const ADMIN_EMAIL = 'christijerina46@gmail.com';
 
 /* ═══════════════════════════════════════════
@@ -31,15 +44,15 @@ let _isAdmin = false;
 
 /* ═══════════════════════════════════════════
    ADMIN CHECK
-   Real access control is enforced by Supabase RLS.
-   This flag only controls UI visibility.
+   Real access control is enforced by Firestore Security Rules.
+   This flag controls UI visibility only.
 ═══════════════════════════════════════════ */
 function checkAdmin(user) {
-  return !!(user && user.email === ADMIN_EMAIL && user.email_confirmed_at);
+  return !!(user && user.email === ADMIN_EMAIL && user.emailVerified);
 }
 
 /* ═══════════════════════════════════════════
-   AUTH STATE CHANGE
+   AUTH STATE CHANGE (Firebase)
 ═══════════════════════════════════════════ */
 onAuthChange(async (user) => {
   _user    = user;
@@ -47,23 +60,23 @@ onAuthChange(async (user) => {
   _profile = null;
 
   if (user) {
-    _profile = await loadUserProfile(user.id);
+    _profile = await loadUserProfile(user.uid);
     if (!_profile) {
       // Create profile on first login
       const handle = (user.email || '').split('@')[0].replace(/[^a-z0-9_]/gi, '_');
       _profile = {
-        uid:          user.id,
+        uid:          user.uid,
         email:        user.email || '',
-        display_name: handle,
+        display_name: user.displayName || handle,
         username:     handle,
         role:         _isAdmin ? 'administrator' : 'member',
       };
-      await upsertUserProfile(_profile);
+      await upsertUserProfile(user.uid, _profile);
     }
     // Elevate admin role in profile if not already set
     if (_isAdmin && _profile.role !== 'administrator' && _profile.role !== 'founder') {
       _profile.role = 'administrator';
-      await upsertUserProfile({ uid: user.id, role: 'administrator' });
+      await upsertUserProfile(user.uid, { role: 'administrator' });
     }
   }
 
@@ -84,7 +97,7 @@ function updateNavUI() {
   if (!pill) return;
 
   if (_user) {
-    const name = _profile?.display_name || _user.email?.split('@')[0] || 'User';
+    const name = _profile?.display_name || _user.displayName || _user.email?.split('@')[0] || 'User';
     const avatarText = name.charAt(0).toUpperCase();
     pill.innerHTML = `
       <div class="nav-avatar" aria-hidden="true">${avatarText}</div>
@@ -100,8 +113,8 @@ function updateNavUI() {
 
 /* ═══════════════════════════════════════════
    ADMIN GATE ENFORCEMENT (UI layer)
-   Elements with data-admin-only="true" are hidden for non-admins.
-   Elements with data-requires-auth="true" are hidden when logged out.
+   Elements with data-admin-only are hidden for non-admins.
+   Elements with data-requires-auth are hidden when logged out.
 ═══════════════════════════════════════════ */
 function updateAdminGates() {
   document.querySelectorAll('[data-admin-only]').forEach(el => {
@@ -173,7 +186,7 @@ function buildModal() {
         </div>
         <div class="field-group">
           <label class="field-label" for="auth-reg-pass">Password</label>
-          <input class="field-input" type="password" id="auth-reg-pass" placeholder="At least 8 characters" autocomplete="new-password">
+          <input class="field-input" type="password" id="auth-reg-pass" placeholder="At least 6 characters" autocomplete="new-password">
         </div>
         <div id="auth-reg-error" class="auth-error" style="display:none;"></div>
         <button class="btn btn-gold" id="auth-reg-btn" style="width:100%;">Create Account</button>
@@ -235,16 +248,22 @@ function bindModalEvents(overlay) {
     errEl.style.display = 'none';
     if (!email || !pass) { showErr(errEl, 'Email and password are required.'); return; }
     loginBtn.disabled = true; loginBtn.textContent = 'Signing in…';
-    const { error } = await supabase.auth.signInWithPassword({ email, password: pass });
-    loginBtn.disabled = false; loginBtn.textContent = 'Sign In';
-    if (error) {
-      const isNotConfigured = error.message?.includes('not configured');
-      showErr(errEl, isNotConfigured
-        ? 'Backend not connected yet — Supabase credentials missing in supabase-client.js'
-        : 'Sign in failed. Check your email and password.');
-      return;
+    try {
+      await signInWithEmailAndPassword(auth, email, pass);
+      closeModal();
+    } catch (err) {
+      const code = err.code || '';
+      let msg = 'Sign in failed. Check your email and password.';
+      if (code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+        msg = 'Invalid email or password.';
+      } else if (code === 'auth/too-many-requests') {
+        msg = 'Too many attempts. Please wait a few minutes and try again.';
+      } else if (code === 'auth/invalid-email') {
+        msg = 'Please enter a valid email address.';
+      }
+      showErr(errEl, msg);
     }
-    closeModal();
+    loginBtn.disabled = false; loginBtn.textContent = 'Sign In';
   });
 
   /* ── Register ── */
@@ -255,31 +274,30 @@ function bindModalEvents(overlay) {
     const errEl = overlay.querySelector('#auth-reg-error');
     errEl.style.display = 'none';
     if (!email || !pass) { showErr(errEl, 'Email and password are required.'); return; }
-    if (pass.length < 8) { showErr(errEl, 'Password must be at least 8 characters.'); return; }
+    if (pass.length < 6) { showErr(errEl, 'Password must be at least 6 characters.'); return; }
     regBtn.disabled = true; regBtn.textContent = 'Creating account…';
-    const { data: signUpData, error } = await supabase.auth.signUp({
-      email, password: pass,
-      options: { data: { display_name: name || email.split('@')[0] } }
-    });
-    regBtn.disabled = false; regBtn.textContent = 'Create Account';
-    if (error) {
-      const isNotConfigured = error.message?.includes('not configured');
-      const isRateLimit = error.message?.toLowerCase().includes('rate limit') ||
-                          error.message?.toLowerCase().includes('email rate') ||
-                          error.status === 429;
-      showErr(errEl, isNotConfigured
-        ? 'Backend not connected yet — Supabase credentials missing in supabase-client.js'
-        : isRateLimit
-        ? 'Too many sign-up attempts. Please wait a few minutes and try again, or contact the platform administrator.'
-        : (error.message || 'Registration failed.'));
-      return;
-    }
-    // If email confirmation is disabled, the user is immediately signed in
-    if (signUpData?.user && !signUpData.user.identities?.length === 0) {
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email, pass);
+      // Set the display name on the Firebase Auth profile
+      if (name) {
+        await updateProfile(cred.user, { displayName: name });
+      }
       closeModal();
-      return;
+    } catch (err) {
+      const code = err.code || '';
+      let msg = err.message || 'Registration failed.';
+      if (code === 'auth/email-already-in-use') {
+        msg = 'An account with this email already exists. Try signing in instead.';
+      } else if (code === 'auth/invalid-email') {
+        msg = 'Please enter a valid email address.';
+      } else if (code === 'auth/weak-password') {
+        msg = 'Password is too weak. Use at least 6 characters.';
+      } else if (code === 'auth/too-many-requests') {
+        msg = 'Too many sign-up attempts. Please wait a few minutes and try again.';
+      }
+      showErr(errEl, msg);
     }
-    showErr(errEl, '✓ Account created! Check your email to confirm before signing in.', true);
+    regBtn.disabled = false; regBtn.textContent = 'Create Account';
   });
 
   /* ── Password Reset ── */
@@ -289,18 +307,20 @@ function bindModalEvents(overlay) {
     statEl.style.display = 'none';
     if (!email) { showErr(statEl, 'Enter your email address.'); return; }
     resetBtn.disabled = true; resetBtn.textContent = 'Sending…';
-    const { error } = await supabase.auth.resetPasswordForEmail(email);
-    resetBtn.disabled = false; resetBtn.textContent = 'Send Reset Link';
-    if (error) {
-      const isRateLimit = error.message?.toLowerCase().includes('rate limit') ||
-                          error.message?.toLowerCase().includes('email rate') ||
-                          error.status === 429;
-      showErr(statEl, isRateLimit
-        ? 'Too many requests. Please wait a few minutes before requesting another reset email.'
-        : 'Could not send reset email. Please try again later.');
-      return;
+    try {
+      await sendPasswordResetEmail(auth, email);
+      showErr(statEl, '✓ Reset link sent — check your email.', true);
+    } catch (err) {
+      const code = err.code || '';
+      let msg = 'Could not send reset email. Please try again later.';
+      if (code === 'auth/too-many-requests') {
+        msg = 'Too many requests. Please wait a few minutes before trying again.';
+      } else if (code === 'auth/invalid-email') {
+        msg = 'Please enter a valid email address.';
+      }
+      showErr(statEl, msg);
     }
-    showErr(statEl, '✓ Reset link sent — check your email.', true);
+    resetBtn.disabled = false; resetBtn.textContent = 'Send Reset Link';
   });
 
   /* Enter key support */
@@ -339,7 +359,7 @@ function closeModal() {
    SIGN OUT
 ═══════════════════════════════════════════ */
 async function signOut() {
-  await supabase.auth.signOut();
+  await firebaseSignOut(auth);
 }
 
 /* ═══════════════════════════════════════════
@@ -367,11 +387,11 @@ function esc(s) {
    BIND NAV BUTTONS (called after DOM ready)
 ═══════════════════════════════════════════ */
 function bindNavButtons() {
-  const loginBtn  = document.getElementById('nav-login-btn');
-  const pill      = document.getElementById('nav-user-pill');
+  const loginBtn   = document.getElementById('nav-login-btn');
+  const pill       = document.getElementById('nav-user-pill');
   const signoutBtn = document.getElementById('nav-signout-btn');
 
-  if (loginBtn)  loginBtn.addEventListener('click', () => openModal('login'));
+  if (loginBtn)   loginBtn.addEventListener('click', () => openModal('login'));
   if (signoutBtn) signoutBtn.addEventListener('click', () => signOut());
 
   if (pill) {

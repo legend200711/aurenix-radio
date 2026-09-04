@@ -1,178 +1,123 @@
 /**
- * AURENIX — Supabase Client
+ * AURENIX — Supabase Client (STORAGE ONLY)
  * supabase-client.js
  *
- * Single shared Supabase client for the entire AURENIX project.
- * Replaces all Firebase (Firestore + Auth + Realtime Database) usage.
+ * ██████████████████████████████████████████████████████████
+ * IMPORTANT — READ BEFORE EDITING
  *
- * Org: tzypauptizcsokgckpts
- * Project URL and anon key are set below — replace with your project's values
- * from https://supabase.com/dashboard/project/<project-ref>/settings/api
+ * This client is used ONLY for Supabase Storage.
+ * Authentication and database have been moved to Firebase.
+ * See firebase-client.js.
  *
- * Usage (ES module):
- *   import { supabase, getUser, onAuthChange } from './supabase-client.js';
+ * DO NOT:
+ *  - Add auth calls here
+ *  - Add database queries here
+ *  - Replace this with Firebase Storage
+ *  - Delete or rename the 'aurenix-radio' bucket
+ *  - Move or copy the audio files
+ *
+ * Supabase project: nxsyoreuwmmxtuvmeqbg
+ * Bucket: aurenix-radio
+ * ██████████████████████████████████████████████████████████
  */
 
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 
-/* ── Project credentials ─────────────────────────────────────────────────────
-   Set SUPABASE_URL and SUPABASE_ANON_KEY to your project values from:
-   https://supabase.com/dashboard/project/<ref>/settings/api
-──────────────────────────────────────────────────────────────────────────── */
+/* ── Supabase project credentials (Storage only) ──────────────────────── */
 const SUPABASE_URL      = 'https://nxsyoreuwmmxtuvmeqbg.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_nVGMJKoZGduKTt5Vh6P7cg_H692tMxL';
 
-/* ── Detect unconfigured state ── */
+/* ── Detect unconfigured state ─────────────────────────────────────────── */
 const _configured = !SUPABASE_URL.includes('YOUR_PROJECT_REF');
 
-/* ── Create a real client or a no-op stub ──────────────────────────────────── */
+/* ── Create a real client or a no-op stub ──────────────────────────────── */
 function _makeStub() {
-  const _noop   = () => Promise.resolve({ data: null, error: { message: 'Supabase not configured' } });
-  const _noopQ  = () => ({ select: _noopQ, insert: _noop, update: _noop, upsert: _noop, delete: _noop, eq: _noopQ, neq: _noopQ, gt: _noopQ, order: _noopQ, limit: _noopQ, range: _noopQ, ilike: _noopQ, single: _noop, maybeSingle: _noop, then: (r) => r({ data: null, error: null }) });
   return {
-    from:    () => _noopQ(),
-    rpc:     () => _noop(),
-    storage: { from: () => ({ upload: _noop, getPublicUrl: () => ({ data: { publicUrl: '' } }) }) },
-    channel: () => ({ on: function() { return this; }, subscribe: function() { return this; }, send: _noop }),
-    removeChannel: () => {},
-    auth: {
-      getUser:             () => Promise.resolve({ data: { user: null }, error: null }),
-      getSession:          () => Promise.resolve({ data: { session: null }, error: null }),
-      onAuthStateChange:   (cb) => { cb('INITIAL_SESSION', null); return { data: { subscription: { unsubscribe: () => {} } } }; },
-      signInWithPassword:  () => Promise.resolve({ data: null, error: { message: 'Supabase not configured — add credentials to supabase-client.js' } }),
-      signUp:              () => Promise.resolve({ data: null, error: { message: 'Supabase not configured — add credentials to supabase-client.js' } }),
-      signOut:             () => Promise.resolve({}),
-      resetPasswordForEmail: () => Promise.resolve({ error: null }),
+    storage: {
+      from: () => ({
+        upload:       () => Promise.resolve({ data: null, error: { message: 'Supabase Storage not configured' } }),
+        getPublicUrl: () => ({ data: { publicUrl: '' } }),
+        remove:       () => Promise.resolve({ data: null, error: null }),
+      }),
     },
   };
 }
 
+/**
+ * Supabase client — Storage access only.
+ * Use supabase.storage.from('aurenix-radio') to upload/retrieve audio files.
+ *
+ * All authentication and database queries must go through firebase-client.js.
+ */
 export const supabase = _configured
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: true,
-      },
-      realtime: {
-        params: { eventsPerSecond: 20 },
+        // Disable Supabase Auth completely — Firebase handles auth.
+        persistSession:  false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
       },
     })
   : _makeStub();
 
 if (!_configured) {
   console.warn(
-    '[AURENIX] Supabase credentials not set. ' +
+    '[AURENIX] Supabase Storage credentials not set. ' +
     'Open supabase-client.js and set SUPABASE_URL + SUPABASE_ANON_KEY. ' +
-    'The UI will render but all backend features are disabled until configured.'
+    'Audio uploads will be disabled until configured.'
   );
 }
 
-/* ── Auth helpers ──────────────────────────────────────────────────────────── */
+/* ── STORAGE BUCKET CONSTANT ───────────────────────────────────────────── */
+
+/** The name of the existing Supabase Storage bucket for audio files. */
+export const RADIO_BUCKET = 'aurenix-radio';
+
+/* ── Storage helpers ───────────────────────────────────────────────────── */
 
 /**
- * Returns the currently signed-in user, or null if not authenticated.
- * @returns {Promise<import('@supabase/supabase-js').User | null>}
- */
-export async function getUser() {
-  const { data: { user } } = await supabase.auth.getUser();
-  return user;
-}
-
-/**
- * Subscribe to auth state changes (mirrors Firebase onAuthStateChanged).
- * @param {(user: import('@supabase/supabase-js').User | null) => void} cb
- * @returns {{ data: { subscription: { unsubscribe: () => void } } }}
- */
-export function onAuthChange(cb) {
-  return supabase.auth.onAuthStateChange((_event, session) => {
-    cb(session?.user ?? null);
-  });
-}
-
-/**
- * Load the user's profile row from the `users` table.
- * Returns null if the row doesn't exist yet.
- * @param {string} uid
- * @returns {Promise<Record<string, any> | null>}
- */
-export async function loadUserProfile(uid) {
-  // The canonical users table uses `id` as PK (references auth.users).
-  // Some deployments also have a `uid` column; try `id` first, fall back to `uid`.
-  const { data, error } = await supabase
-    .from('users')
-    .select('*')
-    .eq('id', uid)
-    .maybeSingle();
-  if (error) console.warn('[Supabase] loadUserProfile error:', error.message);
-  if (data) return data;
-
-  // Fallback for deployments where uid is the stored column
-  const { data: data2, error: err2 } = await supabase
-    .from('users')
-    .select('*')
-    .eq('uid', uid)
-    .maybeSingle();
-  if (err2) console.warn('[Supabase] loadUserProfile (uid fallback) error:', err2.message);
-  return data2 ?? null;
-}
-
-/**
- * Upsert (create-or-update) a user profile row.
- * @param {Record<string, any>} profile  — must include `uid` or `id`
+ * Upload an audio file to the existing Supabase Storage bucket.
  *
- * The users table primary key is `id` (uuid references auth.users).
- * Some callers pass `uid` instead of `id`; normalise both directions so
- * the upsert always targets the correct PK column.
+ * Path format: radio/<firebase_uid>/<timestamp>.<ext>
+ * This path is the same format used before the migration — existing files
+ * are untouched.
+ *
+ * @param {string} firebaseUid  — Firebase Auth UID of the uploader
+ * @param {File}   file         — audio File object from file input
+ * @param {(pct: number) => void} [onProgress]  — optional progress callback
+ * @returns {Promise<{ storagePath: string, publicUrl: string }>}
  */
-export async function upsertUserProfile(profile) {
-  // Normalise: whichever of `id` / `uid` is present, set both so the row
-  // lands correctly whether the live table uses `id` or `uid` as PK.
-  const authId = profile.id || profile.uid;
-  if (!authId) {
-    console.warn('[Supabase] upsertUserProfile: no id/uid provided');
-    return;
-  }
-  const normalised = { ...profile, id: authId, uid: authId };
+export async function uploadAudioFile(firebaseUid, file, onProgress) {
+  const ext      = (file.name.split('.').pop() || 'mp3').toLowerCase();
+  const fileName = `radio/${firebaseUid}/${Date.now()}.${ext}`;
 
-  // Try PK = 'id' first (canonical schema).  If the table was created with
-  // 'uid' as PK instead, the fallback below catches the conflict error.
-  const { error } = await supabase
-    .from('users')
-    .upsert(normalised, { onConflict: 'id' });
+  const { data, error } = await supabase.storage
+    .from(RADIO_BUCKET)
+    .upload(fileName, file, {
+      cacheControl: '3600',
+      upsert:       false,
+      onUploadProgress: p => {
+        if (onProgress) onProgress(Math.round((p.loaded / p.total) * 100));
+      },
+    });
 
-  if (error) {
-    // Fallback: some deployments have uid as the unique/PK column.
-    const { error: err2 } = await supabase
-      .from('users')
-      .upsert(normalised, { onConflict: 'uid' });
-    if (err2) console.warn('[Supabase] upsertUserProfile error:', err2.message);
-  }
+  if (error) throw error;
+
+  const { data: { publicUrl } } = supabase.storage
+    .from(RADIO_BUCKET)
+    .getPublicUrl(fileName);
+
+  return { storagePath: fileName, publicUrl };
 }
 
 /**
- * Returns an access token for the current session (replaces Firebase getIdToken).
- * @returns {Promise<string | null>}
+ * Get the public URL for an existing storage path.
+ * Use this to construct playback URLs from stored paths.
+ * @param {string} storagePath  — e.g. "radio/<uid>/<timestamp>.mp3"
  */
-export async function getAccessToken() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token ?? null;
-}
-
-/* ── Feature-flag helper ───────────────────────────────────────────────────── */
-
-/**
- * Read a single feature flag from the `site_settings` table.
- * Returns the default value if the row is missing or the column is null.
- * @param {string} key
- * @param {*} defaultValue
- */
-export async function getFeatureFlag(key, defaultValue = true) {
-  const { data, error } = await supabase
-    .from('site_settings')
-    .select(key)
-    .eq('id', 'config')
-    .maybeSingle();
-  if (error || !data) return defaultValue;
-  return data[key] ?? defaultValue;
+export function getStorageUrl(storagePath) {
+  const { data: { publicUrl } } = supabase.storage
+    .from(RADIO_BUCKET)
+    .getPublicUrl(storagePath);
+  return publicUrl;
 }
