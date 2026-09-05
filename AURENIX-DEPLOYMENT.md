@@ -16,39 +16,37 @@ AURENIX is a complete platform combining:
 
 ## Required Configuration
 
-### 1. Supabase Project
+### 1. Supabase Project (Storage only)
 
-1. Create a Supabase project at [supabase.com](https://supabase.com)
-2. Go to **Settings → API** and copy:
-   - **Project URL** (e.g. `https://abcdefgh.supabase.co`)
-   - **Anon public key**
+> **Architecture note:** AURENIX uses **Firebase** for Authentication and the
+> database (Firestore). Supabase is used **only for Storage** (audio and media
+> files). No Supabase Auth session exists in the browser.
 
-3. Open `supabase-client.js` and replace the placeholders:
+1. Open `supabase-client.js` — credentials are already set:
 ```js
-const SUPABASE_URL      = 'https://YOUR_PROJECT_REF.supabase.co';
-const SUPABASE_ANON_KEY = 'YOUR_ANON_KEY';
+const SUPABASE_URL      = 'https://nxsyoreuwmmxtuvmeqbg.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_nVGMJKoZGduKTt5Vh6P7cg_H692tMxL';
 ```
 
-4. Run the schema migrations in **Supabase → SQL Editor** (in order):
-   1. `AURENIX-RUN-IN-SUPABASE.sql` — core schema, RLS, RPCs (idempotent)
-   2. `aurenix-radio-fix.sql` — radio queue table and policies (idempotent)
-   3. **`aurenix-radio-station.sql`** — **NEW** shared continuous station state table, `advance_radio_station` RPC, Realtime subscription (run this once to enable the shared radio station)
+2. Run the Storage RLS fix in **Supabase → SQL Editor**:
 
-   All files are idempotent (`IF NOT EXISTS`, `DROP POLICY IF EXISTS`). Safe to re-run.
+   **`aurenix-storage-firebase-fix.sql`** ← **Run this first / again if uploads fail**
 
-5. Enable **Email Auth** in **Authentication → Providers**
+   This file replaces the old `auth.uid()`-based storage policies with anon-role
+   policies that work without a Supabase Auth session. Without this, every audio
+   upload returns: *"new row violates row-level security policy"*.
 
-6. Set **Site URL** in **Authentication → URL Configuration** to your domain
+3. Supabase database schema files are **historical reference only** — radio
+   submissions now live in Firestore, not Supabase tables.
 
 ### 2. Supabase Storage Buckets
 
-Run **`aurenix-radio-storage.sql`** in the Supabase SQL Editor. It will:
+Run **`aurenix-storage-firebase-fix.sql`** in the Supabase SQL Editor. It will:
 
-- Create the `aurenix-radio` bucket (50 MB, audio/* types, **private**)
-- Create the `aurenix-media` bucket (200 MB, video/audio/image, **private**)
-- Apply all Storage RLS policies
-- Add `storage_bucket` and `storage_path` columns to `radio_queue`
-- Tighten `radio_queue` INSERT policy (file uploads require authentication)
+- Drop the old `auth.uid()`-based storage policies (which break without Supabase Auth)
+- Add anon-role INSERT policy for `radio/` prefix uploads
+- Add anon-role SELECT policy for `radio/` prefix playback
+- Leave `aurenix-media` bucket policies unchanged
 
 | Bucket | Public | Max Size | Used by |
 |--------|--------|----------|---------|
@@ -56,21 +54,35 @@ Run **`aurenix-radio-storage.sql`** in the Supabase SQL Editor. It will:
 | `aurenix-media` | ✗ (private) | 200 MB | Media uploads |
 
 > **Important:** Both buckets are **private** (not globally public). Uploaded files
-> are stored under `<user_id>/<timestamp>.<ext>`. Only authenticated users can read
-> their own files. Public playback of approved tracks is served via the stored URL.
+> are stored under `radio/<firebase_uid>/<timestamp>.<ext>`. The anon-role policy
+> restricts uploads to the `radio/` prefix only. Playback URLs are constructed from
+> Firestore `storage_path` field via `getPublicUrl()`.
 > Do **not** make these buckets globally public — that would expose pending/rejected audio.
 
 ### 3. Admin Account
 
 The only AURENIX administrator is **christijerina46@gmail.com**.
 
-1. Register this email through the AURENIX sign-in form
-2. Confirm the email via the verification link
-3. The admin UI (admin button, dashboard, moderation) will appear automatically
+1. Sign in (or register) with this exact email through the AURENIX sign-in form
+2. **Verify the email address** — Firebase Auth sends a verification link to the inbox.
+   This step is mandatory. Without `emailVerified = true`, the admin dashboard will
+   show **"EMAIL NOT VERIFIED"** even after signing in with the correct credentials.
+3. To manually force-verify in the Firebase Console:
+   - Open [Firebase Console → Authentication → Users](https://console.firebase.google.com/project/remix-studio-4bf8a/authentication/users)
+   - Find `christijerina46@gmail.com`
+   - If the Email Verified column shows ✗, click the three-dot menu → **Edit user** → tick "Email verified" → Save
+4. The admin UI (admin button in nav, full dashboard, Radio Moderation controls) appears automatically after sign-in
+
+**Identity check order (aurenix-admin.js):**
+1. If `auth.currentUser === null` → Firebase Auth not yet resolved → shows "Verifying…" (NOT Access Denied)
+2. If email matches `ADMIN_EMAIL` but `emailVerified === false` → shows "EMAIL NOT VERIFIED" with console link
+3. If wrong email → ACCESS DENIED
+4. If email matches AND verified → Admin Dashboard rendered
 
 **Security model:**
-- Admin identity is verified via Supabase JWT (email in token)
-- Supabase RLS enforces permissions server-side independently
+- Admin identity is verified via Firebase JWT (`user.email` + `user.emailVerified` from Firebase Auth object)
+- **Never** uses localStorage, URL params, username, or any client-controlled value
+- Firestore Security Rules enforce permissions server-side independently of JS
 - Client-side code only controls UI visibility — not actual access
 - Unauthorized users receive **ACCESS DENIED** regardless of JS manipulation
 
@@ -123,27 +135,26 @@ It uses Cloudflare Durable Objects. See `24-hour-cloud-stream/README.md` for its
 
 ### Admin Enforcement (Multi-Layer)
 
-1. **Email verification** — Only `christijerina46@gmail.com` with confirmed email gets admin flag
-2. **JWT-based check** — `aurenix-auth.js` checks `user.email` from verified Supabase JWT
-3. **Supabase RLS** — Row Level Security policies enforce permissions independently:
-   - Radio moderation: only `role IN ('founder', 'administrator', 'moderator')`
-   - Media moderation: same
-   - Site settings: only `role IN ('founder', 'administrator')`
-4. **Double verification** — `aurenix-admin.js` re-fetches user from Supabase before mounting
+1. **Email verification** — Only `christijerina46@gmail.com` with `emailVerified=true` gets admin flag
+2. **Firebase JWT check** — `aurenix-auth.js` checks `user.email` + `user.emailVerified` from Firebase Auth
+3. **Firestore Security Rules** — enforce permissions server-side independently:
+   - Radio submissions: only admin can change status away from `pending`
+   - Radio reports: only admin can read or resolve
+   - Site settings: only admin can write
+4. **Double verification** — `aurenix-admin.js` calls `_verifyAdmin()` (re-reads `auth.currentUser`) before every sensitive operation
 5. **UI hiding** — Elements with `data-admin-only` hidden via CSS/JS (defense-in-depth only)
 
 ### What Regular Users Cannot Access
 - Admin dashboard (shows ACCESS DENIED)
-- Radio moderation panel (RLS rejects writes)
-- Approve/reject radio submissions (RLS protected)
-- Media moderation (RLS protected)
-- Other users' private data (RLS: `auth.uid() = id`)
-- Other users' uploaded files (Storage RLS: folder = uid)
+- Radio moderation (Firestore rules reject status changes)
+- Approve/reject radio submissions (Firestore rules protected)
+- Other users' private data (Firestore rules: `submitted_by == request.auth.uid`)
+- Other users' pending audio (Supabase Storage: only `radio/` prefix readable)
 
 ### Direct URL Attack Protection
 - Accessing `#admin` while not admin: shows ACCESS DENIED UI
-- Direct Supabase API calls without auth: rejected by RLS
-- Editing localStorage/client state: has no effect on server-side RLS
+- Direct Firestore writes without auth: rejected by Security Rules
+- Editing localStorage/client state: has no effect on server-side rules
 
 ---
 

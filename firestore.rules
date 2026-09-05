@@ -68,14 +68,34 @@ service cloud.firestore {
 
     // ────────────────────────────────────────────────────────────
     // RADIO SUBMISSIONS — /radio_submissions/{submissionId}
+    //
+    // get  = single document fetch (getDoc)
+    // list = collection query     (getDocs / onSnapshot with query)
+    //
+    // Splitting get/list is required because Firestore evaluates
+    // query rules against the query constraints, not document data.
+    // A rule that references resource.data cannot be used to approve
+    // an unfiltered list query — isAdmin() must stand alone for list.
     // ────────────────────────────────────────────────────────────
     match /radio_submissions/{submissionId} {
 
-      // Public can only read APPROVED or PLAYING submissions
-      allow read: if resource.data.status == 'approved'
-                  || resource.data.status == 'playing'
-                  || isAdmin()
-                  || (isSignedIn() && resource.data.submitted_by == request.auth.uid);
+      // Single-document reads: admin sees all, public sees approved/playing,
+      // owners see their own submissions.
+      allow get: if isAdmin()
+                 || resource.data.status == 'approved'
+                 || resource.data.status == 'playing'
+                 || (isSignedIn() && resource.data.submitted_by == request.auth.uid);
+
+      // Collection queries:
+      //  - Admin: unrestricted — isAdmin() alone, no resource.data dependency.
+      //  - Signed-in users: allowed when the query is filtered to their own
+      //    submitted_by. Firestore validates equality-filtered queries against
+      //    resource.data, so this correctly restricts results to owned docs.
+      //  - Public: approved/playing tracks only (status filter enforced by query).
+      allow list: if isAdmin()
+                  || (isSignedIn() && resource.data.submitted_by == request.auth.uid)
+                  || resource.data.status == 'approved'
+                  || resource.data.status == 'playing';
 
       // Authenticated users can create their own submissions.
       // Status MUST be 'pending' on create — users cannot self-approve.
@@ -83,8 +103,10 @@ service cloud.firestore {
                     && request.resource.data.submitted_by == request.auth.uid
                     && request.resource.data.status == 'pending';
 
-      // Users can update their OWN PENDING submissions (metadata only).
-      // They CANNOT change: status, submitted_by, rights_confirmed.
+      // Status transitions:
+      //   Admin  — may change any field on any document.
+      //   Owner  — may edit metadata only on their own PENDING submission;
+      //            cannot touch status, submitted_by, or rights_confirmed.
       allow update: if isAdmin()
                     || (isSignedIn()
                         && resource.data.submitted_by == request.auth.uid

@@ -391,12 +391,26 @@
 <script src="aurenix-bg.js" defer></script>
 <script src="aurenix-crow.js" defer></script>
 <script type="module">
-/* Radio standalone page — Firebase Auth + Firestore, Supabase Storage for audio. */
-import { supabase }                   from './supabase-client.js';
+/**
+ * AURENIX RADIO — Standalone page inline script
+ *
+ * Architecture:
+ *  - Firebase Authentication — identity
+ *  - Firestore — ALL submission data, queue state, moderation
+ *  - Supabase Storage — actual audio files ONLY (existing bucket, unchanged)
+ *
+ * ████████████████████████████████████████████████
+ * NO Supabase database calls exist in this script.
+ * Audio uploads go to Supabase STORAGE only.
+ * Submission metadata goes to Firestore only.
+ * ████████████████████████████████████████████████
+ */
+import { uploadAudioFile }            from './supabase-client.js';
 import { auth, db,
          onAuthChange, loadUserProfile,
+         createSubmission,
          collection, query, where, orderBy, onSnapshot,
-         doc, updateDoc, serverTimestamp, addDoc }
+         doc, updateDoc, serverTimestamp }
                                       from './firebase-client.js';
 
 const $ = id => document.getElementById(id);
@@ -418,14 +432,18 @@ onAuthChange(async (user) => {
   }
 });
 
-/* ── Queue: real-time Firestore subscription ── */
+/* ── Queue: real-time Firestore subscription ──
+   Only subscribes to approved/playing tracks for the public display.
+   Pending submissions are only visible to their owner or the admin
+   (enforced by Firestore Security Rules).
+── */
 function subscribeQueue() {
   if (_unsubQueue) { try { _unsubQueue(); } catch(_) {} _unsubQueue = null; }
 
   const q = query(
     collection(db, 'radio_submissions'),
-    where('status', 'in', ['pending','approved','playing']),
-    orderBy('created_at', 'asc'),
+    where('status', 'in', ['approved', 'playing']),
+    orderBy('updated_at', 'asc'),
   );
 
   _unsubQueue = onSnapshot(q, snap => {
@@ -511,7 +529,6 @@ function renderNP(t) {
 
 function renderQueues() {
   const approved = state.queue.filter(t => t.status === 'approved' || t.status === 'playing');
-  const pending  = state.queue.filter(t => t.status === 'pending');
 
   /* Approved queue */
   const qList = $('radio-queue-list-s'); const ac = $('radio-approved-count');
@@ -539,62 +556,48 @@ function renderQueues() {
       : '<div style="font-size:13px;color:var(--text-muted);">Nothing queued</div>';
   }
 
-  /* Moderation list */
+  /* Moderation panel — hidden for non-admins; full admin UI is in aurenix-admin.js */
   const modList = $('radio-mod-list'); const pc = $('radio-pending-count');
-  if (pc) pc.textContent = pending.length + ' pending';
-  if (modList) {
-    if (!pending.length) {
-      modList.innerHTML = '<div style="font-size:12px;color:var(--text-muted);">No pending submissions</div>';
-    } else {
-      modList.innerHTML = pending.map(t => `
-        <div class="mod-item">
-          <div class="mod-item-info">
-            <div class="mod-item-title">${esc(t.title)}</div>
-            <div class="mod-item-meta">${esc(t.artist||'Unknown')} · ${esc(t.type)}</div>
-          </div>
-          <div class="mod-actions">
-            <button class="mod-approve" onclick="moderateItem('${t.id}','approve')">✓ Approve</button>
-            <button class="mod-reject"  onclick="moderateItem('${t.id}','reject')">✕ Reject</button>
-          </div>
-        </div>`).join('');
-    }
-  }
+  if (pc) pc.textContent = '—';
+  if (modList) modList.innerHTML = '<div style="font-size:12px;color:var(--text-muted);">Use the Admin panel to moderate submissions.</div>';
 }
 
-window.moderateItem = async function(id, action) {
-  const newStatus = action === 'approve' ? 'approved' : 'rejected';
-  await updateDoc(doc(db, 'radio_submissions', id), { status: newStatus, updated_at: serverTimestamp() }).catch(() => {});
-  if (action === 'approve') {
-    const hasPlaying = state.queue.some(t => t.status === 'playing');
-    if (!hasPlaying) await updateDoc(doc(db, 'radio_submissions', id), { status: 'playing', updated_at: serverTimestamp() }).catch(() => {});
-  }
-  showToast(action === 'approve' ? '✓ Track approved' : 'Track rejected');
-};
-
-/* ── Submit form ── */
-const RADIO_BUCKET = 'aurenix-radio';
-
+/* ── Submit form ──
+   STEP 1: Upload audio to existing Supabase STORAGE bucket (aurenix-radio).
+           Uses uploadAudioFile() from supabase-client.js which stores the file at
+           radio/<firebase_uid>/<timestamp>.<ext> — the same path format as before migration.
+           NO Supabase database call is made.
+   STEP 2: Create submission document in Firestore radio_submissions collection.
+           Status is forced to 'pending'. Users CANNOT self-approve.
+── */
 const submitBtn = $('rsub-submit-btn-s');
 if (submitBtn) {
   submitBtn.addEventListener('click', async () => {
-    const type  = typeSelect?.value || 'upload';
-    const title = ($('rsub-title-s')?.value || '').trim();
+    const type   = typeSelect?.value || 'upload';
+    const title  = ($('rsub-title-s')?.value  || '').trim();
     const artist = ($('rsub-artist-s')?.value || '').trim();
-    const notes  = ($('rsub-notes-s')?.value || '').trim();
+    const notes  = ($('rsub-notes-s')?.value  || '').trim();
     const rights = $('rsub-rights-s')?.checked || false;
     const statusDiv = $('rsub-status-s');
 
-    if (!title) { showStatus(statusDiv, 'error', 'Track title is required.'); return; }
-    if (!rights) { showStatus(statusDiv, 'error', 'Please confirm you have rights to submit this content.'); return; }
+    if (!title)  { showStatus(statusDiv, 'error', 'Track title is required.'); return; }
+    if (!artist) { showStatus(statusDiv, 'error', 'Artist name is required.'); return; }
 
-    /* Require login for file uploads */
+    /* All submissions require Firebase Authentication */
     const currentUser = auth.currentUser;
-    if (type === 'upload' && !currentUser) {
-      showStatus(statusDiv, 'error', 'Please sign in to upload audio files.'); return;
+    if (!currentUser) {
+      showStatus(statusDiv, 'error', 'Please sign in to submit to AURENIX Radio.');
+      return;
+    }
+
+    if (type === 'upload' && !rights) {
+      showStatus(statusDiv, 'error', 'Please confirm you have rights to submit this content.');
+      return;
     }
 
     let url = '';
     let storagePath = null;
+    let storageBucket = null;
 
     if (type === 'upload') {
       if (!fileInp?.files?.[0]) { showStatus(statusDiv, 'error', 'Please select an audio file.'); return; }
@@ -610,11 +613,9 @@ if (submitBtn) {
     submitBtn.disabled = true; submitBtn.textContent = 'Submitting…';
 
     try {
-      /* ── Step 1: Upload audio file to Supabase Storage (unchanged bucket) ── */
+      /* ── STEP 1: Upload audio to Supabase STORAGE only (no database) ── */
       if (type === 'upload') {
         const file = fileInp.files[0];
-        const ext  = file.name.split('.').pop().toLowerCase() || 'mp3';
-        storagePath = `${currentUser.uid}/${Date.now()}.${ext}`;
 
         const progWrap = $('rsub-upload-progress-s');
         const progFill = $('rsub-progress-fill-s');
@@ -623,66 +624,52 @@ if (submitBtn) {
 
         submitBtn.textContent = 'Uploading…';
 
-        const { error: upErr } = await supabase.storage
-          .from(RADIO_BUCKET)
-          .upload(storagePath, file, {
-            cacheControl: '3600',
-            upsert: false,
-            onUploadProgress: p => {
-              const pct = p.total ? Math.round((p.loaded / p.total) * 100) : 0;
-              if (progFill) progFill.style.width = pct + '%';
-              if (progPct)  progPct.textContent  = pct + '%';
-            },
-          });
+        /* uploadAudioFile uses path: radio/<firebase_uid>/<timestamp>.<ext>
+           This is Supabase STORAGE only — no database row is inserted. */
+        const result = await uploadAudioFile(
+          currentUser.uid,
+          file,
+          pct => {
+            if (progFill) progFill.style.width = pct + '%';
+            if (progPct)  progPct.textContent  = pct + '%';
+          },
+        );
 
-        if (upErr) {
-          console.error('[Radio] Storage upload error:', upErr);
-          if (progWrap) progWrap.style.display = 'none';
-          showStatus(statusDiv, 'error', 'Unable to upload your music. Please try again.');
-          submitBtn.disabled = false; submitBtn.textContent = '◉ Submit to AURENIX Radio';
-          return;
-        }
+        url          = result.publicUrl;
+        storagePath  = result.storagePath;
+        storageBucket = 'aurenix-radio';
 
         if (progFill) progFill.style.width = '100%';
         if (progPct)  progPct.textContent  = '100%';
-
-        /* Get the storage URL for this file (not publicly readable yet — stored for admin use) */
-        const { data: urlData } = supabase.storage.from(RADIO_BUCKET).getPublicUrl(storagePath);
-        url = urlData?.publicUrl || '';
-
         submitBtn.textContent = 'Saving…';
         if (progWrap) progWrap.style.display = 'none';
       }
 
-      /* ── Step 2: Create submission in Firestore (only after successful upload) ── */
-      const row = {
+      /* ── STEP 2: Create submission in Firestore radio_submissions ──
+         createSubmission() forces status='pending' — users CANNOT self-approve.
+         submitted_by is always the Firebase UID of the logged-in user.
+         NO Supabase database call is made here.
+      ── */
+      const docId = await createSubmission({
         title,
-        artist:       artist || 'Unknown Artist',
+        artist,
         type,
-        content_type: type === 'upload' ? 'aurenix_audio' : 'external_media',
+        content_type:     type === 'upload' ? 'aurenix_audio' : 'external_media',
         url,
+        storage_bucket:   storageBucket,
+        storage_path:     storagePath,
         notes,
         rights_confirmed: rights,
-        submitted_by:     currentUser?.uid || null,
-      };
-      /* Persist Supabase Storage path/bucket for the audio file reference */
-      if (storagePath) {
-        row.storage_bucket = RADIO_BUCKET;
-        row.storage_path   = storagePath;
-      }
+        submitted_by:     currentUser.uid,   // always Firebase UID — never null
+        album:            null,
+        genre:            null,
+        artwork_url:      null,
+        play_count:       0,
+        likes:            0,
+      });
 
-      try {
-        await addDoc(collection(db, 'radio_submissions'), {
-          ...row,
-          status:     'pending',
-          created_at: serverTimestamp(),
-          updated_at: serverTimestamp(),
-        });
-      } catch (insErr) {
-        /* Upload succeeded but Firestore insert failed — log orphaned file path */
-        console.error('[Radio] Firestore insert error after upload (storagePath:', storagePath, '):', insErr);
-        throw insErr;
-      }
+      console.log('[Radio] Submission saved to Firestore. ID:', docId,
+        '| Storage path:', storagePath || '(external link)');
 
       submitBtn.disabled = false; submitBtn.textContent = '◉ Submit to AURENIX Radio';
       showStatus(statusDiv, 'success', '✓ Submitted! Your track is pending moderation.');
@@ -690,8 +677,14 @@ if (submitBtn) {
       if (fileInp) fileInp.value = '';
       if (filenameLbl) filenameLbl.textContent = 'Click to select or drop audio file';
       const rc = $('rsub-rights-s'); if (rc) rc.checked = false;
+
     } catch(e) {
       console.error('[Radio] Submission error:', e);
+      /* If a file was uploaded to Supabase Storage but Firestore failed,
+         log the orphaned path so it can be manually cleaned up. */
+      if (storagePath) {
+        console.error('[Radio] ORPHANED UPLOAD — Storage path:', storagePath, '| User:', currentUser.uid);
+      }
       submitBtn.disabled = false; submitBtn.textContent = '◉ Submit to AURENIX Radio';
       showStatus(statusDiv, 'error', 'Submission failed: ' + (e.message || 'Please try again.'));
     }

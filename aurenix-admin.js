@@ -16,7 +16,6 @@
 import {
   auth,
   db,
-  getAllSubmissions,
   updateSubmission,
   getAllReports,
   updateReport,
@@ -24,6 +23,8 @@ import {
   collection,
   query,
   where,
+  orderBy,
+  onSnapshot,
   getDocs,
 } from './firebase-client.js';
 
@@ -35,8 +36,31 @@ const ADMIN_EMAIL = 'christijerina46@gmail.com';
 window.addEventListener('aurenix:authchange', (e) => {
   const { isAdmin } = e.detail;
   const adminPage = document.getElementById('page-admin');
+
+  /* Capture whether the admin page is currently the active page BEFORE
+     we hide it below — we need this to decide whether to remount. */
+  const adminPageActive = adminPage && adminPage.classList.contains('active');
+
   if (adminPage) {
     adminPage.style.display = isAdmin ? '' : 'none';
+  }
+
+  /* If auth just resolved and the admin page is currently active,
+     remount the content now — this handles the race condition where
+     Firebase Auth resolves AFTER the navigation event fires on page load.
+     Without this, the admin sees ACCESS DENIED or "Verifying…" permanently
+     until they navigate away and back. */
+  const container = document.getElementById('admin-content');
+  if (container && adminPageActive) {
+    if (isAdmin) {
+      renderAdminDashboard(container);
+      loadAdminData();
+    } else {
+      /* Auth resolved but not admin — replace any loading state.
+         Delegate to mountAdmin() which has full diagnostic logic
+         (e.g., email-verified check with helpful error message). */
+      mountAdmin();
+    }
   }
 });
 
@@ -46,6 +70,10 @@ window.addEventListener('aurenix:authchange', (e) => {
 window.addEventListener('aurenix:navigate', (e) => {
   if (e.detail.page === 'admin') {
     mountAdmin();
+  } else {
+    /* Navigated away — detach the live radio listener to avoid
+       orphaned Firestore subscriptions. */
+    _detachRadioListener();
   }
   if (e.detail.page === 'mysubs') {
     mountMySubsPage();
@@ -55,10 +83,17 @@ window.addEventListener('aurenix:navigate', (e) => {
 /* ═══════════════════════════════════════════
    ADMIN IDENTITY CHECK
    Re-verified from Firebase Auth on every sensitive call.
+   Uses auth.currentUser from Firebase — NEVER localStorage or username.
+   The ADMIN_EMAIL constant (christijerina46@gmail.com) must match AND
+   emailVerified must be true (prevents unverified account spoofing).
 ═══════════════════════════════════════════ */
 function _verifyAdmin() {
   const user = auth.currentUser;
-  return !!(user && user.email === ADMIN_EMAIL && user.emailVerified);
+  return !!(
+    user &&
+    user.email === ADMIN_EMAIL &&
+    user.emailVerified
+  );
 }
 
 /* ═══════════════════════════════════════════
@@ -154,22 +189,58 @@ async function mountMySubsPage() {
 /* ═══════════════════════════════════════════
    ADMIN MOUNT
 ═══════════════════════════════════════════ */
-let _mounted = false;
-
 async function mountAdmin() {
   const container = document.getElementById('admin-content');
   if (!container) return;
 
-  // Re-verify directly from Firebase Auth — never trust client-side state alone
-  if (!_verifyAdmin()) {
-    renderAccessDenied(container);
+  /* auth.currentUser is null in two different situations:
+       a) Firebase Auth has not resolved yet (page just loaded — race condition)
+       b) No user is logged in at all
+     We must NOT render ACCESS DENIED for case (a) — if we do, the admin will
+     see a denied page even after logging in with christijerina46@gmail.com.
+     Instead, show a loading indicator; the aurenix:authchange listener will
+     call renderAdminDashboard() once auth resolves to admin. */
+  if (auth.currentUser === null) {
+    container.innerHTML = `
+      <div style="padding:60px 24px; text-align:center; color:var(--text-muted); font-size:13px; letter-spacing:1px;">
+        Verifying administrator credentials…
+      </div>`;
     return;
   }
 
-  if (!_mounted) {
-    _mounted = true;
-    renderAdminDashboard(container);
+  // Auth has resolved — now check identity from Firebase Auth object.
+  // Uses user.email (from Firebase JWT) and user.emailVerified.
+  // NEVER uses localStorage, username, or URL params.
+  const user = auth.currentUser;
+  if (!_verifyAdmin()) {
+    /* Provide a clear diagnostic if the correct email is signed in but
+       email verification has not been completed — this is the most common
+       reason a valid admin account is blocked. */
+    if (user && user.email === ADMIN_EMAIL && !user.emailVerified) {
+      container.innerHTML = `
+        <div class="access-denied-block">
+          <div class="adb-glyph">⚠</div>
+          <div class="adb-title">EMAIL NOT VERIFIED</div>
+          <div class="adb-sub">
+            You are signed in as <strong>${user.email}</strong> but your email address
+            has not been verified with Firebase.<br><br>
+            Check your inbox for a verification email, or go to the
+            <a href="https://console.firebase.google.com/project/remix-studio-4bf8a/authentication/users"
+               target="_blank" rel="noopener"
+               style="color:var(--gold);">Firebase Console</a>
+            and manually verify the account.
+          </div>
+        </div>`;
+      return;
+    }
+    renderAccessDenied(container);
+    _detachRadioListener();
+    return;
   }
+
+  /* Always rebuild the dashboard shell so that the listener is re-attached
+     fresh each time the admin navigates to this page. */
+  renderAdminDashboard(container);
   loadAdminData();
 }
 
@@ -277,53 +348,44 @@ function setStat(id, val) {
 
 /* ═══════════════════════════════════════════
    RADIO MODERATION PANEL
+   Uses a real-time onSnapshot listener so the panel updates
+   immediately when any submission status changes.
 ═══════════════════════════════════════════ */
-let _radioFilter = 'pending';
+let _radioFilter    = 'pending';
+let _radioUnsub     = null;   // active onSnapshot unsubscribe fn
+let _allSubmissions = [];     // cached snapshot for the current listener
 
-async function loadRadioPanel() {
+function loadRadioPanel() {
   const panel = document.getElementById('admin-panel-radio');
   if (!panel) return;
 
   if (!_verifyAdmin()) {
     panel.innerHTML = '<div style="padding:20px; color:#ff6680;">ACCESS DENIED — administrator account required.</div>';
+    _detachRadioListener();
     return;
   }
 
-  panel.innerHTML = `<div style="padding:20px; color:var(--text-muted); font-size:13px;">Loading radio queue…</div>`;
-
-  try {
-    const data = await getAllSubmissions();
-    renderRadioPanel(panel, data);
-  } catch (e) {
-    panel.innerHTML = `<div style="padding:20px; color:#ff6680;">Unable to load radio queue: ${esc(e.message || '')}</div>`;
-  }
-}
-
-function renderRadioPanel(panel, items) {
-  const counts = {
-    pending:  items.filter(i => i.status === 'pending').length,
-    approved: items.filter(i => i.status === 'approved' || i.status === 'playing').length,
-    rejected: items.filter(i => i.status === 'rejected').length,
-    removed:  items.filter(i => i.status === 'removed').length,
-  };
-
+  /* Build the chrome (filter bar + list container) once; the listener
+     keeps the list content fresh without rebuilding the whole panel. */
   panel.innerHTML = `
-    <div class="admin-radio-filter-bar" id="admin-radio-filters">
+    <div class="admin-radio-filter-bar" id="admin-radio-filters" style="margin-bottom:0;">
       <button class="admin-radio-filter-btn ${_radioFilter==='pending'  ? 'active':''}" data-filter="pending">
-        Pending <span style="opacity:0.7;">(${counts.pending})</span>
+        Pending <span class="admin-filter-count" id="afc-pending">—</span>
       </button>
       <button class="admin-radio-filter-btn ${_radioFilter==='approved' ? 'active':''}" data-filter="approved">
-        Approved <span style="opacity:0.7;">(${counts.approved})</span>
+        Approved <span class="admin-filter-count" id="afc-approved">—</span>
       </button>
       <button class="admin-radio-filter-btn ${_radioFilter==='rejected' ? 'active':''}" data-filter="rejected">
-        Rejected <span style="opacity:0.7;">(${counts.rejected})</span>
+        Rejected <span class="admin-filter-count" id="afc-rejected">—</span>
       </button>
       <button class="admin-radio-filter-btn ${_radioFilter==='removed'  ? 'active':''}" data-filter="removed">
-        Removed <span style="opacity:0.7;">(${counts.removed})</span>
+        Removed <span class="admin-filter-count" id="afc-removed">—</span>
       </button>
     </div>
-    <div class="mech-panel mech-corner" id="admin-radio-list-panel">
-      <div id="admin-radio-filtered-list"></div>
+    <div class="mech-panel mech-corner" id="admin-radio-list-panel" style="margin-top:0; border-top:none; border-radius:0 0 var(--radius) var(--radius);">
+      <div id="admin-radio-filtered-list">
+        <div style="padding:20px; color:var(--text-muted); font-size:13px;">Loading submissions…</div>
+      </div>
     </div>
   `;
 
@@ -331,11 +393,69 @@ function renderRadioPanel(panel, items) {
     btn.addEventListener('click', () => {
       _radioFilter = btn.dataset.filter;
       panel.querySelectorAll('.admin-radio-filter-btn').forEach(b => b.classList.toggle('active', b === btn));
-      _renderRadioFilteredList(items, _radioFilter);
+      _renderRadioFilteredList(_allSubmissions, _radioFilter);
     });
   });
 
-  _renderRadioFilteredList(items, _radioFilter);
+  _attachRadioListener();
+}
+
+function _detachRadioListener() {
+  if (_radioUnsub) { try { _radioUnsub(); } catch(_) {} _radioUnsub = null; }
+  _allSubmissions = [];
+}
+
+function _attachRadioListener() {
+  _detachRadioListener();
+
+  /* Query all radio_submissions ordered by creation date.
+     The Firestore 'list' rule grants admin unrestricted access. */
+  const q = query(
+    collection(db, 'radio_submissions'),
+    orderBy('created_at', 'desc'),
+  );
+
+  _radioUnsub = onSnapshot(q,
+    snap => {
+      _allSubmissions = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      _updateFilterCounts(_allSubmissions);
+      _renderRadioFilteredList(_allSubmissions, _radioFilter);
+      /* Also refresh the stats bar at the top */
+      _updateStatBars(_allSubmissions);
+    },
+    err => {
+      console.error('[Admin] Radio snapshot error:', err.code, err.message);
+      const list = document.getElementById('admin-radio-filtered-list');
+      if (list) {
+        list.innerHTML = `<div style="padding:20px; color:#ff6680;">
+          Unable to load submissions: ${esc(err.message)}
+          ${err.code === 'permission-denied'
+            ? '<br><small>Check that the Firestore rules are deployed. Run: firebase deploy --only firestore:rules</small>'
+            : ''}
+        </div>`;
+      }
+    },
+  );
+}
+
+function _updateFilterCounts(items) {
+  const counts = {
+    pending:  items.filter(i => i.status === 'pending').length,
+    approved: items.filter(i => i.status === 'approved' || i.status === 'playing').length,
+    rejected: items.filter(i => i.status === 'rejected').length,
+    removed:  items.filter(i => i.status === 'removed').length,
+  };
+  for (const [k, v] of Object.entries(counts)) {
+    const el = document.getElementById('afc-' + k);
+    if (el) el.textContent = '(' + v + ')';
+  }
+}
+
+function _updateStatBars(items) {
+  setStat('admin-stat-pending',
+    items.filter(i => i.status === 'pending').length ?? '—');
+  setStat('admin-stat-approved',
+    items.filter(i => i.status === 'approved' || i.status === 'playing').length ?? '—');
 }
 
 function _renderRadioFilteredList(items, filter) {
@@ -347,128 +467,190 @@ function _renderRadioFilteredList(items, filter) {
   else                       filtered = items.filter(i => i.status === filter);
 
   if (!filtered.length) {
-    list.innerHTML = `<div style="padding:20px; text-align:center; color:var(--text-muted); font-size:13px;">
+    list.innerHTML = `<div style="padding:24px; text-align:center; color:var(--text-muted); font-size:13px;">
       No ${filter} submissions.
     </div>`;
     return;
   }
 
   list.innerHTML = '';
-  filtered.forEach(item => list.appendChild(buildRadioModItem(item, filter)));
+  filtered.forEach(item => list.appendChild(_buildModItem(item, filter)));
 }
 
-function buildRadioModItem(item, filter) {
+function _buildModItem(item, filter) {
   const div = document.createElement('div');
   div.className = 'admin-radio-item';
-  div.style.flexWrap = 'wrap';
+  div.setAttribute('data-sub-id', item.id);
 
   const statusCls = {
-    pending: 'rqi-pending', approved: 'rqi-approved',
-    playing: 'rqi-playing', rejected: 'rqi-rejected', removed: 'rqi-rejected',
+    pending:  'rqi-pending',
+    approved: 'rqi-approved',
+    playing:  'rqi-playing',
+    rejected: 'rqi-rejected',
+    removed:  'rqi-rejected',
   }[item.status] || 'rqi-pending';
 
-  const contentTypeCls   = item.content_type === 'aurenix_audio' ? 'rdi-badge-aurenix' : 'rdi-badge-external';
-  const contentTypeLabel = item.content_type === 'aurenix_audio' ? 'AURENIX AUDIO' : 'EXTERNAL MEDIA';
+  const isAudio        = item.content_type === 'aurenix_audio';
+  const contentTypeCls = isAudio ? 'rdi-badge-aurenix' : 'rdi-badge-external';
+  const contentTypeLbl = isAudio ? 'AURENIX AUDIO'     : 'EXTERNAL MEDIA';
 
-  let rightsHtml = '';
-  if (item.type === 'upload') {
-    rightsHtml = item.rights_confirmed
-      ? `<span class="admin-rights-confirmed" title="Submitter confirmed rights">✓ Rights confirmed</span>`
-      : `<span class="admin-rights-missing"   title="No rights confirmation on record">⚠ No rights confirmation</span>`;
-  }
+  const rightsHtml = isAudio
+    ? (item.rights_confirmed
+        ? `<span class="admin-rights-confirmed">✓ Rights confirmed</span>`
+        : `<span class="admin-rights-missing">⚠ No rights confirmation</span>`)
+    : '';
 
-  // Storage path — shown for AURENIX AUDIO so admin can verify file exists
   const storageHtml = item.storage_path
-    ? `<div style="font-size:10px; color:var(--text-muted); margin-top:2px;">
-        📦 Supabase Storage: <code style="font-size:10px; opacity:0.7;">${esc(item.storage_path)}</code>
+    ? `<div style="font-size:10px; color:var(--text-muted); margin-top:3px;">
+         📦 Storage: <code style="font-size:10px; opacity:0.7;">${esc(item.storage_path)}</code>
+       </div>`
+    : (item.url
+        ? `<div style="font-size:10px; color:var(--text-muted); margin-top:3px;">
+             🔗 URL: <code style="font-size:10px; opacity:0.7;">${esc(item.url.slice(0,60))}…</code>
+           </div>`
+        : '');
+
+  const rejectionHtml = (item.rejection_reason && filter !== 'pending')
+    ? `<div style="font-size:11px; color:#ff6680; margin-top:4px;">
+         ✕ Rejection reason: ${esc(item.rejection_reason)}
        </div>`
     : '';
 
-  const dateStr = fmtDate(item.created_at?.toDate ? item.created_at.toDate().toISOString() : item.created_at);
+  const reviewedHtml = item.reviewed_by
+    ? `<div style="font-size:10px; color:var(--text-muted); margin-top:2px;">
+         Reviewed by ${esc(item.reviewed_by)} on ${fmtDate(item.reviewed_at)}
+       </div>`
+    : '';
+
+  const submitterHtml = item.submitted_by
+    ? `<div style="font-size:10px; color:var(--text-muted); margin-top:2px;">
+         Submitted by UID: <code style="font-size:10px; opacity:0.7;">${esc(item.submitted_by)}</code>
+       </div>`
+    : '';
+
+  const dateStr = fmtDate(item.created_at?.toDate
+    ? item.created_at.toDate().toISOString()
+    : item.created_at);
+
+  /* ── Action buttons depend on current filter ──
+     pending  → Approve + Reject + Remove
+     approved → Takedown (→ removed)
+     rejected → Restore (→ approved) + Remove
+     removed  → Restore (→ approved)
+  ── */
+  const actionsHtml = (() => {
+    if (filter === 'pending') return `
+      <button class="btn-mod-approve"  data-action="approve"  data-id="${item.id}">✓ Approve</button>
+      <button class="btn-mod-reject"   data-action="reject"   data-id="${item.id}">✕ Reject</button>
+      <button class="btn-mod-takedown" data-action="remove"   data-id="${item.id}">⛔ Remove</button>
+    `;
+    if (filter === 'approved') return `
+      <button class="btn-mod-takedown" data-action="remove"   data-id="${item.id}">⛔ Takedown</button>
+    `;
+    if (filter === 'rejected') return `
+      <button class="btn-mod-approve"  data-action="restore"  data-id="${item.id}">↩ Restore</button>
+      <button class="btn-mod-takedown" data-action="remove"   data-id="${item.id}">⛔ Remove</button>
+    `;
+    if (filter === 'removed') return `
+      <button class="btn-mod-approve"  data-action="restore"  data-id="${item.id}">↩ Restore</button>
+    `;
+    return '';
+  })();
 
   div.innerHTML = `
     <div class="admin-radio-item-info" style="flex:1; min-width:200px;">
-      <div class="admin-radio-item-title">${esc(item.title)}</div>
+      <div class="admin-radio-item-title">${esc(item.title || '(no title)')}</div>
       <div class="admin-radio-item-meta">
-        ${esc(item.artist || 'Unknown')}
-        ${item.album ? ' · <em>' + esc(item.album) + '</em>' : ''}
-        ${item.genre ? ' · ' + esc(item.genre) : ''}
+        ${esc(item.artist || 'Unknown artist')}
+        ${item.album  ? ' · <em>' + esc(item.album)  + '</em>' : ''}
+        ${item.genre  ? ' · '     + esc(item.genre)            : ''}
         · ${dateStr}
       </div>
-      <div style="display:flex; gap:8px; margin-top:5px; flex-wrap:wrap; align-items:center;">
-        <span class="rdi-source-badge ${contentTypeCls}" style="font-size:10px;">${contentTypeLabel}</span>
+      ${item.notes ? `<div style="font-size:11px; color:var(--text-muted); margin-top:4px; font-style:italic;">"${esc(item.notes)}"</div>` : ''}
+      <div style="display:flex; gap:8px; margin-top:6px; flex-wrap:wrap; align-items:center;">
+        <span class="rdi-source-badge ${contentTypeCls}" style="font-size:10px;">${contentTypeLbl}</span>
         ${rightsHtml}
       </div>
-      ${item.notes ? `<div style="font-size:11px; color:var(--text-muted); margin-top:4px; font-style:italic;">
-        Note: "${esc(item.notes)}"
-      </div>` : ''}
       ${storageHtml}
-      <div style="display:flex; gap:10px; margin-top:4px;">
-        ${item.play_count ? `<span style="font-size:10px; color:var(--text-muted);">▶ ${item.play_count} plays</span>` : ''}
-        ${item.likes      ? `<span style="font-size:10px; color:var(--text-muted);">♥ ${item.likes}</span>` : ''}
-      </div>
+      ${rejectionHtml}
+      ${reviewedHtml}
+      ${submitterHtml}
     </div>
-    <div class="admin-radio-item-actions" style="flex-wrap:wrap; gap:5px;">
-      <span class="rqi-badge ${statusCls}">${item.status}</span>
-      ${filter === 'pending' ? `
-        <button class="btn-mod-approve" data-id="${item.id}" title="Approve — add to AURENIX Radio">✓ Approve</button>
-        <button class="btn-mod-reject"  data-id="${item.id}" title="Reject this submission">✕ Reject</button>
-      ` : ''}
-      ${filter === 'approved' ? `
-        <button class="btn-mod-takedown" data-id="${item.id}" title="Remove from public queue">⛔ Takedown</button>
-      ` : ''}
-      ${(filter === 'rejected' || filter === 'removed') ? `
-        <button class="btn-mod-approve btn-mod-restore" data-id="${item.id}" title="Restore to approved">↩ Restore</button>
-      ` : ''}
+    <div class="admin-radio-item-actions" style="flex-direction:column; align-items:stretch; gap:6px; min-width:130px;">
+      <span class="rqi-badge ${statusCls}" style="text-align:center;">${esc(item.status)}</span>
+      ${actionsHtml}
     </div>
   `;
 
-  div.querySelectorAll('.btn-mod-approve').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const isRestore = btn.classList.contains('btn-mod-restore');
-      moderateRadio(btn.dataset.id, isRestore ? 'restore' : 'approve');
-    });
-  });
-
-  div.querySelectorAll('.btn-mod-reject').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (!confirm('Reject this submission? The submitter will see it as rejected.')) return;
-      moderateRadio(btn.dataset.id, 'reject');
-    });
-  });
-
-  div.querySelectorAll('.btn-mod-takedown').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (!confirm('TAKEDOWN: Immediately remove this track from the public AURENIX Radio catalog? It will be hidden from all queues and discovery. The moderation record is preserved.')) return;
-      moderateRadio(btn.dataset.id, 'remove');
-    });
+  /* Bind action buttons */
+  div.querySelectorAll('[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => _handleModAction(btn.dataset.action, btn.dataset.id, btn));
   });
 
   return div;
 }
 
-async function moderateRadio(submissionId, action) {
-  // Re-verify server-side before any mutation
+async function _handleModAction(action, submissionId, btn) {
   if (!_verifyAdmin()) {
     alert('ACCESS DENIED — administrator account required.');
     return;
   }
 
+  let confirmMsg  = '';
+  let rejReason   = null;
+
+  switch (action) {
+    case 'approve':
+      confirmMsg = 'Approve this submission? It will become eligible for AURENIX Radio.';
+      break;
+    case 'reject': {
+      const reason = window.prompt(
+        'Reject this submission?\n\nOptional: enter a rejection reason for the submitter.\n(Leave blank to reject without a reason.)',
+        '',
+      );
+      if (reason === null) return;   // user hit Cancel
+      rejReason  = reason.trim() || null;
+      confirmMsg = null;             // prompt already served as confirmation
+      break;
+    }
+    case 'restore':
+      confirmMsg = 'Restore this submission to Approved?';
+      break;
+    case 'remove':
+      confirmMsg = 'REMOVE: Hide this track from public Radio permanently?\nThe audio file in Supabase Storage is NOT deleted.';
+      break;
+    default:
+      return;
+  }
+
+  if (confirmMsg && !confirm(confirmMsg)) return;
+
+  /* Disable the button while the write is in flight */
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+
   const statusMap = { approve: 'approved', reject: 'rejected', remove: 'removed', restore: 'approved' };
   const newStatus = statusMap[action];
-  if (!newStatus) return;
+
+  const updates = {
+    status:      newStatus,
+    reviewed_by: auth.currentUser.email,
+    reviewed_at: new Date().toISOString(),
+  };
+  if (rejReason !== null) updates.rejection_reason = rejReason;
 
   try {
-    await updateSubmission(submissionId, {
-      status:      newStatus,
-      reviewed_by: auth.currentUser?.email || ADMIN_EMAIL,
-      reviewed_at: new Date().toISOString(),
-    });
-    loadRadioPanel();
+    await updateSubmission(submissionId, updates);
+    /* onSnapshot fires immediately — no manual reload needed */
     loadAdminData();
   } catch (err) {
-    alert('Unable to update: ' + (err.message || err));
+    console.error('[Admin] moderateRadio error:', err);
+    alert('Update failed: ' + (err.message || err));
+    if (btn) { btn.disabled = false; btn.textContent = _actionLabel(action); }
   }
+}
+
+function _actionLabel(action) {
+  return { approve: '✓ Approve', reject: '✕ Reject', remove: '⛔ Remove', restore: '↩ Restore' }[action] || action;
 }
 
 /* ═══════════════════════════════════════════

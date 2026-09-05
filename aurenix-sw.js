@@ -9,8 +9,8 @@
  *  - Background sync support
  */
 
-const CACHE_NAME    = 'aurenix-radio-v5';
-const SHELL_CACHE   = 'aurenix-shell-v5';
+const CACHE_NAME    = 'aurenix-radio-v7';
+const SHELL_CACHE   = 'aurenix-shell-v7';
 
 /* Static app shell — cached on install */
 const APP_SHELL = [

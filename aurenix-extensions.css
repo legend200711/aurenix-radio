@@ -1350,6 +1350,32 @@
   border-color: rgba(139,0,0,0.4);
   color: #ff6680;
 }
+.admin-filter-count {
+  opacity: 0.65;
+  font-weight: 400;
+}
+
+/* Admin moderation — vertical action column */
+.admin-radio-item-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  flex-shrink: 0;
+  min-width: 130px;
+}
+.btn-mod-approve,
+.btn-mod-reject,
+.btn-mod-takedown {
+  width: 100%;
+  text-align: center;
+}
+.btn-mod-approve:disabled,
+.btn-mod-reject:disabled,
+.btn-mod-takedown:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
 /* ── Mobile responsive ── */
 @media (max-width: 600px) {
