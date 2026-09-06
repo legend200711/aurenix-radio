@@ -56,10 +56,12 @@ VALUES (
 )
 ON CONFLICT (id) DO NOTHING;
 
--- aurenix-media: private bucket for Founder media uploads (500 MB max)
--- file_size_limit: 524288000 bytes = 500 MiB (matches MAX_FILE_MB = 500 in aurenix-control.js)
+-- aurenix-media: bucket for Founder media uploads
+-- file_size_limit: 524288000 bytes = 500 MiB
 -- ON CONFLICT DO UPDATE: updates the limit if the bucket already exists,
 -- but DOES NOT touch existing files.
+-- NOTE: uploads now go through Supabase TUS resumable upload endpoint
+-- using the service-role key — NOT through the Cloudflare Worker body.
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES (
   'aurenix-media',
@@ -76,7 +78,7 @@ VALUES (
   ]
 )
 ON CONFLICT (id) DO UPDATE
-  SET file_size_limit   = EXCLUDED.file_size_limit,
+  SET file_size_limit    = EXCLUDED.file_size_limit,
       allowed_mime_types = EXCLUDED.allowed_mime_types;
 
 

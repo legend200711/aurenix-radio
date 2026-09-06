@@ -900,6 +900,23 @@ async function _handleFiles(files) {
   }
 }
 
+/**
+ * Upload a single file using the TUS resumable-upload architecture:
+ *
+ *   Phase 1 — Worker /authorize (tiny JSON, no file body)
+ *     → Firebase token verified server-side
+ *     → Founder email confirmed from verified token
+ *     → Worker creates TUS resource on Supabase using service-role key
+ *     → Returns tusUrl + storagePath + publicUrl
+ *
+ *   Phase 2 — TUS PATCH directly to Supabase (no Worker in the data path)
+ *     → Chunked XHR for byte-accurate progress
+ *     → Resumable: network errors retry the current chunk
+ *     → File never passes through the Worker → no 100 MB CF body limit
+ *     → Size limit is the Supabase bucket's file_size_limit (set to 500 MB)
+ *
+ *   Phase 3 — Firestore metadata record
+ */
 async function _uploadFile(file) {
   const listEl  = document.getElementById('ax-upload-list');
   const itemKey = 'up-' + Date.now() + '-' + Math.random().toString(36).slice(2);
@@ -907,12 +924,9 @@ async function _uploadFile(file) {
   const isImage = file.type.startsWith('image/');
   const isAudio = file.type.startsWith('audio/');
   const cat     = MEDIA_CATEGORIES.find(c => c.id === _uploadCategory) || MEDIA_CATEGORIES[0];
+  let   mediaType = cat.type || (isVideo ? 'video' : isImage ? 'thumbnail' : 'audio');
 
-  // Derive type from category
-  let mediaType = cat.type;
-  if (!mediaType) mediaType = isVideo ? 'video' : isImage ? 'thumbnail' : 'audio';
-
-  // ── UI: add progress row ───────────────────────────────────────────────
+  // ── UI row ─────────────────────────────────────────────────────────────
   if (listEl) {
     const row = document.createElement('div');
     row.className = 'ax-upload-item';
@@ -923,23 +937,27 @@ async function _uploadFile(file) {
         <span class="ax-upload-type-badge">${mediaType}</span>
         <span class="ax-upload-size">${_fmtSize(file.size)}</span>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;flex:1;">
+      <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0;">
         <div class="ax-upload-bar-wrap" style="flex:1;">
           <div class="ax-upload-bar" id="bar-${itemKey}" style="width:0%"></div>
         </div>
-        <span class="ax-upload-pct" id="pct-${itemKey}">0%</span>
+        <span class="ax-upload-pct" id="pct-${itemKey}" style="white-space:nowrap;min-width:36px;text-align:right;">0%</span>
       </div>
+      <span class="ax-upload-bytes" id="bytes-${itemKey}" style="font-size:10px;color:var(--text-dim,#6870a0);white-space:nowrap;"></span>
       <span class="ax-upload-status" id="st-${itemKey}">AUTHENTICATING…</span>
       <span class="ax-upload-dest" id="dest-${itemKey}">${MEDIA_BUCKET}</span>
     `;
     listEl.prepend(row);
   }
 
-  const setProgress = (pct) => {
+  const setProgress = (loaded, total) => {
+    const pct   = total > 0 ? Math.min(100, Math.round(loaded / total * 100)) : 0;
     const bar   = document.getElementById(`bar-${itemKey}`);
     const pctEl = document.getElementById(`pct-${itemKey}`);
+    const bytes = document.getElementById(`bytes-${itemKey}`);
     if (bar)   bar.style.width   = pct + '%';
     if (pctEl) pctEl.textContent = pct + '%';
+    if (bytes && total > 0) bytes.textContent = `${_fmtSize(loaded)} / ${_fmtSize(total)}`;
   };
   const setStatus = (msg, color = '') => {
     const el = document.getElementById(`st-${itemKey}`);
@@ -948,62 +966,86 @@ async function _uploadFile(file) {
   const addRetry = () => {
     const row = document.getElementById(itemKey);
     if (!row) return;
+    // Remove any existing retry button first
+    row.querySelector('.ax-retry-btn')?.remove();
     const btn = document.createElement('button');
-    btn.className   = 'ax-btn-sm ax-btn-danger';
+    btn.className   = 'ax-btn-sm ax-btn-danger ax-retry-btn';
     btn.textContent = '↺ Retry';
     btn.style.marginLeft = '8px';
     btn.onclick = () => { row.remove(); _uploadFile(file); };
     row.appendChild(btn);
   };
 
-  // ── Pre-flight: measure duration ───────────────────────────────────────
+  // ── Pre-flight: duration ───────────────────────────────────────────────
   let duration_sec = 0;
   if (isAudio || isVideo) {
     try { duration_sec = await _getMediaDuration(file); } catch (_) {}
   }
 
-  // ── Phase 1: Get Firebase ID token ────────────────────────────────────
-  // The token is sent to the Cloudflare Worker which verifies it
-  // server-side and confirms the Founder email before touching Supabase.
-  let idToken;
+  // ── Phase 1: Worker /authorize — get TUS URL ──────────────────────────
+  // Sends only a tiny JSON body (fileName, contentType, size).
+  // The file is NOT sent here. The Worker verifies the Firebase token and
+  // creates a TUS upload resource on Supabase using the service-role key.
+  let authResult;
   try {
-    if (!auth.currentUser) throw new Error('FIREBASE SESSION NOT FOUND — please sign out and sign back in');
-    // forceRefresh=true ensures we always send a fresh, non-expired token to the Worker.
-    idToken = await auth.currentUser.getIdToken(/* forceRefresh */ true);
-    if (!idToken) throw new Error('FIREBASE SESSION NOT FOUND — token was empty');
+    if (!auth.currentUser) throw new Error('FIREBASE SESSION NOT FOUND — please sign in again');
+    const idToken = await auth.currentUser.getIdToken(true);
+
+    const res = await fetch(UPLOAD_WORKER_URL + '/authorize', {
+      method:  'POST',
+      headers: {
+        'Authorization': 'Bearer ' + idToken,
+        'Content-Type':  'application/json',
+      },
+      body: JSON.stringify({
+        fileName:    file.name,
+        contentType: file.type || 'application/octet-stream',
+        size:        file.size,
+      }),
+    });
+
+    const data = await res.json();
+
+    if (res.status === 401) throw new Error(data.error || 'FIREBASE TOKEN INVALID — sign in again');
+    if (res.status === 403) throw new Error(data.error || 'FOUNDER NOT AUTHORIZED');
+    if (res.status === 413) throw new Error(`FILE TOO LARGE FOR STORAGE PROVIDER — ${data.error || ''}`);
+    if (res.status === 415) throw new Error(data.error || 'FILE TYPE NOT ALLOWED');
+    if (res.status === 503) throw new Error(data.error || 'WORKER CONFIGURATION ERROR');
+    if (!res.ok || !data.ok) throw new Error(data.error || `WORKER AUTHORIZATION FAILED — HTTP ${res.status}`);
+
+    authResult = data; // { tusUrl, storagePath, publicUrl }
   } catch (authErr) {
-    const msg = authErr.message || 'Unknown Firebase auth error';
     setStatus('✗ AUTH FAILED — click retry', 'var(--red)');
     addRetry();
-    console.error('[AURENIX Upload] Firebase token error:', authErr);
-    _toast(msg, 'err');
+    _toast(authErr.message, 'err');
     return;
   }
 
-  // ── Phase 2: Upload via Cloudflare Worker (with XHR for progress) ─────
+  // ── Phase 2: TUS upload directly to Supabase ──────────────────────────
+  // The file streams directly from browser → Supabase.
+  // The Worker is completely out of the data path.
   setStatus('UPLOADING…', '');
-  let workerResult;
+  setProgress(0, file.size);
+
   try {
-    workerResult = await _xhrUpload(file, idToken, setProgress);
+    await _tusUpload(file, authResult.tusUrl, (loaded, total) => {
+      setProgress(loaded, total);
+    });
   } catch (uploadErr) {
     setStatus('✗ STORAGE FAILED — click retry', 'var(--red)');
     addRetry();
-    console.error('[AURENIX Upload] Worker upload failed:', uploadErr);
     _toast(uploadErr.message || 'SUPABASE STORAGE UPLOAD FAILED', 'err');
     return;
   }
 
-  setProgress(100);
+  setProgress(file.size, file.size);
   setStatus('PROCESSING…', 'var(--blue-bright)');
 
-  // ── Phase 3: Save metadata to Firestore ──────────────────────────────
-  // Force-refresh the Firebase ID token so the Firestore SDK has a valid
-  // session credential before writing. The upload may have taken long
-  // enough that the SDK's cached token is stale, causing request.auth to
-  // appear null to Firestore Security Rules.
-  try { await auth.currentUser?.getIdToken(true); } catch (_) { /* non-fatal */ }
+  // ── Phase 3: Firestore metadata record ───────────────────────────────
+  // Force-refresh token before writing so the Firestore SDK has a valid
+  // session even after a long upload.
+  try { await auth.currentUser?.getIdToken(true); } catch (_) {}
 
-  // Firestore rules enforce isAdmin() — double layer of protection.
   try {
     const docRef = await addDoc(collection(db, 'network_media'), {
       title:        file.name.replace(/\.[^.]+$/, ''),
@@ -1012,8 +1054,8 @@ async function _uploadFile(file) {
       description:  '',
       category:     _uploadCategory,
       type:         mediaType,
-      url:          workerResult.publicUrl,
-      storage_path: workerResult.storagePath,
+      url:          authResult.publicUrl,
+      storage_path: authResult.storagePath,
       duration_sec,
       size_bytes:   file.size,
       status:       'ready',
@@ -1029,73 +1071,102 @@ async function _uploadFile(file) {
     if (destEl) destEl.textContent = `${MEDIA_BUCKET} › ${docRef.id}`;
     _toast(`Uploaded: ${file.name}`);
 
-    // Auto-open metadata editor for non-thumbnail files
     if (!isImage) {
       setTimeout(() => _openMetaModal(docRef.id, file.name.replace(/\.[^.]+$/, '')), 400);
     }
 
   } catch (metaErr) {
-    // Storage succeeded but Firestore write failed — show distinct error
-    setStatus('✗ METADATA FAILED — click retry', 'var(--orange, #f90)');
+    setStatus('✗ METADATA FAILED — click retry', 'var(--orange,#f90)');
     addRetry();
-    console.error('[AURENIX Upload] Metadata phase failed:', metaErr);
     _toast('MEDIA DATABASE RECORD FAILED — ' + (metaErr.message || metaErr), 'err');
   }
 }
 
 /**
- * Upload a file to the Cloudflare Worker using XMLHttpRequest so we can
- * track real byte-level progress. Returns the JSON result from the Worker.
+ * TUS resumable upload — sends the file directly to a Supabase TUS URL.
  *
- * @param {File}   file      — file to upload
- * @param {string} idToken   — Firebase ID token for Founder verification
- * @param {(pct: number) => void} onProgress
- * @returns {Promise<{ storagePath: string, publicUrl: string, … }>}
+ * Implements TUS 1.0.0 PATCH protocol:
+ *   - Chunks the file into ~5 MB pieces for accurate progress
+ *   - Each chunk is a PATCH request with Upload-Offset header
+ *   - Network errors on a chunk are retried up to 3 times before failing
+ *   - Resume: queries Upload-Offset via HEAD before starting, so a
+ *     previously interrupted upload continues from where it left off
+ *
+ * @param {File}     file        — the file to upload
+ * @param {string}   tusUrl      — TUS Location URL from Worker /authorize
+ * @param {function} onProgress  — callback(loadedBytes, totalBytes)
  */
-function _xhrUpload(file, idToken, onProgress) {
-  return new Promise((resolve, reject) => {
-    const form = new FormData();
-    form.append('file', file, file.name);
+async function _tusUpload(file, tusUrl, onProgress) {
+  const CHUNK = 5 * 1024 * 1024; // 5 MB chunks
+  const total = file.size;
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', UPLOAD_WORKER_URL + '/upload', true);
-    xhr.setRequestHeader('Authorization', 'Bearer ' + idToken);
-
-    xhr.upload.addEventListener('progress', (e) => {
-      if (e.lengthComputable) {
-        onProgress(Math.round((e.loaded / e.total) * 100));
-      }
+  // ── Resume: find how far we got (HEAD) ─────────────────────────────────
+  let offset = 0;
+  try {
+    const head = await fetch(tusUrl, {
+      method:  'HEAD',
+      headers: { 'Tus-Resumable': '1.0.0' },
     });
+    if (head.ok) {
+      const off = head.headers.get('Upload-Offset');
+      if (off) offset = parseInt(off, 10);
+    }
+  } catch (_) { /* start from 0 if HEAD fails */ }
+
+  onProgress(offset, total);
+
+  // ── Upload chunks ──────────────────────────────────────────────────────
+  while (offset < total) {
+    const end   = Math.min(offset + CHUNK, total);
+    const chunk = file.slice(offset, end);
+
+    // Retry each chunk up to 3 times on network error
+    let attempts = 0;
+    while (true) {
+      attempts++;
+      try {
+        await _tusChunk(tusUrl, chunk, offset, total);
+        break; // chunk succeeded
+      } catch (err) {
+        if (attempts >= 3) throw new Error(`SUPABASE STORAGE UPLOAD FAILED — ${err.message}`);
+        await new Promise(r => setTimeout(r, 1000 * attempts)); // back-off
+      }
+    }
+
+    offset = end;
+    onProgress(offset, total);
+  }
+}
+
+/**
+ * Send one TUS PATCH chunk via XHR for byte-accurate upload progress.
+ *
+ * @param {string} tusUrl
+ * @param {Blob}   chunk       — slice of the file
+ * @param {number} offset      — byte offset of this chunk in the full file
+ * @param {number} totalSize   — total file size
+ */
+function _tusChunk(tusUrl, chunk, offset, totalSize) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PATCH', tusUrl, true);
+    xhr.setRequestHeader('Tus-Resumable',  '1.0.0');
+    xhr.setRequestHeader('Upload-Offset',  String(offset));
+    xhr.setRequestHeader('Content-Type',   'application/offset+octet-stream');
+    xhr.setRequestHeader('Content-Length', String(chunk.size));
 
     xhr.addEventListener('load', () => {
-      let json;
-      try { json = JSON.parse(xhr.responseText); } catch { json = {}; }
-
-      if (xhr.status === 401) {
-        // Worker returns descriptive error: FIREBASE SESSION NOT FOUND, FOUNDER AUTHENTICATION FAILED, etc.
-        reject(new Error(json.error || 'FIREBASE TOKEN INVALID — sign out and sign in again'));
-      } else if (xhr.status === 403) {
-        reject(new Error(json.error || 'FOUNDER EMAIL NOT AUTHORIZED'));
-      } else if (xhr.status === 503) {
-        reject(new Error(json.error || 'WORKER CONFIGURATION ERROR — contact Founder'));
-      } else if (xhr.status >= 400) {
-        reject(new Error(json.error || `STORAGE UPLOAD FAILED — HTTP ${xhr.status}`));
-      } else if (json.ok) {
-        resolve(json);
+      // TUS success = 204 No Content
+      if (xhr.status === 204 || xhr.status === 200) {
+        resolve();
       } else {
-        reject(new Error(json.error || 'STORAGE UPLOAD FAILED — unexpected Worker response'));
+        reject(new Error(`HTTP ${xhr.status} at offset ${offset}: ${xhr.responseText.slice(0, 200)}`));
       }
     });
+    xhr.addEventListener('error',  () => reject(new Error('Network error during chunk upload')));
+    xhr.addEventListener('abort',  () => reject(new Error('Upload aborted')));
 
-    xhr.addEventListener('error', () => {
-      reject(new Error('SUPABASE STORAGE UPLOAD FAILED — network error (check Worker URL is deployed)'));
-    });
-
-    xhr.addEventListener('abort', () => {
-      reject(new Error('SUPABASE STORAGE UPLOAD FAILED — upload aborted'));
-    });
-
-    xhr.send(form);
+    xhr.send(chunk);
   });
 }
 
