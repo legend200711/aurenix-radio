@@ -1331,16 +1331,30 @@ async function _uploadFile(file) {
     const el = document.getElementById(`st-${itemKey}`);
     if (el) { el.textContent = msg; if (color) el.style.color = color; }
   };
+  // storagePath is set once /authorize succeeds; used by intelligent retry.
+  let _storagePath   = null;
+  let _publicUrl     = null;
+  let _retryCallback = null; // set per-failure to the right recovery action
+
   const addRetry = () => {
     const row = document.getElementById(itemKey);
     if (!row) return;
-    // Remove any existing retry button first
     row.querySelector('.ax-retry-btn')?.remove();
     const btn = document.createElement('button');
     btn.className   = 'ax-btn-sm ax-btn-danger ax-retry-btn';
     btn.textContent = '↺ Retry';
     btn.style.marginLeft = '8px';
-    btn.onclick = () => { row.remove(); _uploadFile(file); };
+    btn.onclick = () => {
+      if (_retryCallback) {
+        // Intelligent retry: run only the failed phase
+        row.querySelector('.ax-retry-btn')?.remove();
+        _retryCallback();
+      } else {
+        // No smart callback — full re-upload
+        row.remove();
+        _uploadFile(file);
+      }
+    };
     row.appendChild(btn);
   };
 
@@ -1389,6 +1403,10 @@ async function _uploadFile(file) {
     return;
   }
 
+  // Store auth results so retry can use them
+  _storagePath = authResult.storagePath;
+  _publicUrl   = authResult.publicUrl;
+
   // ── Phase 2: PUT directly to Supabase signed URL ──────────────────────
   // The signed URL must be /storage/v1/object/upload/sign/<bucket>/<path>?token=...
   // No Authorization header needed — the token in the URL is the authorisation.
@@ -1414,54 +1432,96 @@ async function _uploadFile(file) {
       setProgress(loaded, total);
     });
   } catch (uploadErr) {
-    setStatus('✗ UPLOAD TRANSFER: COMPLETE — FINAL STORAGE AUTHORIZATION: FAILED — click retry', 'var(--red)');
-    addRetry();
-    _toast(uploadErr.message || 'SUPABASE STORAGE UPLOAD FAILED', 'err');
-    return;
+    // The XHR completed (bytes transferred) but Supabase returned a non-2xx status.
+    // Before showing a hard failure, check whether the object actually landed in storage.
+    // This handles the case where the PUT succeeded server-side but the response was
+    // mis-classified (e.g. Supabase returned a code we didn't expect).
+    console.error('[AURENIX UPLOAD] PUT completed with error:', uploadErr.message,
+      '— verifying storage object before reporting failure…');
+    setStatus('VERIFYING STORAGE…', 'var(--blue-bright)');
+
+    let objectExists = false;
+    try {
+      if (!auth.currentUser) throw new Error('no session');
+      const verifyToken = await auth.currentUser.getIdToken(true);
+      const vRes = await fetch(UPLOAD_WORKER_URL + '/verify', {
+        method:  'POST',
+        headers: { 'Authorization': 'Bearer ' + verifyToken, 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ storagePath: authResult.storagePath }),
+      });
+      const vData = await vRes.json();
+      console.log('[AURENIX UPLOAD] /verify response:', JSON.stringify(vData));
+      objectExists = vRes.ok && vData.exists === true;
+    } catch (vErr) {
+      console.warn('[AURENIX UPLOAD] /verify request failed:', vErr.message);
+    }
+
+    if (objectExists) {
+      // Object IS in storage despite the non-2xx response — proceed to save metadata.
+      console.log('[AURENIX UPLOAD] Object found in storage — proceeding to save metadata');
+      setStatus('✓ STORAGE VERIFIED — SAVING…', 'var(--blue-bright)');
+      // fall through to Phase 3 below
+    } else {
+      // Object genuinely not in storage — show failure with smart retry.
+      const errMsg = uploadErr.message || 'SUPABASE STORAGE UPLOAD FAILED';
+      setStatus('✗ TRANSFER FAILED — click retry', 'var(--red)');
+      // Smart retry: re-request a fresh signed URL and re-upload (old token is single-use)
+      _retryCallback = () => { _uploadFile(file); };
+      addRetry();
+      _toast(errMsg, 'err');
+      return;
+    }
   }
 
   setProgress(file.size, file.size);
-  setStatus('UPLOAD TRANSFER: COMPLETE — SAVING…', 'var(--blue-bright)');
 
   // ── Phase 3: Firestore metadata record ───────────────────────────────
   // Force-refresh token before writing so the Firestore SDK has a valid
   // session even after a long upload.
   try { await auth.currentUser?.getIdToken(true); } catch (_) {}
 
-  try {
-    const docRef = await addDoc(collection(db, 'network_media'), {
-      title:        file.name.replace(/\.[^.]+$/, ''),
-      artist:       '',
-      creator:      _user.email,
-      description:  '',
-      category:     _uploadCategory,
-      type:         mediaType,
-      url:          authResult.publicUrl,
-      storage_path: authResult.storagePath,
-      duration_sec,
-      size_bytes:   file.size,
-      status:       'ready',
-      channel:      '',
-      tags:         [],
-      year:         new Date().getFullYear(),
-      uploaded_by:  _user.uid,
-      uploaded_at:  serverTimestamp(),
-    });
+  const _saveMetadata = async () => {
+    setStatus('SAVING MEDIA RECORD…', 'var(--blue-bright)');
+    try {
+      const docRef = await addDoc(collection(db, 'network_media'), {
+        title:        file.name.replace(/\.[^.]+$/, ''),
+        artist:       '',
+        creator:      _user.email,
+        description:  '',
+        category:     _uploadCategory,
+        type:         mediaType,
+        url:          _publicUrl,
+        storage_path: _storagePath,
+        duration_sec,
+        size_bytes:   file.size,
+        mime_type:    file.type || 'application/octet-stream',
+        status:       'ready',
+        channel:      '',
+        tags:         [],
+        year:         new Date().getFullYear(),
+        uploaded_by:  _user.uid,
+        uploaded_at:  serverTimestamp(),
+      });
 
-    setStatus('✓ READY', 'var(--green)');
-    const destEl = document.getElementById(`dest-${itemKey}`);
-    if (destEl) destEl.textContent = `${MEDIA_BUCKET} › ${docRef.id}`;
-    _toast(`Uploaded: ${file.name}`);
+      setStatus('✓ UPLOAD COMPLETE  ✓ STORAGE VERIFIED  ✓ MEDIA RECORD SAVED  ✓ READY', 'var(--green)');
+      const destEl = document.getElementById(`dest-${itemKey}`);
+      if (destEl) destEl.textContent = `${MEDIA_BUCKET} › ${docRef.id}`;
+      _toast(`Uploaded: ${file.name}`);
 
-    if (!isImage) {
-      setTimeout(() => _openMetaModal(docRef.id, file.name.replace(/\.[^.]+$/, '')), 400);
+      if (!isImage) {
+        setTimeout(() => _openMetaModal(docRef.id, file.name.replace(/\.[^.]+$/, '')), 400);
+      }
+
+    } catch (metaErr) {
+      // Metadata save failed — storage object exists; retry should only redo this step.
+      setStatus('✗ MEDIA RECORD FAILED — click retry', 'var(--orange,#f90)');
+      _retryCallback = _saveMetadata; // retry only the metadata step
+      addRetry();
+      _toast('MEDIA DATABASE RECORD FAILED — ' + (metaErr.message || metaErr), 'err');
     }
+  };
 
-  } catch (metaErr) {
-    setStatus('✗ METADATA FAILED — click retry', 'var(--orange,#f90)');
-    addRetry();
-    _toast('MEDIA DATABASE RECORD FAILED — ' + (metaErr.message || metaErr), 'err');
-  }
+  await _saveMetadata();
 }
 
 /**
@@ -1499,19 +1559,22 @@ function _signedUpload(file, signedUrl, onProgress) {
     });
 
     xhr.addEventListener('load', () => {
-      // Supabase signed-URL PUT returns 200 on upsert and 200/201 on new objects.
-      // Accept both to avoid a false "authorization" failure on the finalization step.
-      if (xhr.status === 200 || xhr.status === 201) {
+      // Supabase signed-URL PUT returns 200 (new object) or 200 (upsert).
+      // Accept 200, 201, and 204 to handle any Supabase response variant.
+      if (xhr.status >= 200 && xhr.status < 300) {
+        console.log('[AURENIX UPLOAD] PUT succeeded — HTTP', xhr.status, _urlPath);
         resolve();
       } else {
         // Surface the exact Supabase error message (never contains secrets)
-        let detail = xhr.responseText.slice(0, 400);
+        let detail = xhr.responseText ? xhr.responseText.slice(0, 500) : '(empty response)';
         try {
           const j = JSON.parse(xhr.responseText);
           detail = j.message || j.error || detail;
         } catch (_) {}
         const msg = `SUPABASE STORAGE UPLOAD FAILED — HTTP ${xhr.status}: ${detail}`;
-        console.error('[AURENIX UPLOAD] PUT failed —', _urlPath, '—', msg);
+        console.error('[AURENIX UPLOAD] PUT failed —', _urlPath,
+          '— status:', xhr.status,
+          '— response:', xhr.responseText ? xhr.responseText.slice(0, 500) : '(empty)');
         reject(new Error(msg));
       }
     });

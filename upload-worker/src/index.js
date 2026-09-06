@@ -370,6 +370,65 @@ export default {
       }, 200, origin);
     }
 
+    /* ── POST /verify — check whether an object already exists in storage ── */
+    if (request.method === 'POST' && url.pathname === '/verify') {
+
+      // ── 0. Secrets present
+      const secretErr = checkSecrets(env);
+      if (secretErr) return json({ error: `WORKER CONFIGURATION ERROR — ${secretErr}`, stage: 'WORKER_CONFIGURATION' }, 503, origin);
+
+      // ── 1. Extract Firebase token
+      const authHeader = request.headers.get('Authorization') || '';
+      if (!authHeader.startsWith('Bearer '))
+        return json({ error: 'FIREBASE TOKEN MISSING', stage: 'FIREBASE_TOKEN_MISSING' }, 401, origin);
+      const idToken = authHeader.slice(7).trim();
+      if (!idToken)
+        return json({ error: 'FIREBASE TOKEN MISSING — empty', stage: 'FIREBASE_TOKEN_MISSING' }, 401, origin);
+
+      // ── 2. Verify Firebase token
+      let tokenPayload;
+      try {
+        tokenPayload = await verifyFirebaseToken(idToken, env.FIREBASE_PROJECT_ID);
+      } catch (err) {
+        return json({ error: err.message, stage: 'FIREBASE_TOKEN_INVALID' }, 401, origin);
+      }
+
+      // ── 3. Verify Founder email
+      const tokenEmail = (tokenPayload.email || '').trim().toLowerCase();
+      if (!tokenEmail || tokenEmail !== FOUNDER_EMAIL.toLowerCase())
+        return json({ error: 'FOUNDER NOT AUTHORIZED', stage: 'FOUNDER_NOT_AUTHORIZED' }, 403, origin);
+
+      // ── 4. Parse body
+      let body;
+      try { body = await request.json(); }
+      catch { return json({ error: 'VERIFY FAILED — invalid JSON body' }, 400, origin); }
+
+      const { storagePath } = body || {};
+      if (!storagePath || typeof storagePath !== 'string')
+        return json({ error: 'VERIFY FAILED — storagePath required' }, 400, origin);
+
+      // ── 5. HEAD the object in Supabase Storage to check existence
+      const objectUrl = `${env.SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${storagePath}`;
+      let exists = false;
+      let sizeBytes = null;
+      try {
+        const r = await fetch(objectUrl, {
+          method: 'HEAD',
+          headers: {
+            'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+            'apikey': env.SUPABASE_SERVICE_KEY,
+          },
+        });
+        exists = r.ok; // 200 = exists, 404 = not found
+        sizeBytes = r.headers.get('content-length') ? parseInt(r.headers.get('content-length'), 10) : null;
+      } catch (e) {
+        return json({ error: `VERIFY FAILED — Supabase HEAD request failed: ${e.message}` }, 502, origin);
+      }
+
+      const publicUrl = `${env.SUPABASE_URL}/storage/v1/object/public/${MEDIA_BUCKET}/${storagePath}`;
+      return json({ ok: true, exists, storagePath, publicUrl, sizeBytes }, 200, origin);
+    }
+
     /* ── POST /authorize — Founder-only signed-URL authorisation ─────────── */
     if (request.method === 'POST' && url.pathname === '/authorize') {
 
