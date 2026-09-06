@@ -58,17 +58,19 @@ let _dbChUnsub  = null;   // unsubscribe for network_channels listener
 function _channels() { return _dbChannels; }
 
 const MEDIA_CATEGORIES = [
-  { id: 'music',         label: '🎵 MUSIC',            accept: 'audio/*',       type: 'audio'  },
-  { id: 'video',         label: '🎬 VIDEO',             accept: 'video/*',       type: 'video'  },
-  { id: 'music_video',   label: '🎞 MUSIC VIDEO',       accept: 'video/*',       type: 'music_video' },
-  { id: 'show',          label: '📺 SHOW',              accept: 'video/*',       type: 'show'   },
-  { id: 'broadcast_clip',label: '🎥 BROADCAST CLIP',    accept: 'video/*,audio/*', type: 'broadcast_clip' },
-  { id: 'podcast',       label: '🎙 PODCAST',           accept: 'audio/*',       type: 'podcast' },
-  { id: 'audio_program', label: '🎧 AUDIO PROGRAM',     accept: 'audio/*',       type: 'audio_program' },
-  { id: 'station_id',    label: '📢 STATION ID / INTRO',accept: 'audio/*,video/*', type: 'station_id' },
-  { id: 'thumbnail',     label: '🖼 THUMBNAIL',          accept: 'image/*',       type: 'thumbnail' },
-  { id: 'trailer',       label: '🎞 TRAILER',            accept: 'video/*',       type: 'trailer' },
-  { id: 'archive',       label: '📼 ARCHIVED BROADCAST', accept: 'video/*,audio/*', type: 'archive' },
+  { id: 'music',         label: '🎵 MUSIC',            accept: 'audio/*',                  type: 'audio'  },
+  { id: 'video',         label: '🎬 VIDEO',             accept: 'video/*',                  type: 'video'  },
+  // music_video accepts video AND image/* — a still photo used as artwork for a song
+  // is a valid music video format (static image + audio track).
+  { id: 'music_video',   label: '🎞 MUSIC VIDEO',       accept: 'video/*,image/*',          type: 'music_video' },
+  { id: 'show',          label: '📺 SHOW',              accept: 'video/*',                  type: 'show'   },
+  { id: 'broadcast_clip',label: '🎥 BROADCAST CLIP',    accept: 'video/*,audio/*',          type: 'broadcast_clip' },
+  { id: 'podcast',       label: '🎙 PODCAST',           accept: 'audio/*',                  type: 'podcast' },
+  { id: 'audio_program', label: '🎧 AUDIO PROGRAM',     accept: 'audio/*',                  type: 'audio_program' },
+  { id: 'station_id',    label: '📢 STATION ID / INTRO',accept: 'audio/*,video/*',          type: 'station_id' },
+  { id: 'thumbnail',     label: '🖼 THUMBNAIL',          accept: 'image/*',                  type: 'thumbnail' },
+  { id: 'trailer',       label: '🎞 TRAILER',            accept: 'video/*',                  type: 'trailer' },
+  { id: 'archive',       label: '📼 ARCHIVED BROADCAST', accept: 'video/*,audio/*',         type: 'archive' },
 ];
 
 const LIB_FILTERS = [
@@ -189,6 +191,51 @@ export function mountControl(user, isAdmin) {
     // Worker health check
     _checkWorkerHealth();
     ctrl.querySelector('#ax-sec-recheck-btn')?.addEventListener('click', _checkWorkerHealth);
+
+    // Probe upload limit button
+    ctrl.querySelector('#ax-sec-probe-limit-btn')?.addEventListener('click', async () => {
+      const resultEl = document.getElementById('ax-sec-limit-result');
+      const effEl    = document.getElementById('ax-sec-eff-limit');
+      if (resultEl) { resultEl.style.display = 'block'; resultEl.textContent = 'Probing…'; }
+      if (effEl)    { effEl.textContent = 'probing…'; effEl.style.color = ''; }
+      try {
+        const res  = await fetch(UPLOAD_WORKER_URL + '/probe-limit');
+        const data = await res.json();
+        const lastMB  = data.last_successful_upload_MB || 0;
+        const firstMB = data.first_failed_upload_MB;
+        const limText = firstMB
+          ? `${lastMB} MB ✓ / ${firstMB} MB ✗ — limit between ${lastMB} and ${firstMB} MB`
+          : `≥ ${lastMB} MB (all tested sizes OK)`;
+        if (effEl) { effEl.textContent = limText; effEl.style.color = firstMB ? 'var(--orange,#f90)' : 'var(--green)'; }
+        if (resultEl) resultEl.textContent = JSON.stringify(data, null, 2);
+        _toast(`Upload limit probe complete: ${limText}`);
+      } catch (e) {
+        if (effEl) { effEl.textContent = '✗ Probe failed'; effEl.style.color = 'var(--red)'; }
+        if (resultEl) { resultEl.textContent = 'Error: ' + e.message; }
+        _toast('Probe failed: ' + e.message, 'err');
+      }
+    });
+
+    // Set storage limit button
+    ctrl.querySelector('#ax-sec-fix-limit-btn')?.addEventListener('click', async () => {
+      const resultEl = document.getElementById('ax-sec-limit-result');
+      if (resultEl) { resultEl.style.display = 'block'; resultEl.textContent = 'Calling /set-storage-limit…'; }
+      try {
+        const res  = await fetch(UPLOAD_WORKER_URL + '/set-storage-limit');
+        const data = await res.json();
+        if (resultEl) resultEl.textContent = JSON.stringify(data, null, 2);
+        const projectOk = data.project?.ok;
+        const note      = data.project?.note || '';
+        if (projectOk) {
+          _toast('Storage limit set successfully: ' + note);
+        } else {
+          _toast('Storage limit update: ' + (note.slice(0, 120) || 'see result panel'), 'warn');
+        }
+      } catch (e) {
+        if (resultEl) { resultEl.textContent = 'Error: ' + e.message; }
+        _toast('Set storage limit failed: ' + e.message, 'err');
+      }
+    });
 
     // Seed initial channels if none exist yet
     _seedInitialChannels();
@@ -516,9 +563,14 @@ function _buildFounderHTML() {
           <div class="ax-security-row"><span>SUPABASE_URL</span><span class="ax-security-val" id="ax-sec-sup-url">…</span></div>
           <div class="ax-security-row"><span>SUPABASE_SERVICE_KEY</span><span class="ax-security-val" id="ax-sec-sup-key">…</span></div>
           <div class="ax-security-row"><span>FIREBASE_PROJECT_ID</span><span class="ax-security-val" id="ax-sec-fb-id">…</span></div>
-          <div style="margin-top:8px;">
+          <div class="ax-security-row"><span>Bucket file_size_limit</span><span class="ax-security-val" id="ax-sec-bucket-limit">…</span></div>
+          <div class="ax-security-row"><span>Effective Upload Limit</span><span class="ax-security-val" id="ax-sec-eff-limit">…</span></div>
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
             <button class="ax-btn-sm" id="ax-sec-recheck-btn">↺ Re-check Worker</button>
+            <button class="ax-btn-sm" id="ax-sec-probe-limit-btn">🔍 Probe Upload Limit</button>
+            <button class="ax-btn-sm" id="ax-sec-fix-limit-btn" title="Raise project-level storage limit (requires SUPABASE_MANAGEMENT_TOKEN)">⬆ Set Storage Limit</button>
           </div>
+          <div id="ax-sec-limit-result" style="margin-top:8px;font-size:11px;color:var(--text-dim);display:none;white-space:pre-wrap;word-break:break-all;max-height:120px;overflow-y:auto;background:var(--surface-hi);border-radius:4px;padding:8px;"></div>
         </div>
       </div>
     </div>
@@ -1269,19 +1321,22 @@ async function _handleFiles(files) {
  *   Phase 1 — Worker /authorize (tiny JSON, no file body)
  *     → Firebase token verified server-side
  *     → Founder email confirmed from verified token
+ *     → Worker PATCHes bucket file_size_limit to 500 MiB if needed
+ *       (fixes "The object exceeded the maximum allowed size" HTTP 400)
  *     → Worker POSTs to /storage/v1/object/upload/sign/<bucket>/<path>
  *       using the service-role key
  *     → Supabase returns { url: "/object/upload/sign/<bucket>/<path>?token=..." }
  *     → Worker prepends supabaseUrl + "/storage/v1" — path is NOT rewritten
- *     → Returns signedUrl + storagePath + publicUrl
+ *     → Returns signedUrl + storagePath + publicUrl + bucketLimitBytes
  *
  *   Phase 2 — PUT directly to Supabase signed URL (no Worker in the data path)
  *     → XHR PUT to /storage/v1/object/upload/sign/<bucket>/<path>?token=
  *     → No Authorization header needed — ?token= in URL is the authorisation
  *     → IMPORTANT: must PUT to /object/upload/sign/ NOT /object/sign/
  *       (/object/sign/ is the download path and returns HTTP 400 without Auth)
- *     → File never passes through the Worker → no 100 MB CF body limit
- *     → Size limit is the Supabase bucket's file_size_limit (set to 500 MB)
+ *     → File never passes through the Worker → no Cloudflare request-body limit
+ *     → Size limit is enforced by the Supabase bucket's file_size_limit (500 MiB)
+ *     → Progress: TRANSFER 0–99% → FINALIZING (waiting for server response) → VERIFIED
  *
  *   Phase 3 — Firestore metadata record
  */
@@ -1318,11 +1373,18 @@ async function _uploadFile(file) {
     listEl.prepend(row);
   }
 
+  // setProgress: clamp visual bar at 99 % during transfer; only setProgress(total,total)
+  // (or the post-verify call) advances to 100 % so the bar never shows complete
+  // while Supabase is still processing the object server-side.
   const setProgress = (loaded, total) => {
-    const pct   = total > 0 ? Math.min(100, Math.round(loaded / total * 100)) : 0;
-    const bar   = document.getElementById(`bar-${itemKey}`);
-    const pctEl = document.getElementById(`pct-${itemKey}`);
-    const bytes = document.getElementById(`bytes-${itemKey}`);
+    // Cap at 99 % while bytes are still transferring so the bar clearly differs
+    // from the verified-complete state (100 %).  The storage finalization step
+    // advances to 100 % only after server confirmation.
+    const rawPct = total > 0 ? Math.round(loaded / total * 100) : 0;
+    const pct    = (loaded < total) ? Math.min(99, rawPct) : rawPct;
+    const bar    = document.getElementById(`bar-${itemKey}`);
+    const pctEl  = document.getElementById(`pct-${itemKey}`);
+    const bytes  = document.getElementById(`bytes-${itemKey}`);
     if (bar)   bar.style.width   = pct + '%';
     if (pctEl) pctEl.textContent = pct + '%';
     if (bytes && total > 0) bytes.textContent = `${_fmtSize(loaded)} / ${_fmtSize(total)}`;
@@ -1424,19 +1486,71 @@ async function _uploadFile(file) {
     return;
   }
 
-  setStatus('UPLOADING…', '');
+  setStatus('TRANSFERRING…', '');
   setProgress(0, file.size);
 
   try {
     await _signedUpload(file, authResult.signedUrl, (loaded, total) => {
       setProgress(loaded, total);
+      // When all bytes have been sent to Supabase, show FINALIZING state.
+      // The bar stays at 99 % until Supabase confirms the object was accepted.
+      if (total > 0 && loaded >= total) {
+        setStatus('FINALIZING…', 'var(--blue-bright)');
+      }
     });
+    // PUT returned 2xx — Supabase accepted the object.
+    // Now advance bar to 100 % and show verified.
+    setProgress(file.size, file.size);
+    setStatus('✓ STORAGE VERIFIED — SAVING…', 'var(--blue-bright)');
   } catch (uploadErr) {
     // The XHR completed (bytes transferred) but Supabase returned a non-2xx status.
-    // Before showing a hard failure, check whether the object actually landed in storage.
-    // This handles the case where the PUT succeeded server-side but the response was
-    // mis-classified (e.g. Supabase returned a code we didn't expect).
-    console.error('[AURENIX UPLOAD] PUT completed with error:', uploadErr.message,
+    // Determine whether this is a size-limit rejection or another error.
+
+    // Detect the "exceeded the maximum allowed size" error from Supabase HTTP 400.
+    // The raw error message from _signedUpload contains the Supabase response body,
+    // e.g.: "SUPABASE STORAGE UPLOAD FAILED — HTTP 400: The object exceeded the maximum..."
+    const rawErrMsg = uploadErr.message || '';
+    const isSizeLimitError =
+      rawErrMsg.toLowerCase().includes('exceeded the maximum') ||
+      rawErrMsg.toLowerCase().includes('maximum allowed size') ||
+      rawErrMsg.toLowerCase().includes('file size limit') ||
+      rawErrMsg.toLowerCase().includes('payload too large');
+
+    if (isSizeLimitError) {
+      // Surface a clear size-limit error — no need to verify storage.
+      // The effective limit may be the Supabase project-level STORAGE_FILE_SIZE_LIMIT
+      // (controlled in Supabase Dashboard → Storage → Configuration → Upload File Size Limit)
+      // which is separate from, and may be lower than, the bucket's file_size_limit.
+      // On Supabase Free plan the project-level cap is 50 MB (cannot be raised without upgrade).
+      // On Supabase Pro plan it can be raised to 5 GB.
+      const fileMB  = Math.round(file.size / 1048576);
+      const bucketMB = authResult.bucketLimitBytes
+        ? Math.round(authResult.bucketLimitBytes / 1048576)
+        : 500;
+      // The effective platform limit is what actually rejected the file.
+      // We don't know the exact project-level limit from the browser, but we know
+      // the file exceeded it. Show the file size and direct the user to the fix.
+      const statusMsg = `✕ VIDEO TOO LARGE — File: ${fileMB} MB | Bucket cap: ${bucketMB} MB`;
+      console.error('[AURENIX UPLOAD] Size limit rejection:', rawErrMsg);
+      setStatus(statusMsg, 'var(--red)');
+      setProgress(0, file.size); // reset bar — the object was not stored
+      _retryCallback = null;
+      addRetry();
+      // Detailed actionable message in the toast
+      _toast(
+        `VIDEO TOO LARGE (${fileMB} MB). ` +
+        `The Supabase project-level Upload File Size Limit is rejecting this file. ` +
+        `Fix: Supabase Dashboard → Storage → Configuration → "Upload File Size Limit" → set to 500 MB or higher. ` +
+        `On Free plan the maximum is 50 MB; upgrade to Pro for up to 5 GB. ` +
+        `Or run: /probe-limit on the Worker to find the exact current limit.`,
+        'err'
+      );
+      return;
+    }
+
+    // Non-size error: before showing a hard failure, check whether the object
+    // actually landed in storage (handles unexpected 2xx/3xx mis-classification).
+    console.error('[AURENIX UPLOAD] PUT completed with error:', rawErrMsg,
       '— verifying storage object before reporting failure…');
     setStatus('VERIFYING STORAGE…', 'var(--blue-bright)');
 
@@ -1459,12 +1573,14 @@ async function _uploadFile(file) {
     if (objectExists) {
       // Object IS in storage despite the non-2xx response — proceed to save metadata.
       console.log('[AURENIX UPLOAD] Object found in storage — proceeding to save metadata');
+      setProgress(file.size, file.size);
       setStatus('✓ STORAGE VERIFIED — SAVING…', 'var(--blue-bright)');
       // fall through to Phase 3 below
     } else {
       // Object genuinely not in storage — show failure with smart retry.
-      const errMsg = uploadErr.message || 'SUPABASE STORAGE UPLOAD FAILED';
+      const errMsg = rawErrMsg || 'SUPABASE STORAGE UPLOAD FAILED';
       setStatus('✗ TRANSFER FAILED — click retry', 'var(--red)');
+      setProgress(0, file.size); // reset bar — nothing was stored
       // Smart retry: re-request a fresh signed URL and re-upload (old token is single-use)
       _retryCallback = () => { _uploadFile(file); };
       addRetry();
@@ -1472,8 +1588,6 @@ async function _uploadFile(file) {
       return;
     }
   }
-
-  setProgress(file.size, file.size);
 
   // ── Phase 3: Firestore metadata record ───────────────────────────────
   // Force-refresh token before writing so the Firestore SDK has a valid
@@ -1508,7 +1622,10 @@ async function _uploadFile(file) {
       if (destEl) destEl.textContent = `${MEDIA_BUCKET} › ${docRef.id}`;
       _toast(`Uploaded: ${file.name}`);
 
-      if (!isImage) {
+      // Always open the metadata modal after upload so the founder can set title,
+      // channel, etc. — except for pure thumbnail uploads (type === 'thumbnail'),
+      // which are support assets that don't need a media record edited.
+      if (mediaType !== 'thumbnail') {
         setTimeout(() => _openMetaModal(docRef.id, file.name.replace(/\.[^.]+$/, '')), 400);
       }
 
@@ -1586,12 +1703,29 @@ function _signedUpload(file, signedUrl, onProgress) {
 }
 
 function _getMediaDuration(file) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
     const el  = file.type.startsWith('video/') ? document.createElement('video') : document.createElement('audio');
+
+    // Always resolve — never reject or hang.
+    // duration_sec is optional metadata; it must never block or fail the upload.
+    const cleanup = (sec) => {
+      el.onloadedmetadata = null;
+      el.onerror          = null;
+      clearTimeout(timer);
+      URL.revokeObjectURL(url);
+      resolve(sec);
+    };
+
+    // 8-second safety timeout: if the browser cannot determine duration in time
+    // (e.g. MP4 with moov atom at end, slow disk, large file) we resolve with 0
+    // so the upload can proceed immediately.  The duration field will be 0/unknown
+    // but the file itself will be stored correctly.
+    const timer = setTimeout(() => cleanup(0), 8000);
+
     el.preload = 'metadata';
-    el.onloadedmetadata = () => { resolve(Math.round(el.duration)); URL.revokeObjectURL(url); };
-    el.onerror = () => { reject(new Error('Could not read duration')); URL.revokeObjectURL(url); };
+    el.onloadedmetadata = () => cleanup(isFinite(el.duration) ? Math.round(el.duration) : 0);
+    el.onerror          = () => cleanup(0);
     el.src = url;
   });
 }
@@ -2002,6 +2136,27 @@ async function _checkWorkerHealth() {
     setCell('ax-sec-worker', '✗ UNREACHABLE — ' + err.message, false);
     console.error('[AURENIX] Worker /health fetch failed:', err);
   }
+
+  // Also fetch /diagnose to show bucket file_size_limit
+  try {
+    const diagRes  = await fetch(UPLOAD_WORKER_URL + '/diagnose');
+    const diagData = await diagRes.json();
+    const bucketMB = diagData.bucket_file_size_limit_bytes
+      ? Math.round(diagData.bucket_file_size_limit_bytes / 1048576) + ' MB'
+      : '(not set)';
+    const bucketEl = document.getElementById('ax-sec-bucket-limit');
+    if (bucketEl) {
+      bucketEl.textContent = bucketMB;
+      bucketEl.style.color = diagData.bucket_file_size_limit_bytes >= 52428800
+        ? 'var(--green)' : 'var(--orange,#f90)';
+    }
+    // Effective limit not known without probing, hint user
+    const effEl = document.getElementById('ax-sec-eff-limit');
+    if (effEl && effEl.textContent === '…') {
+      effEl.textContent = `≤ ${bucketMB} (click 🔍 Probe to find exact limit)`;
+      effEl.style.color = 'var(--text-dim)';
+    }
+  } catch (_) {}
 }
 
 /* ═══════════════════════════════════════
@@ -2071,7 +2226,7 @@ function _openPlayNowModal(channelId) {
       const ref   = doc(db, 'network_state', _playNowChannelId);
       // Put selected item at front of queue
       const newQueue = [
-        { id: item.id, title: item.title, artist: item.artist || '', type: item.type, url: item.url, duration_sec: item.duration_sec || 0 },
+        { id: item.id, title: item.title, artist: item.artist || '', type: item.type, url: item.url, duration_sec: item.duration_sec || 0, mime_type: item.mime_type || '' },
         ...queue.filter(q => q.id !== item.id),
       ];
       await setDoc(ref, {
@@ -2240,7 +2395,7 @@ window._AXC = {
     const st    = _channelStates[_schedChannelId];
     const queue = [...(st?.queue || [])];
     if (queue.find(q => q.id === mediaId)) { _toast('Already in schedule.', 'err'); return; }
-    queue.push({ id: item.id, title: item.title, artist: item.artist || '', type: item.type, url: item.url, duration_sec: item.duration_sec || 0 });
+    queue.push({ id: item.id, title: item.title, artist: item.artist || '', type: item.type, url: item.url, duration_sec: item.duration_sec || 0, mime_type: item.mime_type || '' });
     await _saveQueue(queue);
     _toast(`Added to ${_schedChannelId}: ${item.title}`);
   },
@@ -2251,7 +2406,7 @@ window._AXC = {
     const st    = _channelStates[channelId];
     const queue = [...(st?.queue || [])];
     if (queue.find(q => q.id === mediaId)) { _toast('Already in queue.', 'err'); return; }
-    queue.push({ id: item.id, title: item.title, artist: item.artist || '', type: item.type, url: item.url, duration_sec: item.duration_sec || 0 });
+    queue.push({ id: item.id, title: item.title, artist: item.artist || '', type: item.type, url: item.url, duration_sec: item.duration_sec || 0, mime_type: item.mime_type || '' });
     const loop = st?.loop ?? true;
     const ref  = doc(db, 'network_state', channelId);
     await setDoc(ref, { ...(st || {}), queue, loop, updated_at: serverTimestamp() }, { merge: true });

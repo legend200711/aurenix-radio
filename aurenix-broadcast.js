@@ -783,18 +783,63 @@ function _playState(st) {
   const elapsed = (Date.now() - startedAt) / 1000;
   const dur = item.duration_sec || 0;
 
+  // Only auto-advance when there is a known positive duration.
+  // Items with duration_sec=0 (images, duration-unknown media) display indefinitely
+  // until the founder manually advances or the channel loops.
   if (dur > 0 && elapsed >= dur - 0.5) {
     _advance(st);
     return;
   }
 
-  const isVideo = (item.type === 'video' || item.type === 'music_video' || item.type === 'show' ||
-                   item.url.match(/\.(mp4|webm|mov)(\?|$)/i));
+  // Determine media kind:
+  //   isImage — item is a static image (still art, photo, poster)
+  //   isVideo — item is a video file
+  //   otherwise audio
+  const isImage = (
+    item.type === 'thumbnail' ||
+    /\.(jpe?g|png|gif|webp|svg)(\?|$)/i.test(item.url) ||
+    (item.mime_type || '').startsWith('image/')
+  );
+  const isVideo = !isImage && (
+    item.type === 'video' || item.type === 'music_video' || item.type === 'show' ||
+    item.type === 'trailer' || item.type === 'archive' || item.type === 'broadcast_clip' ||
+    /\.(mp4|webm|mov|avi|wmv|mpeg)(\?|$)/i.test(item.url) ||
+    (item.mime_type || '').startsWith('video/')
+  );
 
   const videoEl = document.getElementById('ax-video');
   const audioEl = document.getElementById('ax-audio');
   const thumbEl = document.getElementById('ax-thumbnail');
 
+  if (isImage) {
+    // ── Static image display path ──────────────────────────────────────────
+    // Show the image in the thumbnail area; use <audio> if a paired audio URL
+    // is provided (future extension), otherwise no audio element needed.
+    _stopMedia();
+    _mediaEl   = null;
+    _mediaType = 'image';
+
+    if (thumbEl) {
+      thumbEl.style.display      = 'flex';
+      thumbEl.style.backgroundImage = `url(${JSON.stringify(item.url)})`;
+      thumbEl.style.backgroundSize   = 'contain';
+      thumbEl.style.backgroundRepeat = 'no-repeat';
+      thumbEl.style.backgroundPosition = 'center';
+      // Clear the default placeholder glyph when an image is loaded
+      const placeholder = thumbEl.querySelector('div');
+      if (placeholder) placeholder.style.display = 'none';
+    }
+    if (videoEl) videoEl.style.display = 'none';
+    if (audioEl) audioEl.style.display = 'none';
+
+    const pipBtn = document.getElementById('ax-pip-btn');
+    if (pipBtn) pipBtn.style.display = 'none';
+
+    _updatePlayBtn();
+    return;
+  }
+
+  // ── Audio / Video playback path ────────────────────────────────────────
   const el = isVideo ? videoEl : audioEl;
 
   if (_mediaEl !== el || _mediaEl?.src !== item.url) {
@@ -846,9 +891,21 @@ function _stopMedia() {
     _mediaEl.onended = null;
     _mediaEl.onerror = null;
   }
-  _mediaEl = null;
+  _mediaEl   = null;
+  _mediaType = null;
+
+  // Clear any image that was displayed in the thumbnail area and restore
+  // the default placeholder so the next item starts from a clean state.
   const thumbEl = document.getElementById('ax-thumbnail');
-  if (thumbEl) thumbEl.style.display = 'flex';
+  if (thumbEl) {
+    thumbEl.style.display           = 'flex';
+    thumbEl.style.backgroundImage   = '';
+    thumbEl.style.backgroundSize    = '';
+    thumbEl.style.backgroundRepeat  = '';
+    thumbEl.style.backgroundPosition = '';
+    const placeholder = thumbEl.querySelector('div');
+    if (placeholder) placeholder.style.display = '';
+  }
 }
 
 function _togglePlayPause() {
