@@ -1518,33 +1518,53 @@ async function _uploadFile(file) {
 
     if (isSizeLimitError) {
       // Surface a clear size-limit error — no need to verify storage.
-      // The effective limit may be the Supabase project-level STORAGE_FILE_SIZE_LIMIT
-      // (controlled in Supabase Dashboard → Storage → Configuration → Upload File Size Limit)
-      // which is separate from, and may be lower than, the bucket's file_size_limit.
-      // On Supabase Free plan the project-level cap is 50 MB (cannot be raised without upgrade).
-      // On Supabase Pro plan it can be raised to 5 GB.
-      const fileMB  = Math.round(file.size / 1048576);
-      const bucketMB = authResult.bucketLimitBytes
-        ? Math.round(authResult.bucketLimitBytes / 1048576)
-        : 500;
-      // The effective platform limit is what actually rejected the file.
-      // We don't know the exact project-level limit from the browser, but we know
-      // the file exceeded it. Show the file size and direct the user to the fix.
-      const statusMsg = `✕ VIDEO TOO LARGE — File: ${fileMB} MB | Bucket cap: ${bucketMB} MB`;
-      console.error('[AURENIX UPLOAD] Size limit rejection:', rawErrMsg);
+      //
+      // IMPORTANT: Supabase has TWO independent file-size limits:
+      //   A. Bucket file_size_limit  — per-bucket cap (Worker ensures this is 500 MB)
+      //   B. Project-level STORAGE_FILE_SIZE_LIMIT — global platform cap
+      //      (Supabase Dashboard → Storage → Configuration → "Upload File Size Limit")
+      //      Default on Free plan: 50 MB (cannot be raised without upgrading to Pro)
+      //
+      // Effective limit = min(A, B).  Even with bucket = 500 MB, if the project-level
+      // cap is 50 MB all files larger than 50 MB will be rejected by Supabase.
+      const fileMB   = Math.round(file.size / 1048576);
+      const bucketLimitBytes = authResult.bucketLimitBytes || 524_288_000; // 500 MiB
+      const bucketMB = Math.round(bucketLimitBytes / 1048576);
+
+      // Determine whether the file genuinely exceeds the configured bucket cap,
+      // or whether it is within the bucket cap but rejected by the lower project-level limit.
+      const genuinelyTooLarge = file.size > bucketLimitBytes;
+
+      let statusMsg, toastMsg;
+      if (genuinelyTooLarge) {
+        // File is larger than the configured per-file maximum — correct rejection.
+        statusMsg = `✕ VIDEO TOO LARGE — File: ${fileMB} MB | Maximum: ${bucketMB} MB`;
+        toastMsg  =
+          `VIDEO TOO LARGE — File size: ${fileMB} MB. Maximum allowed: ${bucketMB} MB. ` +
+          `Please use a smaller file.`;
+      } else {
+        // File is WITHIN the bucket cap but was rejected anyway.
+        // The Supabase project-level Upload File Size Limit (separate from the bucket cap)
+        // is lower than the bucket cap and is the real constraint.
+        // On the Free plan this is capped at 50 MB and cannot be raised.
+        statusMsg = `✕ UPLOAD REJECTED BY PLATFORM — File: ${fileMB} MB | Bucket cap: ${bucketMB} MB`;
+        toastMsg  =
+          `Upload rejected (${fileMB} MB). The file is within the ${bucketMB} MB bucket limit ` +
+          `but the Supabase project-level "Upload File Size Limit" (a separate platform cap) ` +
+          `is set lower than the file size. ` +
+          `Fix: Supabase Dashboard → Storage → Configuration → "Upload File Size Limit" → set to 500 MB or higher. ` +
+          `On the Free plan the maximum is 50 MB; upgrade to Pro to allow up to 5 GB. ` +
+          `Or run /probe-limit on the Worker to confirm the current effective limit.`;
+      }
+
+      console.error('[AURENIX UPLOAD] Size limit rejection:', rawErrMsg,
+        '| fileMB:', fileMB, '| bucketMB:', bucketMB,
+        '| genuinelyTooLarge:', genuinelyTooLarge);
       setStatus(statusMsg, 'var(--red)');
       setProgress(0, file.size); // reset bar — the object was not stored
       _retryCallback = null;
       addRetry();
-      // Detailed actionable message in the toast
-      _toast(
-        `VIDEO TOO LARGE (${fileMB} MB). ` +
-        `The Supabase project-level Upload File Size Limit is rejecting this file. ` +
-        `Fix: Supabase Dashboard → Storage → Configuration → "Upload File Size Limit" → set to 500 MB or higher. ` +
-        `On Free plan the maximum is 50 MB; upgrade to Pro for up to 5 GB. ` +
-        `Or run: /probe-limit on the Worker to find the exact current limit.`,
-        'err'
-      );
+      _toast(toastMsg, 'err');
       return;
     }
 
