@@ -1013,7 +1013,7 @@ async function _uploadFile(file) {
     if (res.status === 503) throw new Error(data.error || 'WORKER CONFIGURATION ERROR');
     if (!res.ok || !data.ok) throw new Error(data.error || `WORKER AUTHORIZATION FAILED — HTTP ${res.status}`);
 
-    authResult = data; // { tusUrl, storagePath, publicUrl }
+    authResult = data; // { signedUrl, storagePath, publicUrl }
   } catch (authErr) {
     setStatus('✗ AUTH FAILED — click retry', 'var(--red)');
     addRetry();
@@ -1021,14 +1021,14 @@ async function _uploadFile(file) {
     return;
   }
 
-  // ── Phase 2: TUS upload directly to Supabase ──────────────────────────
-  // The file streams directly from browser → Supabase.
-  // The Worker is completely out of the data path.
+  // ── Phase 2: PUT directly to Supabase signed URL ──────────────────────
+  // The signed URL contains a ?token= that authorises the upload.
+  // No Authorization header needed — the Worker never sees the file.
   setStatus('UPLOADING…', '');
   setProgress(0, file.size);
 
   try {
-    await _tusUpload(file, authResult.tusUrl, (loaded, total) => {
+    await _signedUpload(file, authResult.signedUrl, (loaded, total) => {
       setProgress(loaded, total);
     });
   } catch (uploadErr) {
@@ -1083,90 +1083,49 @@ async function _uploadFile(file) {
 }
 
 /**
- * TUS resumable upload — sends the file directly to a Supabase TUS URL.
+ * Upload a file via a Supabase signed upload URL using a single XHR PUT.
  *
- * Implements TUS 1.0.0 PATCH protocol:
- *   - Chunks the file into ~5 MB pieces for accurate progress
- *   - Each chunk is a PATCH request with Upload-Offset header
- *   - Network errors on a chunk are retried up to 3 times before failing
- *   - Resume: queries Upload-Offset via HEAD before starting, so a
- *     previously interrupted upload continues from where it left off
+ * The signed URL contains a ?token= query parameter — no Authorization header
+ * is sent by the browser.  Supabase validates the token server-side.
+ *
+ * XHR upload.onprogress fires frequently, giving byte-accurate progress.
+ * On network error, the caller retries by requesting a fresh signed URL
+ * from the Worker (the old signed URL is single-use and cannot be reused).
  *
  * @param {File}     file        — the file to upload
- * @param {string}   tusUrl      — TUS Location URL from Worker /authorize
+ * @param {string}   signedUrl   — signed upload URL from Worker /authorize
  * @param {function} onProgress  — callback(loadedBytes, totalBytes)
  */
-async function _tusUpload(file, tusUrl, onProgress) {
-  const CHUNK = 5 * 1024 * 1024; // 5 MB chunks
-  const total = file.size;
-
-  // ── Resume: find how far we got (HEAD) ─────────────────────────────────
-  let offset = 0;
-  try {
-    const head = await fetch(tusUrl, {
-      method:  'HEAD',
-      headers: { 'Tus-Resumable': '1.0.0' },
-    });
-    if (head.ok) {
-      const off = head.headers.get('Upload-Offset');
-      if (off) offset = parseInt(off, 10);
-    }
-  } catch (_) { /* start from 0 if HEAD fails */ }
-
-  onProgress(offset, total);
-
-  // ── Upload chunks ──────────────────────────────────────────────────────
-  while (offset < total) {
-    const end   = Math.min(offset + CHUNK, total);
-    const chunk = file.slice(offset, end);
-
-    // Retry each chunk up to 3 times on network error
-    let attempts = 0;
-    while (true) {
-      attempts++;
-      try {
-        await _tusChunk(tusUrl, chunk, offset, total);
-        break; // chunk succeeded
-      } catch (err) {
-        if (attempts >= 3) throw new Error(`SUPABASE STORAGE UPLOAD FAILED — ${err.message}`);
-        await new Promise(r => setTimeout(r, 1000 * attempts)); // back-off
-      }
-    }
-
-    offset = end;
-    onProgress(offset, total);
-  }
-}
-
-/**
- * Send one TUS PATCH chunk via XHR for byte-accurate upload progress.
- *
- * @param {string} tusUrl
- * @param {Blob}   chunk       — slice of the file
- * @param {number} offset      — byte offset of this chunk in the full file
- * @param {number} totalSize   — total file size
- */
-function _tusChunk(tusUrl, chunk, offset, totalSize) {
+function _signedUpload(file, signedUrl, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('PATCH', tusUrl, true);
-    xhr.setRequestHeader('Tus-Resumable',  '1.0.0');
-    xhr.setRequestHeader('Upload-Offset',  String(offset));
-    xhr.setRequestHeader('Content-Type',   'application/offset+octet-stream');
-    xhr.setRequestHeader('Content-Length', String(chunk.size));
+    xhr.open('PUT', signedUrl, true);
+    // No Authorization header — the ?token= in the URL is the authorisation.
+    // Setting Content-Type is required for Supabase to store with the right MIME.
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.setRequestHeader('x-upsert', 'true');
+
+    xhr.upload.addEventListener('progress', e => {
+      if (e.lengthComputable) onProgress(e.loaded, e.total);
+    });
 
     xhr.addEventListener('load', () => {
-      // TUS success = 204 No Content
-      if (xhr.status === 204 || xhr.status === 200) {
+      if (xhr.status === 200) {
         resolve();
       } else {
-        reject(new Error(`HTTP ${xhr.status} at offset ${offset}: ${xhr.responseText.slice(0, 200)}`));
+        // Surface the exact Supabase error message (never contains secrets)
+        let detail = xhr.responseText.slice(0, 300);
+        try {
+          const j = JSON.parse(xhr.responseText);
+          detail = j.message || j.error || detail;
+        } catch (_) {}
+        reject(new Error(`SUPABASE STORAGE UPLOAD FAILED — HTTP ${xhr.status}: ${detail}`));
       }
     });
-    xhr.addEventListener('error',  () => reject(new Error('Network error during chunk upload')));
-    xhr.addEventListener('abort',  () => reject(new Error('Upload aborted')));
+    xhr.addEventListener('error', () => reject(new Error('SUPABASE STORAGE UPLOAD FAILED — network error')));
+    xhr.addEventListener('abort', () => reject(new Error('SUPABASE STORAGE UPLOAD FAILED — upload aborted')));
 
-    xhr.send(chunk);
+    xhr.send(file);
   });
 }
 

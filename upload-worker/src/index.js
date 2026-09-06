@@ -1,31 +1,36 @@
 /**
- * AURENIX — Founder Upload Worker  (v4 — TUS authorisation gate)
+ * AURENIX — Founder Upload Worker  (v5 — signed-URL authorisation gate)
  * upload-worker/src/index.js
  *
- * ARCHITECTURE CHANGE (v4):
- *   Previous versions proxied the entire file through this Worker.
- *   That caused HTTP 413 on files > the Supabase bucket's default 50 MB limit,
- *   and would hit the Cloudflare Workers 100 MB request-body ceiling on large media.
+ * ARCHITECTURE (v5):
+ *   The Worker is an authorisation gate only — it never touches the file.
  *
- *   v4 never touches the file.  The Worker is an AUTHORISATION GATE only:
- *     1. Browser sends:  Firebase ID token + desired storage path + file size (tiny JSON)
- *     2. Worker verifies the Firebase JWT against Google's JWK public keys
+ *   Why not TUS PATCH?
+ *     Supabase TUS PATCH requires Authorization: Bearer <service-role-key> on
+ *     every chunk.  The browser cannot hold the service-role key.
+ *     TUS PATCH without it returns 403 "Invalid Compact JWS".
+ *
+ *   Solution — Supabase signed upload URL:
+ *     1. Browser sends Firebase ID token + fileName + contentType + size (tiny JSON)
+ *     2. Worker verifies Firebase JWT (Google JWK, RS256)
  *     3. Worker checks token.email == FOUNDER_EMAIL
- *     4. Worker creates a TUS upload resource on Supabase Storage using the
- *        service-role key and returns the resulting Location URL
- *     5. Browser streams the file directly to that TUS URL (no Worker in the path)
- *
- *   Result: arbitrarily large files, real resumable uploads, zero Worker body limit.
+ *     4. Worker calls POST /storage/v1/object/upload/sign/<bucket>/<path>
+ *        using the service-role key — returns a signed URL with ?token=...
+ *     5. Worker returns the full signed URL to the browser
+ *     6. Browser PUTs the file directly to that signed URL
+ *        — no Authorization header needed, the token is in the URL query string
+ *        — supports up to 500 MB (bucket file_size_limit)
+ *        — XHR upload.onprogress gives byte-accurate progress
  *
  * Endpoints:
- *   POST /authorize  — JSON body: { path, size, contentType }
- *                      Returns: { tusUrl, storagePath, publicUrl }
- *   GET  /health     — checks secrets present (never reveals values)
- *   GET  /diagnose   — deep diagnostic (Supabase + Firebase connectivity)
+ *   POST /authorize  — JSON: { fileName, contentType, size }
+ *                      Returns: { signedUrl, storagePath, publicUrl }
+ *   GET  /health     — secrets present check (never reveals values)
+ *   GET  /diagnose   — full connectivity diagnostic
  *
  * Environment secrets (set via `wrangler secret put`):
  *   SUPABASE_URL          — https://nxsyoreuwmmxtuvmeqbg.supabase.co
- *   SUPABASE_SERVICE_KEY  — Supabase service-role JWT (eyJ..., NOT sb_secret_...)
+ *   SUPABASE_SERVICE_KEY  — service-role JWT (eyJ..., NOT sb_secret_...)
  *   FIREBASE_PROJECT_ID   — remix-studio-4bf8a
  */
 
@@ -136,52 +141,46 @@ async function verifyFirebaseToken(idToken, projectId) {
   return payload;
 }
 
-/* ─── Supabase TUS: create an upload resource ─────────────────────────────── */
+/* ─── Supabase signed upload URL ──────────────────────────────────────────── */
 
 /**
- * Creates a TUS upload resource on Supabase Storage using the service-role key.
- * Returns the Location header value — that is the URL the browser uploads to directly.
+ * Creates a Supabase signed upload URL using the service-role key.
  *
- * The file never passes through this Worker.
+ * The returned URL contains a short-lived ?token= query parameter.
+ * The browser PUT to this URL requires NO Authorization header —
+ * the token in the URL is the authorisation.
+ *
+ * Verified working: HTTP 200 with no auth headers on the PUT.
+ * (TUS PATCH was rejected with 403 "Invalid Compact JWS" because the browser
+ * cannot send the service-role key as Bearer on every chunk.)
  *
  * @param {string} supabaseUrl
- * @param {string} serviceKey   — must be the JWT service-role key (eyJ...)
- * @param {string} storagePath  — e.g. "media/<uid>/<ts>_file.mp4"
- * @param {number} fileSize     — total byte length
- * @param {string} contentType  — MIME type
- * @returns {Promise<string>}   — TUS Location URL
+ * @param {string} serviceKey    — service-role JWT
+ * @param {string} storagePath   — e.g. "media/<uid>/<ts>_file.mp4"
+ * @returns {Promise<string>}    — full signed upload URL (supabaseUrl + path + ?token=...)
  */
-async function createTusUpload(supabaseUrl, serviceKey, storagePath, fileSize, contentType) {
-  // TUS metadata values must be base64-encoded
-  const b64 = v => btoa(unescape(encodeURIComponent(v)));
+async function createSignedUploadUrl(supabaseUrl, serviceKey, storagePath) {
+  const endpoint = `${supabaseUrl}/storage/v1/object/upload/sign/${MEDIA_BUCKET}/${storagePath}`;
 
-  const metadata = [
-    `bucketName ${b64(MEDIA_BUCKET)}`,
-    `objectName ${b64(storagePath)}`,
-    `contentType ${b64(contentType)}`,
-    `cacheControl ${b64('3600')}`,
-  ].join(',');
-
-  const res = await fetch(`${supabaseUrl}/storage/v1/upload/resumable`, {
+  const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
-      'Authorization':   `Bearer ${serviceKey}`,
-      'apikey':           serviceKey,
-      'Tus-Resumable':   '1.0.0',
-      'Upload-Length':    String(fileSize),
-      'Upload-Metadata':  metadata,
-      'Content-Length':  '0',
+      'Authorization': `Bearer ${serviceKey}`,
+      'apikey':         serviceKey,
+      'Content-Type':  'application/json',
     },
+    body: JSON.stringify({ expiresIn: 3600 }),  // 1-hour window
   });
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`SUPABASE TUS CREATE FAILED — HTTP ${res.status}: ${detail}`);
+    throw new Error(`SUPABASE SIGNED URL FAILED — HTTP ${res.status}: ${detail}`);
   }
 
-  const location = res.headers.get('Location');
-  if (!location) throw new Error('SUPABASE TUS CREATE FAILED — no Location header in response');
-  return location;
+  const data = await res.json();
+  // data.url is a path like /object/upload/sign/<bucket>/<path>?token=...
+  if (!data.url) throw new Error('SUPABASE SIGNED URL FAILED — no url in response');
+  return `${supabaseUrl}/storage/v1${data.url}`;
 }
 
 /* ─── Service key shape check ─────────────────────────────────────────────── */
@@ -231,7 +230,7 @@ export default {
         FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID  ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID_value: env.FIREBASE_PROJECT_ID || null,
         SUPABASE_URL_value:        env.SUPABASE_URL || null,
-        architecture: 'TUS — Worker authorises only; browser uploads directly to Supabase',
+        architecture: 'Signed URL — Worker authorises only; browser PUTs directly to Supabase',
         error: err || null,
       }, err ? 503 : 200, origin);
     }
@@ -297,7 +296,7 @@ export default {
       return json(diag, allOk ? 200 : 503, origin);
     }
 
-    /* ── POST /authorize — Founder-only TUS authorisation ────────────────── */
+    /* ── POST /authorize — Founder-only signed-URL authorisation ─────────── */
     if (request.method === 'POST' && url.pathname === '/authorize') {
 
       // ── 0. Secrets present
@@ -348,22 +347,24 @@ export default {
       const safeName = fileName.replace(/[^a-z0-9._-]/gi, '_');
       const storagePath = `media/${uid}/${Date.now()}_${safeName}`;
 
-      // ── 6. Create TUS upload resource on Supabase (service-role key, server-side)
-      let tusLocation;
+      // ── 6. Create signed upload URL (service-role key, server-side only)
+      //    Browser PUTs directly to this URL — no Authorization header needed,
+      //    the ?token= query parameter is the authorisation.
+      let signedUrl;
       try {
-        tusLocation = await createTusUpload(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, storagePath, size, contentType);
+        signedUrl = await createSignedUploadUrl(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, storagePath);
       } catch (err) {
-        return json({ error: err.message, stage: 'SUPABASE_TUS_CREATE_FAILED' }, 502, origin);
+        return json({ error: err.message, stage: 'SUPABASE_SIGNED_URL_FAILED' }, 502, origin);
       }
 
-      // ── 7. Return TUS URL + storage path to browser — file is never sent here
+      // ── 7. Return signed URL + paths to browser — file is never sent here
       const publicUrl = `${env.SUPABASE_URL}/storage/v1/object/public/${MEDIA_BUCKET}/${storagePath}`;
       return json({
-        ok:           true,
-        tusUrl:       tusLocation,
+        ok:          true,
+        signedUrl,
         storagePath,
         publicUrl,
-        uploadedBy:   tokenEmail,
+        uploadedBy:  tokenEmail,
         authorizedAt: new Date().toISOString(),
       }, 200, origin);
     }
