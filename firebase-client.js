@@ -14,16 +14,16 @@
  * Config sourced from: https://console.firebase.google.com/
  */
 
-import { initializeApp }                        from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js';
+import { initializeApp }                        from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import { getAuth, signInWithEmailAndPassword,
          createUserWithEmailAndPassword,
          sendPasswordResetEmail, signOut,
-         onAuthStateChanged, updateProfile }    from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js';
+         onAuthStateChanged, updateProfile }    from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import { getFirestore, doc, getDoc, setDoc,
          collection, query, where, orderBy,
          limit, getDocs, onSnapshot, addDoc,
-         updateDoc, serverTimestamp, increment,
-         runTransaction, Timestamp }            from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
+         updateDoc, deleteDoc, serverTimestamp, increment,
+         runTransaction, Timestamp }            from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 
 /* ══════════════════════════════════════════════════════════════
    FIREBASE CONFIGURATION
@@ -56,7 +56,7 @@ export const db   = getFirestore(_app);
 ══════════════════════════════════════════════════════════════ */
 export {
   doc, getDoc, setDoc, collection, query, where, orderBy,
-  limit, getDocs, onSnapshot, addDoc, updateDoc,
+  limit, getDocs, onSnapshot, addDoc, updateDoc, deleteDoc,
   serverTimestamp, increment, runTransaction, Timestamp,
   onAuthStateChanged, signOut,
   signInWithEmailAndPassword, createUserWithEmailAndPassword,

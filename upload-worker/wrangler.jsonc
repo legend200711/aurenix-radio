@@ -1,0 +1,32 @@
+{
+  // AURENIX Founder Upload Worker
+  // Deploy: cd upload-worker && npx wrangler deploy
+  //
+  // Required secrets (run these commands once before deploying):
+  //   npx wrangler secret put SUPABASE_URL
+  //     → enter: https://nxsyoreuwmmxtuvmeqbg.supabase.co
+  //
+  //   npx wrangler secret put SUPABASE_SERVICE_KEY
+  //     → enter: <service-role key from Supabase Dashboard → Settings → API>
+  //
+  //   npx wrangler secret put FIREBASE_PROJECT_ID
+  //     → enter: remix-studio-4bf8a
+  //
+  // After deploying, copy the Worker URL into aurenix-control.js:
+  //   const UPLOAD_WORKER_URL = 'https://aurenix-upload.YOUR_SUBDOMAIN.workers.dev';
+
+  "name": "aurenix-upload",
+  "main": "src/index.js",
+  "compatibility_date": "2025-01-01",
+
+  // Workers Logs — structured observability
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  // No KV, R2, D1, or other bindings required.
+  // Supabase is called over fetch() using a secret service-role key.
+  // All three secrets are injected at runtime via `wrangler secret put`:
+  //   SUPABASE_URL, SUPABASE_SERVICE_KEY, FIREBASE_PROJECT_ID
+}

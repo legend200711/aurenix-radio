@@ -2,263 +2,70 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#050507">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="AURENIX RADIO">
-<meta name="description" content="AURENIX RADIO — Submit and listen to curated music. Community radio powered by Firebase + Supabase Storage.">
+<meta name="apple-mobile-web-app-title" content="AURENIX">
+<meta name="description" content="AURENIX — The Broadcast Never Stops. 24/7 internet network.">
 <link rel="manifest" href="aurenix-manifest.json">
 <link rel="icon" href="aurenix-favicon.svg" type="image/svg+xml">
-<title>AURENIX RADIO</title>
-<link rel="stylesheet" href="aurenix-core.css">
-<link rel="stylesheet" href="aurenix-extensions.css">
+<title>AURENIX — The Broadcast Never Stops</title>
+<link rel="stylesheet" href="aurenix-network.css">
 </head>
 <body>
 
-<!-- ════════════════════════════════════
-     BACKGROUND
-════════════════════════════════════ -->
-<div id="aurenix-bg" aria-hidden="true">
-  <canvas id="aurenix-particle-canvas"></canvas>
-  <div class="bg-fog"></div>
-  <div class="bg-columns" id="bg-columns" aria-hidden="true"></div>
-</div>
+<!-- Ambient background -->
+<div class="ax-ambient" aria-hidden="true"></div>
+<canvas id="ax-particles" aria-hidden="true"></canvas>
 
-<!-- Scan line effect -->
-<div class="scan-line" aria-hidden="true"></div>
+<!-- Navigation (populated by broadcast.js; hidden until authenticated) -->
+<nav id="ax-nav" role="navigation" aria-label="AURENIX Network" style="display:none;"></nav>
 
-<!-- ════════════════════════════════════
-     NAVIGATION
-════════════════════════════════════ -->
-<nav id="aurenix-nav" role="navigation" aria-label="AURENIX Main Navigation">
+<!-- Main app shell (populated by broadcast.js) -->
+<div id="ax-app" role="main"></div>
 
-  <!-- Logo -->
-  <div class="nav-logo" id="nav-logo-btn" role="button" tabindex="0" aria-label="AURENIX RADIO — Home">
-    <div class="nav-logo-mark">
-      <svg viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <polygon points="19,2 36,34 2,34" fill="none" stroke="#b8860b" stroke-width="1.2" opacity="0.7"/>
-        <circle cx="19" cy="22" r="7" fill="none" stroke="#00c9c0" stroke-width="1.2"/>
-        <circle cx="19" cy="22" r="3" fill="#00c9c0" opacity="0.7"/>
-        <line x1="19" y1="2" x2="19" y2="14" stroke="#b8860b" stroke-width="1" opacity="0.5"/>
-        <line x1="12" y1="22" x2="5" y2="22" stroke="#b8860b" stroke-width="0.8" opacity="0.4"/>
-        <line x1="26" y1="22" x2="33" y2="22" stroke="#b8860b" stroke-width="0.8" opacity="0.4"/>
-      </svg>
-    </div>
-    <div class="nav-logo-text">AURE<span>NIX</span></div>
-  </div>
+<!-- Admin control center (populated lazily by control.js) -->
+<div id="ax-control" aria-label="Broadcast Control Center"></div>
 
-  <!-- Desktop nav links -->
-  <div class="nav-links" role="list">
-    <button class="nav-link active" data-page="radio" role="listitem">
-      <span class="nav-link-icon">◉</span> Radio
-    </button>
-    <button class="nav-link" data-page="mysubs" role="listitem" data-requires-auth style="display:none;">
-      <span class="nav-link-icon">📤</span> My Submissions
-    </button>
-    <button class="nav-link" data-page="admin" data-admin-only role="listitem" style="display:none; color:#ff6680;">
-      <span class="nav-link-icon">⚡</span> Admin
-    </button>
-  </div>
+<!-- Toast -->
+<div id="ax-toast" role="status" aria-live="polite"></div>
 
-  <!-- Nav right -->
-  <div class="nav-right">
-    <!-- Logged-in user pill -->
-    <div id="nav-user-pill" role="button" tabindex="0" aria-label="Account menu"></div>
-    <!-- Sign out (auth only) -->
-    <button id="nav-signout-btn" data-requires-auth style="display:none;" aria-label="Sign Out" class="btn btn-ghost btn-sm">Sign Out</button>
-    <!-- Login button (guests only) -->
-    <button id="nav-login-btn" data-guest-only aria-label="Sign In to AURENIX">Sign In</button>
-    <!-- Hamburger (mobile) -->
-    <button class="nav-hamburger" id="nav-hamburger" aria-label="Toggle navigation" aria-expanded="false">
-      <span></span><span></span><span></span>
-    </button>
-  </div>
-
-</nav>
-
-<!-- Mobile nav drawer -->
-<div class="nav-drawer" id="nav-drawer" role="navigation" aria-label="Mobile Navigation">
-  <button class="nav-link active" data-page="radio">◉ AURENIX RADIO</button>
-  <button class="nav-link" data-page="mysubs" data-requires-auth style="display:none;">📤 My Submissions</button>
-  <button class="nav-link" data-page="admin" data-admin-only style="display:none; color:#ff6680;">⚡ ADMIN</button>
-  <div style="padding:10px 16px; border-top:1px solid var(--border-metal); margin-top:4px;">
-    <button id="drawer-login-btn" class="btn btn-gold btn-sm" data-guest-only style="width:100%;">Sign In</button>
-    <button id="drawer-signout-btn" class="btn btn-ghost btn-sm" data-requires-auth style="display:none; width:100%;">Sign Out</button>
-  </div>
-</div>
-
-
-<!-- ════════════════════════════════════
-     PAGE: AURENIX RADIO (default / only page)
-════════════════════════════════════ -->
-<main id="page-radio" class="aurenix-page active" aria-label="AURENIX Radio">
-  <!-- Radio shell: JS renders tabs + player + submit form into this div -->
-  <div id="radio-shell" class="radio-shell">
-    <div style="padding:40px; text-align:center; color:var(--text-muted); font-size:13px; letter-spacing:1px;">
-      Initialising broadcast…
-    </div>
-  </div>
-</main>
-
-
-<!-- ════════════════════════════════════
-     PAGE: MY SUBMISSIONS (auth-required)
-════════════════════════════════════ -->
-<section id="page-mysubs" class="aurenix-page" aria-label="My Submissions" style="display:none;">
-  <div class="section-header">
-    <button class="section-back" data-page="radio" aria-label="Back to Radio">← Radio</button>
-    <h2 class="section-title">My <span>Submissions</span></h2>
-  </div>
-  <div id="mysubs-page-content">
-    <div style="padding:40px; text-align:center; color:var(--text-muted); font-size:13px;">
-      Loading…
-    </div>
-  </div>
-</section>
-
-
-<!-- ════════════════════════════════════
-     PAGE: ADMIN DASHBOARD (admin-only)
-════════════════════════════════════ -->
-<section id="page-admin" class="aurenix-page" aria-label="AURENIX Admin" style="display:none;">
-  <div class="section-header" style="border-color: rgba(139,0,0,0.3);">
-    <button class="section-back" data-page="radio">← Radio</button>
-    <h2 class="section-title" style="color:#ff6680; text-shadow:0 0 14px rgba(139,0,0,0.4);">
-      ⚡ ADMIN <span style="color:var(--energy);">DASHBOARD</span>
-    </h2>
-  </div>
-  <div id="admin-content">
-    <!-- populated by aurenix-admin.js after auth check -->
-    <div class="access-denied-block">
-      <div class="adb-glyph">𓂀</div>
-      <div class="adb-title">ACCESS DENIED</div>
-      <div class="adb-sub">Sign in as the authorized administrator to access this area.</div>
-    </div>
-  </div>
-</section>
-
-
-<!-- ════════════════════════════════════
-     FLYING CROW SYSTEM
-════════════════════════════════════ -->
-<div id="crow-container" aria-hidden="true" role="presentation"></div>
-
-<!-- Crow transmission panel -->
-<div id="crow-transmission" role="dialog" aria-modal="true" aria-label="AURENIX Transmission" aria-live="polite">
-  <div class="ct-header">⚡ AURENIX TRANSMISSION ⚡</div>
-  <div class="ct-glyph" id="crow-tx-glyph" aria-hidden="true">𓅃</div>
-  <div class="ct-message" id="crow-tx-message"></div>
-  <div class="ct-submessage" id="crow-tx-submessage"></div>
-  <div class="ct-hieroglyphs" aria-hidden="true">𓂀 𓆄 𓃭 𓅃 𓆙</div>
-  <button class="ct-close" id="crow-tx-close" aria-label="Close transmission">Dismiss Transmission</button>
-</div>
-
-
-<!-- ════════════════════════════════════
-     TOAST
-════════════════════════════════════ -->
-<div id="aurenix-toast" role="status" aria-live="polite"></div>
-
-
-<!-- ════════════════════════════════════
-     PWA INSTALL BANNER
-════════════════════════════════════ -->
-<div id="aurenix-pwa-banner" aria-label="Install AURENIX app">
-  <div class="pwa-banner-icon">◉</div>
-  <div class="pwa-banner-text">
-    <div class="pwa-banner-title">Install AURENIX RADIO</div>
-    <div class="pwa-banner-sub">Add to your home screen for the full experience.</div>
-  </div>
-  <div class="pwa-banner-actions">
-    <button class="btn btn-gold btn-sm" id="pwa-install-btn">Install</button>
-    <button class="pwa-banner-close" id="pwa-banner-close" aria-label="Dismiss">✕</button>
-  </div>
-</div>
-
-
-<!-- ════════════════════════════════════
-     SCRIPTS
-════════════════════════════════════ -->
-<!-- Background + visual systems (no deps) -->
-<script src="aurenix-bg.js" defer></script>
-<script src="aurenix-crow.js" defer></script>
-
-<!-- Auth system (ES module) -->
-<script type="module">
-  import './aurenix-auth.js';
-
-  // Drawer login/signout buttons
-  document.getElementById('drawer-login-btn')?.addEventListener('click', () => {
-    window.AURENIX_AUTH?.openModal('login');
-    document.getElementById('nav-drawer')?.classList.remove('open');
-    document.getElementById('nav-hamburger')?.classList.remove('open');
-  });
-  document.getElementById('drawer-signout-btn')?.addEventListener('click', async () => {
-    await window.AURENIX_AUTH?.signOut();
-    document.getElementById('nav-drawer')?.classList.remove('open');
-    document.getElementById('nav-hamburger')?.classList.remove('open');
-  });
-
-  // Nav sign-out button
-  document.getElementById('nav-signout-btn')?.addEventListener('click', async () => {
-    await window.AURENIX_AUTH?.signOut();
-  });
-
-  // Load radio and admin modules
-  import('./aurenix-radio.js').catch(() => {});
-  import('./aurenix-admin.js').catch(() => {});
+<!-- PWA service worker -->
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/aurenix-sw.js').catch(() => {});
+  }
 </script>
 
-<!-- Navigation -->
-<script src="aurenix-nav.js" defer></script>
-
-<!-- PWA Service Worker + Install Prompt -->
-<script>
-(function() {
-  'use strict';
-
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/aurenix-sw.js')
-        .catch(() => {});
-    });
+<!-- AURENIX Broadcast Engine (ES module) -->
+<script type="module">
+  try {
+    const { initBroadcast } = await import('./aurenix-broadcast.js');
+    initBroadcast();
+  } catch (err) {
+    console.error('[AURENIX] Fatal startup error:', err);
+    // Show a visible fallback so the page is never a pure black screen
+    const app = document.getElementById('ax-app');
+    if (app) {
+      app.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:16px;padding:40px 24px;text-align:center;';
+      app.innerHTML = `
+        <div style="font-size:clamp(28px,5vw,52px);font-weight:900;letter-spacing:0.22em;color:#c8d0e8;">
+          AURE<span style="color:#4d7aff">NIX</span>
+        </div>
+        <div style="font-size:12px;letter-spacing:4px;color:#6870a0;text-transform:uppercase;margin-bottom:8px;">
+          THE BROADCAST NEVER STOPS.
+        </div>
+        <div style="background:#0d0d18;border:1px solid rgba(255,45,85,0.35);border-radius:8px;padding:20px 28px;max-width:480px;color:#ff2d55;font-size:13px;line-height:1.7;">
+          <strong>Startup Error</strong><br>
+          ${err?.message ? err.message.replace(/</g,'&lt;') : 'An unexpected error prevented AURENIX from loading.'}<br>
+          <span style="color:#6870a0;font-size:11px;">Check the browser console for details, then refresh the page.</span>
+        </div>
+        <button onclick="location.reload()" style="margin-top:8px;padding:10px 28px;background:#1e50ff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:700;letter-spacing:1px;">
+          RETRY
+        </button>`;
+    }
   }
-
-  let _deferredPrompt = null;
-  const banner    = document.getElementById('aurenix-pwa-banner');
-  const installBtn = document.getElementById('pwa-install-btn');
-  const closeBtn   = document.getElementById('pwa-banner-close');
-
-  window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault();
-    _deferredPrompt = e;
-    setTimeout(() => {
-      if (banner && !localStorage.getItem('aurenix-pwa-dismissed')) {
-        banner.classList.add('visible');
-      }
-    }, 8000);
-  });
-
-  installBtn?.addEventListener('click', async () => {
-    if (!_deferredPrompt) return;
-    _deferredPrompt.prompt();
-    const { outcome } = await _deferredPrompt.userChoice;
-    _deferredPrompt = null;
-    banner?.classList.remove('visible');
-    if (outcome === 'accepted') localStorage.setItem('aurenix-pwa-dismissed', '1');
-  });
-
-  closeBtn?.addEventListener('click', () => {
-    banner?.classList.remove('visible');
-    localStorage.setItem('aurenix-pwa-dismissed', '1');
-  });
-
-  window.addEventListener('appinstalled', () => {
-    banner?.classList.remove('visible');
-    localStorage.setItem('aurenix-pwa-dismissed', '1');
-  });
-})();
 </script>
 
 </body>
