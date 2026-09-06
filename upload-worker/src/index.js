@@ -146,18 +146,27 @@ async function verifyFirebaseToken(idToken, projectId) {
 /**
  * Creates a Supabase signed upload URL using the service-role key.
  *
- * The returned URL contains a short-lived ?token= query parameter.
- * The browser PUT to this URL requires NO Authorization header —
- * the token in the URL is the authorisation.
+ * TWO-STEP PROCESS:
  *
- * Verified working: HTTP 200 with no auth headers on the PUT.
- * (TUS PATCH was rejected with 403 "Invalid Compact JWS" because the browser
- * cannot send the service-role key as Bearer on every chunk.)
+ *   Step 1 — POST to /storage/v1/object/upload/sign/<bucket>/<path>
+ *             with service-role key.  Supabase returns:
+ *               { url: "/object/upload/sign/<bucket>/<path>?token=..." }
+ *
+ *   Step 2 — Browser PUTs the file directly to:
+ *               /storage/v1/object/upload/sign/<bucket>/<path>?token=...
+ *             This is the SAME path prefix returned by Supabase, with the
+ *             ?token= query parameter.  No Authorization header is needed —
+ *             the token in the URL query string is the authorisation.
+ *
+ *             WARNING: Do NOT rewrite /object/upload/sign/ → /object/sign/.
+ *             /object/sign/ is the download-URL path (GET only) and requires
+ *             an Authorization header — sending a PUT there returns HTTP 400
+ *             "headers must have required property 'authorization'".
  *
  * @param {string} supabaseUrl
  * @param {string} serviceKey    — service-role JWT
  * @param {string} storagePath   — e.g. "media/<uid>/<ts>_file.mp4"
- * @returns {Promise<string>}    — full signed upload URL (supabaseUrl + path + ?token=...)
+ * @returns {Promise<string>}    — full signed upload URL for browser PUT
  */
 async function createSignedUploadUrl(supabaseUrl, serviceKey, storagePath) {
   const endpoint = `${supabaseUrl}/storage/v1/object/upload/sign/${MEDIA_BUCKET}/${storagePath}`;
@@ -178,9 +187,34 @@ async function createSignedUploadUrl(supabaseUrl, serviceKey, storagePath) {
   }
 
   const data = await res.json();
-  // data.url is a path like /object/upload/sign/<bucket>/<path>?token=...
-  if (!data.url) throw new Error('SUPABASE SIGNED URL FAILED — no url in response');
-  return `${supabaseUrl}/storage/v1${data.url}`;
+
+  // Supabase returns { url: "/object/upload/sign/<bucket>/<path>?token=..." }
+  // Some Supabase versions use "signedURL" key instead of "url".
+  // We MUST preserve the /object/upload/sign/ path prefix — it is the upload endpoint.
+  // /object/sign/ (without "upload/") is the DOWNLOAD URL endpoint and returns HTTP 400
+  // "headers must have required property 'authorization'" when receiving a PUT.
+  const rawPath = data.url || data.signedURL || data.signed_url || null;
+  if (!rawPath) throw new Error(`SUPABASE SIGNED URL FAILED — no url in response: ${JSON.stringify(data).slice(0, 200)}`);
+
+  // Normalise: ensure path uses /object/upload/sign/ (not the download /object/sign/ path)
+  let safePath = rawPath;
+  if (safePath.includes('/object/sign/') && !safePath.includes('/object/upload/sign/')) {
+    // Wrong path returned — would cause HTTP 400 on PUT.  Re-request using the correct endpoint.
+    // This should not happen with the /upload/sign endpoint above, but guard defensively.
+    throw new Error(`SUPABASE SIGNED URL FAILED — received download-sign path instead of upload-sign path: ${safePath.slice(0, 120)}`);
+  }
+
+  // If Supabase returned an absolute URL already, use it directly
+  if (safePath.startsWith('http://') || safePath.startsWith('https://')) {
+    return safePath;
+  }
+
+  // Relative path — prepend Supabase base URL + /storage/v1
+  // The path from Supabase already begins with /object/upload/sign/...
+  if (safePath.startsWith('/storage/v1')) {
+    return `${supabaseUrl}${safePath}`;
+  }
+  return `${supabaseUrl}/storage/v1${safePath}`;
 }
 
 /* ─── Service key shape check ─────────────────────────────────────────────── */
@@ -224,20 +258,20 @@ export default {
       return json({
         ok:      !err,
         worker:  'aurenix-upload',
-        version: '2025-09-06-v4-tus',
+        version: '2025-09-06-v5-signed-url',
         SUPABASE_URL:        env.SUPABASE_URL         ? '✓ set' : '✗ MISSING',
         SUPABASE_SERVICE_KEY:env.SUPABASE_SERVICE_KEY ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID  ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID_value: env.FIREBASE_PROJECT_ID || null,
         SUPABASE_URL_value:        env.SUPABASE_URL || null,
-        architecture: 'Signed URL — Worker authorises only; browser PUTs directly to Supabase',
+        architecture: 'Signed URL — browser PUT to /object/upload/sign/<bucket>/<path>?token=',
         error: err || null,
       }, err ? 503 : 200, origin);
     }
 
     /* ── GET /diagnose ───────────────────────────────────────────────────── */
     if (request.method === 'GET' && url.pathname === '/diagnose') {
-      const diag = { worker: 'aurenix-upload', version: '2025-09-06-v4-tus', steps: {} };
+      const diag = { worker: 'aurenix-upload', version: '2025-09-06-v5-signed-url', steps: {} };
 
       diag.steps.secrets_present   = checkSecrets(env) ? `FAIL — ${checkSecrets(env)}` : 'OK';
       diag.steps.service_key_shape = describeKeyShape(env.SUPABASE_SERVICE_KEY);
@@ -294,6 +328,46 @@ export default {
         ];
       }
       return json(diag, allOk ? 200 : 503, origin);
+    }
+
+    /* ── GET /probe-signed-url — diagnostic: shows raw Supabase data.url ─── */
+    if (request.method === 'GET' && url.pathname === '/probe-signed-url') {
+      const secretErr = checkSecrets(env);
+      if (secretErr) return json({ error: secretErr }, 503, origin);
+
+      const testPath = `probe/test_${Date.now()}.mp4`;
+      const endpoint = `${env.SUPABASE_URL}/storage/v1/object/upload/sign/${MEDIA_BUCKET}/${testPath}`;
+      let rawData, rawStatus, rawText;
+      try {
+        const r = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+            'apikey': env.SUPABASE_SERVICE_KEY,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ expiresIn: 60 }),
+        });
+        rawStatus = r.status;
+        rawText   = await r.text();
+        try { rawData = JSON.parse(rawText); } catch (_) { rawData = null; }
+      } catch (e) {
+        return json({ error: e.message }, 500, origin);
+      }
+
+      const dataUrl      = rawData?.url || rawData?.signedURL || rawData?.signed_url || null;
+      const constructed  = dataUrl
+        ? (dataUrl.startsWith('http') ? dataUrl
+           : dataUrl.startsWith('/storage/v1') ? `${env.SUPABASE_URL}${dataUrl}`
+           : `${env.SUPABASE_URL}/storage/v1${dataUrl}`)
+        : null;
+      return json({
+        supabase_http_status: rawStatus,
+        raw_response:         rawText.slice(0, 500),
+        data_url_field:       dataUrl,
+        constructed_put_url:  constructed,
+        note: 'constructed_put_url is what the browser will PUT to',
+      }, 200, origin);
     }
 
     /* ── POST /authorize — Founder-only signed-URL authorisation ─────────── */

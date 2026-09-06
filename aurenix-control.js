@@ -50,12 +50,12 @@ const MAX_FILE_MB   = 500;
  */
 const UPLOAD_WORKER_URL = 'https://aurenix-upload.nthntjrn.workers.dev';
 
-const CHANNELS = [
-  { id: 'A1', name: 'AURENIX ONE',   label: 'ONE',   color: '#1e50ff' },
-  { id: 'A2', name: 'AURENIX MUSIC', label: 'MUSIC', color: '#b8860b' },
-  { id: 'A3', name: 'AURENIX VIDEO', label: 'VIDEO', color: '#8b00ff' },
-  { id: 'A4', name: 'AURENIX LIVE',  label: 'LIVE',  color: '#ff2d55' },
-];
+// Channels are loaded from Firestore `network_channels` — NOT hardcoded.
+// _dbChannels is the live list; _channels() returns it.
+let _dbChannels = [];     // loaded from Firestore
+let _dbChUnsub  = null;   // unsubscribe for network_channels listener
+
+function _channels() { return _dbChannels; }
 
 const MEDIA_CATEGORIES = [
   { id: 'music',         label: '🎵 MUSIC',            accept: 'audio/*',       type: 'audio'  },
@@ -117,7 +117,6 @@ export function mountControl(user, isAdmin) {
 
   if (!_isFounder || !_user || userEmail !== FOUNDER_EMAIL.toLowerCase()) {
     console.warn('[AURENIX] Founder access denied for:', userEmail);
-    // Show a clear "not authorized" message instead of blank screen
     ctrl.innerHTML = `
       <div class="ax-ctrl-error">
         <div style="font-size:clamp(20px,3vw,32px);font-weight:900;letter-spacing:0.2em;color:#c8d0e8;">
@@ -145,16 +144,23 @@ export function mountControl(user, isAdmin) {
   };
 
   try {
-    // Inject the full Founder Studio HTML (replaces the loading state)
     ctrl.innerHTML = _buildFounderHTML();
-    // Ensure visible in case this was called directly
     ctrl.classList.add('visible');
     const hero = document.getElementById('ax-hero');
     if (hero) hero.style.display = 'none';
 
-    // Subscribe to all channels and media library
-    CHANNELS.forEach(ch => _subscribeChannelState(ch.id));
+    // Subscribe to channels from DB, then subscribe to their states + render
+    _subscribeDBChannels(() => {
+      _channels().forEach(ch => _subscribeChannelState(ch.id));
+      _rebuildDynamicPanes();
+      _renderDashboard();
+      _renderChannels();
+      _bindLiveControl();
+      _renderStats();
+    });
+
     _subscribeMedia();
+    _subscribeSubmissions();
 
     // Bind nav
     ctrl.querySelectorAll('.ax-ctrl-nav-btn').forEach(btn => {
@@ -168,27 +174,27 @@ export function mountControl(user, isAdmin) {
     _bindUploadPane();
     _bindSchedulePane();
     _bindLibraryPane();
-    _bindLiveControl();
-    _renderChannels();
-    _renderDashboard();
+    _bindChannelManager();
 
     // Close button
     ctrl.querySelector('#ax-ctrl-close')?.addEventListener('click', _restoreHero);
 
     // Refresh btn
     ctrl.querySelector('#ax-ov-refresh-btn')?.addEventListener('click', () => {
-      CHANNELS.forEach(ch => _renderChannelCard(ch.id));
+      _renderChannels();
       _renderDashboard();
       _toast('Refreshed.');
     });
 
-    // Worker health check — run once on open and bind re-check button
+    // Worker health check
     _checkWorkerHealth();
     ctrl.querySelector('#ax-sec-recheck-btn')?.addEventListener('click', _checkWorkerHealth);
 
+    // Seed initial channels if none exist yet
+    _seedInitialChannels();
+
   } catch (err) {
     console.error('[AURENIX] Founder Studio mount error:', err);
-    // Show a visible error — never leave the panel as a black screen
     ctrl.innerHTML = `
       <div class="ax-ctrl-error">
         <div style="font-size:clamp(20px,3vw,32px);font-weight:900;letter-spacing:0.2em;color:#c8d0e8;">
@@ -277,6 +283,9 @@ function _buildFounderHTML() {
     <button class="ax-ctrl-nav-btn" data-pane="schedule">
       <span class="ax-ctrl-nav-icon">📅</span> Broadcast Scheduler
     </button>
+    <button class="ax-ctrl-nav-btn" data-pane="submissions" id="ax-nav-submissions">
+      <span class="ax-ctrl-nav-icon">📥</span> Submissions <span id="ax-submissions-badge" style="display:none;background:var(--red);color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;margin-left:4px;"></span>
+    </button>
     <div class="ax-ctrl-section-label">SYSTEM</div>
     <button class="ax-ctrl-nav-btn" data-pane="stats">
       <span class="ax-ctrl-nav-icon">📊</span> Statistics
@@ -306,29 +315,11 @@ function _buildFounderHTML() {
       <div class="ax-dash-grid">
         <div class="ax-dash-card">
           <div class="ax-dash-card-title">NOW PLAYING</div>
-          <div id="ax-dash-nowplaying">
-            ${CHANNELS.map(ch => `
-              <div class="ax-dash-np-row" id="ax-dash-np-${ch.id}">
-                <div class="ax-dash-np-badge" style="background:${ch.color}22;color:${ch.color};border-color:${ch.color}44;">${ch.id}</div>
-                <div class="ax-dash-np-info">
-                  <div class="ax-dash-np-title" id="ax-dash-title-${ch.id}">Standby…</div>
-                  <div class="ax-dash-np-meta" id="ax-dash-meta-${ch.id}">—</div>
-                </div>
-              </div>`).join('')}
-          </div>
+          <div id="ax-dash-nowplaying"><div style="color:var(--text-dim);font-size:12px;">Loading channels…</div></div>
         </div>
         <div class="ax-dash-card">
           <div class="ax-dash-card-title">QUEUE STATUS</div>
-          <div id="ax-dash-queues">
-            ${CHANNELS.map(ch => `
-              <div class="ax-dash-q-row">
-                <div class="ax-dash-q-label" style="color:${ch.color}">${ch.label}</div>
-                <div class="ax-dash-q-bar-wrap">
-                  <div class="ax-dash-q-bar" id="ax-qbar-${ch.id}" style="width:0%;background:${ch.color}"></div>
-                </div>
-                <div class="ax-dash-q-count" id="ax-qcount-${ch.id}">0 items</div>
-              </div>`).join('')}
-          </div>
+          <div id="ax-dash-queues"><div style="color:var(--text-dim);font-size:12px;">Loading…</div></div>
         </div>
         <div class="ax-dash-card">
           <div class="ax-dash-card-title">RECENT UPLOADS</div>
@@ -356,34 +347,11 @@ function _buildFounderHTML() {
       </div>
     </div>
 
-    <!-- ══ LIVE CONTROL ══ -->
+    <!-- ══ LIVE CONTROL — cards injected dynamically ══ -->
     <div class="ax-ctrl-pane" id="ax-pane-live">
       <div class="ax-section-title">🔴 Live <span>Control</span></div>
       <div class="ax-live-grid" id="ax-live-grid">
-        ${CHANNELS.map(ch => `
-          <div class="ax-live-channel-card" id="ax-live-card-${ch.id}">
-            <div class="ax-live-ch-header" style="border-color:${ch.color}44;">
-              <div class="ax-live-ch-id" style="color:${ch.color}">${ch.id}</div>
-              <div class="ax-live-ch-name">${ch.name}</div>
-              <div class="ax-live-ch-status" id="ax-live-status-${ch.id}">● STANDBY</div>
-            </div>
-            <div class="ax-live-np">
-              <div class="ax-live-np-label">CURRENT PROGRAM</div>
-              <div class="ax-live-np-title" id="ax-live-title-${ch.id}">—</div>
-              <div class="ax-live-np-meta" id="ax-live-meta-${ch.id}">No content scheduled</div>
-            </div>
-            <div class="ax-live-upnext">
-              <div class="ax-live-np-label">UP NEXT</div>
-              <div class="ax-live-next-title" id="ax-live-next-${ch.id}">—</div>
-            </div>
-            <div class="ax-live-controls">
-              <button class="ax-btn-sm" onclick="window._AXC.goToSchedule('${ch.id}')">📅 Schedule</button>
-              <button class="ax-btn-sm ax-btn-playnow" onclick="window._AXC.openPlayNow('${ch.id}')">🔴 PLAY NOW</button>
-              <button class="ax-btn-sm" onclick="window._AXC.skipChannel('${ch.id}')">⏭ Skip</button>
-              <button class="ax-btn-sm ax-btn-danger" onclick="window._AXC.stopChannel('${ch.id}')">■ Stop</button>
-            </div>
-            <div class="ax-live-queue-preview" id="ax-live-queue-${ch.id}"></div>
-          </div>`).join('')}
+        <div style="color:var(--text-dim);font-size:12px;padding:24px;">Loading channels…</div>
       </div>
     </div>
 
@@ -441,18 +409,19 @@ function _buildFounderHTML() {
     <!-- ══ CHANNEL MANAGER ══ -->
     <div class="ax-ctrl-pane" id="ax-pane-channels">
       <div class="ax-section-title">Channel <span>Manager</span></div>
-      <div class="ax-channels-grid" id="ax-ch-manager-grid"></div>
+      <div style="margin-bottom:16px;">
+        <button class="ax-btn-primary" id="ax-create-channel-btn" style="font-size:13px;padding:10px 22px;">+ CREATE CHANNEL</button>
+      </div>
+      <div class="ax-channels-grid" id="ax-ch-manager-grid">
+        <div style="color:var(--text-dim);font-size:12px;">Loading channels…</div>
+      </div>
     </div>
 
     <!-- ══ BROADCAST SCHEDULER ══ -->
     <div class="ax-ctrl-pane" id="ax-pane-schedule">
       <div class="ax-section-title">Broadcast <span>Scheduler</span></div>
       <div class="ax-channel-picker" id="ax-sched-ch-picker">
-        ${CHANNELS.map(ch => `
-          <button class="ax-ch-pick-btn ${ch.id === 'A1' ? 'active' : ''}" data-chid="${ch.id}"
-                  style="${ch.id === 'A1' ? `border-color:${ch.color};color:${ch.color};` : ''}">
-            ${ch.id} — ${ch.label}
-          </button>`).join('')}
+        <div style="color:var(--text-dim);font-size:12px;">Loading channels…</div>
       </div>
       <label class="ax-loop-toggle">
         <input type="checkbox" id="ax-loop-toggle" checked>
@@ -462,7 +431,7 @@ function _buildFounderHTML() {
         <div>
           <div class="ax-sched-queue" id="ax-sched-queue">
             <div class="ax-sched-queue-header">
-              <span class="ax-sched-queue-title" id="ax-sched-ch-label">AURENIX ONE — Schedule</span>
+              <span class="ax-sched-queue-title" id="ax-sched-ch-label">Select a channel above</span>
               <div style="display:flex;gap:6px;">
                 <button class="ax-btn-sm" id="ax-sched-push-btn">▶ GO LIVE</button>
                 <button class="ax-btn-sm ax-btn-danger" id="ax-sched-clear-btn">✕ CLEAR</button>
@@ -483,6 +452,20 @@ function _buildFounderHTML() {
             <div style="color:var(--text-muted);font-size:12px;padding:8px;">Loading library…</div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- ══ SUBMISSIONS ══ -->
+    <div class="ax-ctrl-pane" id="ax-pane-submissions">
+      <div class="ax-section-title">User <span>Submissions</span></div>
+      <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;" id="ax-sub-filter-bar">
+        <button class="ax-btn-sm ax-sub-filter active" data-status="all">ALL</button>
+        <button class="ax-btn-sm ax-sub-filter" data-status="pending">PENDING</button>
+        <button class="ax-btn-sm ax-sub-filter" data-status="approved">APPROVED</button>
+        <button class="ax-btn-sm ax-sub-filter" data-status="rejected">REJECTED</button>
+      </div>
+      <div id="ax-submissions-list">
+        <div style="color:var(--text-dim);font-size:12px;padding:24px;">Loading submissions…</div>
       </div>
     </div>
 
@@ -540,23 +523,11 @@ function _buildFounderHTML() {
       </div>
     </div>
 
-    <!-- ══ SETTINGS ══ -->
+    <!-- ══ SETTINGS — dynamic per-channel cards ══ -->
     <div class="ax-ctrl-pane" id="ax-pane-settings">
       <div class="ax-section-title">AURENIX <span>Settings</span></div>
-      <div class="ax-settings-grid">
-        ${CHANNELS.map(ch => `
-          <div class="ax-settings-card">
-            <div class="ax-settings-ch-header" style="color:${ch.color}">${ch.id} — ${ch.name}</div>
-            <div class="ax-field-group" style="margin-top:10px;">
-              <label class="ax-field-label">Channel Description</label>
-              <input class="ax-field-input ax-settings-desc" data-chid="${ch.id}" type="text" placeholder="${ch.name} — 24/7 broadcast">
-            </div>
-            <label class="ax-loop-toggle" style="margin-top:10px;">
-              <input type="checkbox" class="ax-settings-loop" data-chid="${ch.id}" checked>
-              Loop continuously
-            </label>
-            <button class="ax-btn-sm" style="margin-top:10px;" onclick="window._AXC.saveChannelSettings('${ch.id}')">Save</button>
-          </div>`).join('')}
+      <div class="ax-settings-grid" id="ax-settings-ch-grid">
+        <div style="color:var(--text-dim);font-size:12px;">Loading channel settings…</div>
       </div>
     </div>
 
@@ -586,12 +557,7 @@ function _buildFounderHTML() {
     <div class="ax-modal-title">📡 ADD TO BROADCAST</div>
     <div id="ax-bcast-media-title" style="font-size:13px;color:var(--text);margin-bottom:14px;"></div>
     <div style="font-size:11px;color:var(--text-dim);font-weight:700;letter-spacing:1px;margin-bottom:8px;">SELECT CHANNEL</div>
-    <div class="ax-channel-picker" id="ax-bcast-ch-picker">
-      ${CHANNELS.filter(ch => ch.id !== 'A4').map(ch => `
-        <button class="ax-ch-pick-btn" data-chid="${ch.id}" style="color:${ch.color}">
-          ${ch.id} — ${ch.label}
-        </button>`).join('')}
-    </div>
+    <div class="ax-channel-picker" id="ax-bcast-ch-picker"></div>
     <div style="font-size:11px;color:var(--text-dim);font-weight:700;letter-spacing:1px;margin:14px 0 8px;">ACTION</div>
     <div class="ax-bcast-actions">
       <button class="ax-bcast-action-btn" id="ax-bcast-playnow">🔴 PLAY NOW</button>
@@ -601,6 +567,57 @@ function _buildFounderHTML() {
     <div class="ax-modal-actions" style="margin-top:16px;">
       <button class="ax-btn-ghost" id="ax-bcast-cancel">CANCEL</button>
       <button class="ax-btn-primary" id="ax-bcast-confirm">CONFIRM</button>
+    </div>
+  </div>
+</div>
+
+<!-- CREATE / EDIT CHANNEL MODAL -->
+<div class="ax-modal-overlay" id="ax-channel-modal" style="display:none;">
+  <div class="ax-modal-box" style="max-width:480px;">
+    <div class="ax-modal-title" id="ax-ch-modal-title">➕ CREATE CHANNEL</div>
+    <div class="ax-field-group" style="margin-bottom:10px;">
+      <label class="ax-field-label">Channel Name *</label>
+      <input class="ax-field-input" id="ax-ch-name" placeholder="e.g. AURENIX GAMING" maxlength="40">
+    </div>
+    <div class="ax-field-group" style="margin-bottom:10px;">
+      <label class="ax-field-label">Short Label *</label>
+      <input class="ax-field-input" id="ax-ch-label" placeholder="e.g. GAMING" maxlength="16">
+    </div>
+    <div class="ax-field-group" style="margin-bottom:10px;">
+      <label class="ax-field-label">Description</label>
+      <input class="ax-field-input" id="ax-ch-desc" placeholder="What this channel broadcasts">
+    </div>
+    <div class="ax-field-group" style="margin-bottom:10px;">
+      <label class="ax-field-label">Channel Type</label>
+      <select class="ax-field-input" id="ax-ch-type">
+        <option value="mixed">MIXED</option>
+        <option value="music">MUSIC</option>
+        <option value="video">VIDEO</option>
+        <option value="audio">AUDIO</option>
+        <option value="custom">CUSTOM</option>
+      </select>
+    </div>
+    <div class="ax-field-group" style="margin-bottom:10px;">
+      <label class="ax-field-label">Programming Mode</label>
+      <select class="ax-field-input" id="ax-ch-mode">
+        <option value="ordered">ORDERED</option>
+        <option value="shuffle">SHUFFLE</option>
+        <option value="random">RANDOM</option>
+        <option value="scheduled">SCHEDULED</option>
+      </select>
+    </div>
+    <div class="ax-field-group" style="margin-bottom:10px;">
+      <label class="ax-field-label">Accent Color</label>
+      <input type="color" class="ax-field-input" id="ax-ch-color" value="#1e50ff" style="height:38px;padding:4px 8px;cursor:pointer;">
+    </div>
+    <label class="ax-loop-toggle" style="margin-bottom:10px;">
+      <input type="checkbox" id="ax-ch-enabled" checked>
+      Channel enabled (visible to users)
+    </label>
+    <div class="ax-auth-err" id="ax-ch-err" style="margin-bottom:8px;"></div>
+    <div class="ax-modal-actions">
+      <button class="ax-btn-ghost" id="ax-ch-modal-cancel">CANCEL</button>
+      <button class="ax-btn-primary" id="ax-ch-modal-save">CREATE CHANNEL</button>
     </div>
   </div>
 </div>
@@ -649,46 +666,355 @@ function _subscribeMedia() {
   });
 }
 
+/* ─── DB CHANNELS ─── */
+
+let _submissionsLib = [];
+let _subsUnsub      = null;
+let _subFilter      = 'all';
+
+/**
+ * Subscribe to network_channels (ordered) and call onReady once on first snapshot.
+ * Subsequent snapshots rebuild all dynamic panes automatically.
+ */
+function _subscribeDBChannels(onReady) {
+  if (_dbChUnsub) _dbChUnsub();
+  let firstCall = true;
+  const q = query(collection(db, 'network_channels'), orderBy('sort_order', 'asc'));
+  _dbChUnsub = onSnapshot(q, snap => {
+    _dbChannels = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(c => c.enabled !== false);
+    if (firstCall) {
+      firstCall = false;
+      onReady();
+    } else {
+      // Channels changed — subscribe to any new channels and rebuild dynamic panes
+      _dbChannels.forEach(ch => _subscribeChannelState(ch.id));
+      _rebuildDynamicPanes();
+      _renderDashboard();
+      _renderChannels();
+      _bindLiveControl();
+      _renderStats();
+    }
+  }, err => {
+    console.warn('[AURENIX] network_channels snapshot error:', err);
+    if (firstCall) { firstCall = false; onReady(); }
+  });
+}
+
+/**
+ * Rebuild all pane areas that depend on the channel list
+ * (scheduler pickers, settings cards, broadcast modal channel picker).
+ */
+function _rebuildDynamicPanes() {
+  // Schedule channel picker
+  const picker = document.getElementById('ax-sched-ch-picker');
+  if (picker) {
+    const chs = _channels();
+    if (!chs.length) {
+      picker.innerHTML = '<div style="color:var(--text-dim);font-size:12px;">No channels yet — create one in Channel Manager.</div>';
+    } else {
+      picker.innerHTML = chs.map((ch, i) => {
+        const active = ch.id === _schedChannelId || (i === 0 && !chs.find(c => c.id === _schedChannelId));
+        if (active && i === 0 && !chs.find(c => c.id === _schedChannelId)) _schedChannelId = ch.id;
+        return `<button class="ax-ch-pick-btn ${active ? 'active' : ''}" data-chid="${ch.id}"
+                        style="${active ? `border-color:${ch.color || '#1e50ff'};color:${ch.color || '#1e50ff'};` : ''}">
+                  ${_esc(ch.label || ch.id)} — ${_esc(ch.name)}
+                </button>`;
+      }).join('');
+      picker.querySelectorAll('.ax-ch-pick-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const chid = btn.dataset.chid;
+          const ch   = _channels().find(c => c.id === chid);
+          picker.querySelectorAll('.ax-ch-pick-btn').forEach(b => {
+            b.classList.remove('active');
+            b.style.borderColor = '';
+            b.style.color       = '';
+          });
+          btn.classList.add('active');
+          btn.style.borderColor = ch?.color || '';
+          btn.style.color       = ch?.color || '';
+          _schedChannelId = chid;
+          const lbl = document.getElementById('ax-sched-ch-label');
+          if (lbl) lbl.textContent = `${ch?.name || chid} — Schedule`;
+          _renderSchedItems();
+          _renderOnAir();
+        });
+      });
+      // Set schedule label
+      const first = _channels().find(c => c.id === _schedChannelId) || _channels()[0];
+      if (first) {
+        const lbl = document.getElementById('ax-sched-ch-label');
+        if (lbl) lbl.textContent = `${first.name} — Schedule`;
+        _schedChannelId = first.id;
+      }
+    }
+  }
+
+  // Settings grid
+  const settingsGrid = document.getElementById('ax-settings-ch-grid');
+  if (settingsGrid) {
+    settingsGrid.innerHTML = _channels().map(ch => `
+      <div class="ax-settings-card">
+        <div class="ax-settings-ch-header" style="color:${ch.color || '#1e50ff'}">${_esc(ch.id)} — ${_esc(ch.name)}</div>
+        <div class="ax-field-group" style="margin-top:10px;">
+          <label class="ax-field-label">Channel Description</label>
+          <input class="ax-field-input ax-settings-desc" data-chid="${ch.id}" type="text"
+                 value="${_esc(ch.description || '')}" placeholder="${_esc(ch.name)} — 24/7 broadcast">
+        </div>
+        <label class="ax-loop-toggle" style="margin-top:10px;">
+          <input type="checkbox" class="ax-settings-loop" data-chid="${ch.id}" ${ch.loop !== false ? 'checked' : ''}>
+          Loop continuously
+        </label>
+        <button class="ax-btn-sm" style="margin-top:10px;" onclick="window._AXC.saveChannelSettings('${ch.id}')">Save</button>
+      </div>`).join('') || '<div style="color:var(--text-dim);font-size:12px;">No channels yet.</div>';
+  }
+
+  // Broadcast modal channel picker
+  const bcastPicker = document.getElementById('ax-bcast-ch-picker');
+  if (bcastPicker) {
+    bcastPicker.innerHTML = _channels().map(ch => `
+      <button class="ax-ch-pick-btn" data-chid="${ch.id}" style="color:${ch.color || '#1e50ff'}">
+        ${_esc(ch.label || ch.id)} — ${_esc(ch.name)}
+      </button>`).join('');
+    bcastPicker.querySelectorAll('.ax-ch-pick-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        bcastPicker.querySelectorAll('.ax-ch-pick-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        _bcastChannelId = btn.dataset.chid;
+      });
+    });
+    if (bcastPicker.firstElementChild) {
+      bcastPicker.firstElementChild.classList.add('active');
+      _bcastChannelId = bcastPicker.firstElementChild.dataset.chid;
+    }
+  }
+}
+
+/** Seed the 5 initial channels if the network_channels collection is empty. */
+async function _seedInitialChannels() {
+  try {
+    const snap = await getDocs(collection(db, 'network_channels'));
+    if (!snap.empty) return; // Already seeded
+    const seeds = [
+      { id: 'A1', name: 'AURENIX ONE',        label: 'ONE',        color: '#1e50ff', channel_type: 'mixed',  mode: 'shuffle',  sort_order: 1, description: 'Mixed programming — music, videos, clips, and more.',         enabled: true, loop: true },
+      { id: 'A2', name: 'AURENIX MUSIC',       label: 'MUSIC',      color: '#b8860b', channel_type: 'music',  mode: 'ordered',  sort_order: 2, description: 'Music-only channel with Founder-curated tracks.',             enabled: true, loop: true },
+      { id: 'A3', name: 'AURENIX VIDEO',       label: 'VIDEO',      color: '#8b00ff', channel_type: 'video',  mode: 'ordered',  sort_order: 3, description: 'Video broadcast channel — films, shows, music videos.',        enabled: true, loop: true },
+      { id: 'A4', name: 'AURENIX FUNNY',       label: 'FUNNY',      color: '#ff9500', channel_type: 'mixed',  mode: 'shuffle',  sort_order: 4, description: 'Comedy and funny clip channel — approved clips only.',         enabled: true, loop: true },
+      { id: 'A5', name: 'AURENIX AFTER DARK',  label: 'AFTER DARK', color: '#9b59b6', channel_type: 'mixed',  mode: 'ordered',  sort_order: 5, description: 'Nighttime independent programming — its own media pool.',      enabled: true, loop: true },
+    ];
+    for (const seed of seeds) {
+      const { id, ...data } = seed;
+      await setDoc(doc(db, 'network_channels', id), { ...data, created_at: serverTimestamp() });
+    }
+    console.log('[AURENIX] Seeded 5 initial channels.');
+  } catch (e) {
+    console.warn('[AURENIX] Channel seed failed (may already exist or no permission):', e.message);
+  }
+}
+
+function _subscribeSubmissions() {
+  if (_subsUnsub) return;
+  const q = query(collection(db, 'media_submissions'), orderBy('submitted_at', 'desc'));
+  _subsUnsub = onSnapshot(q, snap => {
+    _submissionsLib = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const pending = _submissionsLib.filter(s => s.status === 'pending').length;
+    const badge = document.getElementById('ax-submissions-badge');
+    if (badge) {
+      badge.style.display = pending > 0 ? '' : 'none';
+      badge.textContent   = pending;
+    }
+    _renderSubmissions();
+  }, err => {
+    console.warn('[AURENIX] media_submissions snapshot error:', err.message);
+  });
+}
+
+function _renderSubmissions() {
+  const listEl = document.getElementById('ax-submissions-list');
+  if (!listEl) return;
+  const items = _subFilter === 'all'
+    ? _submissionsLib
+    : _submissionsLib.filter(s => s.status === _subFilter);
+
+  if (!items.length) {
+    listEl.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:24px;text-align:center;">${_subFilter === 'pending' ? 'No pending submissions.' : 'No submissions yet.'}</div>`;
+    return;
+  }
+
+  const statusColor = { pending:'#f0a500', approved:'var(--green)', rejected:'var(--red)' };
+  listEl.innerHTML = items.map(s => `
+    <div class="ax-sub-card" id="ax-sub-${s.id}" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:10px;">
+      <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:13px;font-weight:700;color:var(--text);">${_esc(s.title || '(untitled)')}</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
+            ${_esc(s.artist || '')}${s.artist ? ' · ' : ''}${_esc(s.type || 'media')} · submitted by ${_esc(s.submitted_email || s.submitted_by || '?')}
+          </div>
+          ${s.url ? `<div style="font-size:11px;color:var(--blue-bright);margin-top:4px;word-break:break-all;"><a href="${_esc(s.url)}" target="_blank" rel="noopener" style="color:var(--blue-bright);">🔗 ${_esc(s.url.slice(0,60))}…</a></div>` : ''}
+          ${s.description ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.5;">${_esc(s.description)}</div>` : ''}
+          <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">Rights confirmed: ${s.rights_confirmed ? '✓ YES' : '✗ NO'}</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;">
+          <span style="font-size:11px;font-weight:700;letter-spacing:1px;color:${statusColor[s.status] || 'var(--text-dim)'};">${(s.status || 'pending').toUpperCase()}</span>
+          ${s.status === 'pending' ? `
+            <button class="ax-btn-sm" style="background:var(--green);color:#000;" onclick="window._AXC.approveSubmission('${s.id}')">✓ APPROVE</button>
+            <button class="ax-btn-sm ax-btn-danger" onclick="window._AXC.rejectSubmission('${s.id}')">✗ REJECT</button>
+          ` : s.status === 'approved' ? `
+            <button class="ax-btn-sm" onclick="window._AXC.importSubmission('${s.id}')">📥 Import to Library</button>
+          ` : ''}
+        </div>
+      </div>
+    </div>`).join('');
+}
+
+function _bindChannelManager() {
+  document.getElementById('ax-create-channel-btn')?.addEventListener('click', () => _openChannelModal(null));
+
+  // Sub-filter buttons on Submissions pane
+  document.getElementById('ax-sub-filter-bar')?.querySelectorAll('.ax-sub-filter').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.ax-sub-filter').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      _subFilter = btn.dataset.status;
+      _renderSubmissions();
+    });
+  });
+}
+
+/* ─── CHANNEL MODAL ─── */
+let _editChannelId = null;
+
+function _openChannelModal(channelId) {
+  _editChannelId = channelId;
+  const modal    = document.getElementById('ax-channel-modal');
+  const titleEl  = document.getElementById('ax-ch-modal-title');
+  const saveBtn  = document.getElementById('ax-ch-modal-save');
+  const errEl    = document.getElementById('ax-ch-err');
+  if (!modal) return;
+
+  if (channelId) {
+    const ch = _channels().find(c => c.id === channelId);
+    if (!ch) return;
+    if (titleEl) titleEl.textContent = '✏️ EDIT CHANNEL';
+    if (saveBtn) saveBtn.textContent = 'SAVE CHANGES';
+    document.getElementById('ax-ch-name').value    = ch.name    || '';
+    document.getElementById('ax-ch-label').value   = ch.label   || '';
+    document.getElementById('ax-ch-desc').value    = ch.description || '';
+    document.getElementById('ax-ch-type').value    = ch.channel_type || 'mixed';
+    document.getElementById('ax-ch-mode').value    = ch.mode    || 'ordered';
+    document.getElementById('ax-ch-color').value   = ch.color   || '#1e50ff';
+    document.getElementById('ax-ch-enabled').checked = ch.enabled !== false;
+  } else {
+    if (titleEl) titleEl.textContent = '➕ CREATE CHANNEL';
+    if (saveBtn) saveBtn.textContent = 'CREATE CHANNEL';
+    document.getElementById('ax-ch-name').value    = '';
+    document.getElementById('ax-ch-label').value   = '';
+    document.getElementById('ax-ch-desc').value    = '';
+    document.getElementById('ax-ch-type').value    = 'mixed';
+    document.getElementById('ax-ch-mode').value    = 'ordered';
+    document.getElementById('ax-ch-color').value   = '#1e50ff';
+    document.getElementById('ax-ch-enabled').checked = true;
+  }
+  if (errEl) { errEl.textContent = ''; errEl.classList.remove('visible'); }
+  modal.style.display = 'flex';
+
+  document.getElementById('ax-ch-modal-cancel')?.addEventListener('click', () => { modal.style.display = 'none'; }, { once: true });
+  document.getElementById('ax-ch-modal-save')?.addEventListener('click', async () => {
+    const name    = document.getElementById('ax-ch-name').value.trim();
+    const label   = document.getElementById('ax-ch-label').value.trim();
+    if (!name)  { errEl.textContent = 'Channel Name is required.'; errEl.classList.add('visible'); return; }
+    if (!label) { errEl.textContent = 'Short Label is required.';  errEl.classList.add('visible'); return; }
+
+    const data = {
+      name,
+      label:        label.toUpperCase(),
+      description:  document.getElementById('ax-ch-desc').value.trim(),
+      channel_type: document.getElementById('ax-ch-type').value,
+      mode:         document.getElementById('ax-ch-mode').value,
+      color:        document.getElementById('ax-ch-color').value,
+      enabled:      document.getElementById('ax-ch-enabled').checked,
+      loop:         true,
+      updated_at:   serverTimestamp(),
+    };
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+    try {
+      if (_editChannelId) {
+        await setDoc(doc(db, 'network_channels', _editChannelId), data, { merge: true });
+        _toast(`Channel updated: ${name}`);
+      } else {
+        // Auto-generate an ID like "A6", "A7", etc.
+        const existingIds = _channels().map(c => c.id);
+        let newIdx = existingIds.length + 1;
+        let newId  = `A${newIdx}`;
+        while (existingIds.includes(newId)) { newIdx++; newId = `A${newIdx}`; }
+        data.sort_order = newIdx;
+        data.created_at = serverTimestamp();
+        await setDoc(doc(db, 'network_channels', newId), data);
+        _toast(`Channel created: ${name}`);
+      }
+      modal.style.display = 'none';
+    } catch (e) {
+      if (errEl) { errEl.textContent = 'Save failed: ' + e.message; errEl.classList.add('visible'); }
+      _toast('Channel save failed: ' + e.message, 'err');
+    }
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = _editChannelId ? 'SAVE CHANGES' : 'CREATE CHANNEL'; }
+  }, { once: true });
+}
+
 /* ═══════════════════════════════════════
    DASHBOARD
 ═══════════════════════════════════════ */
 function _renderDashboard() {
+  const chs = _channels();
   // Channel status badges
   const dashCh = document.getElementById('ax-dash-channels');
   if (dashCh) {
-    dashCh.innerHTML = CHANNELS.map(ch => {
+    dashCh.innerHTML = chs.map(ch => {
       const st  = _channelStates[ch.id];
       const live = !!(st?.current_item);
       return `
-        <div class="ax-dash-ch-badge" style="border-color:${ch.color}44;">
-          <div class="ax-dash-ch-id" style="color:${ch.color}">${ch.id}</div>
-          <div class="ax-dash-ch-name">${ch.name}</div>
+        <div class="ax-dash-ch-badge" style="border-color:${ch.color || '#1e50ff'}44;">
+          <div class="ax-dash-ch-id" style="color:${ch.color || '#1e50ff'}">${_esc(ch.label || ch.id)}</div>
+          <div class="ax-dash-ch-name">${_esc(ch.name)}</div>
           <div class="ax-dash-ch-state ${live ? 'on-air' : ''}">
             ${live ? '🔴 ON AIR' : '⚫ STANDBY'}
           </div>
         </div>`;
     }).join('');
   }
-  // Now playing rows
-  CHANNELS.forEach(ch => {
-    const st  = _channelStates[ch.id];
-    const cur = st?.current_item;
-    const titleEl = document.getElementById(`ax-dash-title-${ch.id}`);
-    const metaEl  = document.getElementById(`ax-dash-meta-${ch.id}`);
-    if (titleEl) titleEl.textContent = cur ? cur.title : 'Standby…';
-    if (metaEl)  metaEl.textContent  = cur ? (cur.artist || cur.type || 'media') : '—';
-  });
-  // Queue bars
-  CHANNELS.forEach(ch => {
-    const st    = _channelStates[ch.id];
-    const queue = st?.queue || [];
-    const max   = 20;
-    const pct   = Math.min(100, (queue.length / max) * 100);
-    const bar   = document.getElementById(`ax-qbar-${ch.id}`);
-    const cnt   = document.getElementById(`ax-qcount-${ch.id}`);
-    if (bar) bar.style.width = pct + '%';
-    if (cnt) cnt.textContent = queue.length + (queue.length === 1 ? ' item' : ' items');
-  });
+  // Now playing rows (fully dynamic)
+  const npEl = document.getElementById('ax-dash-nowplaying');
+  if (npEl) {
+    npEl.innerHTML = chs.map(ch => {
+      const st  = _channelStates[ch.id];
+      const cur = st?.current_item;
+      return `
+        <div class="ax-dash-np-row" id="ax-dash-np-${ch.id}">
+          <div class="ax-dash-np-badge" style="background:${ch.color || '#1e50ff'}22;color:${ch.color || '#1e50ff'};border-color:${ch.color || '#1e50ff'}44;">${_esc(ch.label || ch.id)}</div>
+          <div class="ax-dash-np-info">
+            <div class="ax-dash-np-title" id="ax-dash-title-${ch.id}">${cur ? _esc(cur.title) : 'Standby…'}</div>
+            <div class="ax-dash-np-meta"  id="ax-dash-meta-${ch.id}">${cur ? _esc(cur.artist || cur.type || 'media') : '—'}</div>
+          </div>
+        </div>`;
+    }).join('') || '<div style="color:var(--text-dim);font-size:12px;">No channels yet.</div>';
+  }
+  // Queue bars (fully dynamic)
+  const qEl = document.getElementById('ax-dash-queues');
+  if (qEl) {
+    qEl.innerHTML = chs.map(ch => {
+      const st    = _channelStates[ch.id];
+      const queue = st?.queue || [];
+      const max   = 20;
+      const pct   = Math.min(100, (queue.length / max) * 100);
+      return `
+        <div class="ax-dash-q-row">
+          <div class="ax-dash-q-label" style="color:${ch.color || '#1e50ff'}">${_esc(ch.label || ch.id)}</div>
+          <div class="ax-dash-q-bar-wrap">
+            <div class="ax-dash-q-bar" id="ax-qbar-${ch.id}" style="width:${pct}%;background:${ch.color || '#1e50ff'}"></div>
+          </div>
+          <div class="ax-dash-q-count" id="ax-qcount-${ch.id}">${queue.length + (queue.length === 1 ? ' item' : ' items')}</div>
+        </div>`;
+    }).join('') || '<div style="color:var(--text-dim);font-size:12px;">No channels yet.</div>';
+  }
 }
 
 function _renderDashboardRecent() {
@@ -709,8 +1035,9 @@ function _renderDashboardRecent() {
 function _checkQueueWarnings() {
   const el = document.getElementById('ax-dash-warnings');
   if (!el) return;
+  const chs = _channels();
   const warnings = [];
-  CHANNELS.forEach(ch => {
+  chs.forEach(ch => {
     const st    = _channelStates[ch.id];
     const queue = st?.queue || [];
     const cur   = st?.current_item;
@@ -721,12 +1048,14 @@ function _checkQueueWarnings() {
     }
   });
   if (!warnings.length) {
-    el.innerHTML = '<div style="color:var(--green);font-size:12px;">✓ All channels have content scheduled.</div>';
+    el.innerHTML = chs.length
+      ? '<div style="color:var(--green);font-size:12px;">✓ All channels have content scheduled.</div>'
+      : '<div style="color:var(--text-dim);font-size:12px;">No channels yet — create one in Channel Manager.</div>';
     return;
   }
   el.innerHTML = warnings.map(w => `
     <div class="ax-warning-row ${w.level === 'empty' ? 'ax-warn-empty' : 'ax-warn-low'}">
-      <div>${w.level === 'empty' ? '🔴' : '⚠️'} <strong>${w.ch.id}</strong> — ${_esc(w.msg)}</div>
+      <div>${w.level === 'empty' ? '🔴' : '⚠️'} <strong>${_esc(w.ch.label || w.ch.id)}</strong> — ${_esc(w.msg)}</div>
       <div style="display:flex;gap:6px;margin-top:6px;">
         <button class="ax-btn-sm" onclick="window._AXC.goToSchedule('${w.ch.id}')">+ ADD MEDIA</button>
         <button class="ax-btn-sm" onclick="window._AXC.goToSchedule('${w.ch.id}')">📅 SCHEDULE</button>
@@ -737,19 +1066,20 @@ function _checkQueueWarnings() {
 /* ═══════════════════════════════════════
    NETWORK CONTROL PANE
 ═══════════════════════════════════════ */
-function _renderChannelCard(channelId) {
+function _renderChannelCard(_unused) {
+  const chs = _channels();
   const container = document.getElementById('ax-ov-channels');
   if (!container) return;
-  container.innerHTML = CHANNELS.map(c => {
+  container.innerHTML = chs.map(c => {
     const s   = _channelStates[c.id];
     const cur = s?.current_item;
     const q   = s?.queue || [];
     return `
       <div class="ax-channel-card">
         <div class="ax-channel-card-header">
-          <div class="ax-channel-card-id" style="color:${c.color}">${c.id}</div>
+          <div class="ax-channel-card-id" style="color:${c.color || '#1e50ff'}">${_esc(c.label || c.id)}</div>
           <div>
-            <div class="ax-channel-card-name">${c.label}</div>
+            <div class="ax-channel-card-name">${_esc(c.name)}</div>
             <div class="ax-channel-card-status">${cur ? `<span style="color:var(--red)">● LIVE</span>` : `<span style="color:var(--text-muted)">● STANDBY</span>`}</div>
           </div>
         </div>
@@ -761,45 +1091,49 @@ function _renderChannelCard(channelId) {
           ${cur ? `<button class="ax-btn-sm ax-btn-danger" onclick="window._AXC.stopChannel('${c.id}')">■ Stop</button>` : ''}
         </div>
       </div>`;
-  }).join('');
-  const liveCount = CHANNELS.filter(c => _channelStates[c.id]?.current_item).length;
+  }).join('') || '<div style="color:var(--text-dim);font-size:12px;">No channels yet.</div>';
+  const liveCount = chs.filter(c => _channelStates[c.id]?.current_item).length;
   const lc = document.getElementById('ax-ov-live-count');
   if (lc) lc.textContent = liveCount;
 }
 
 function _renderChannels() {
-  _renderChannelCard('A1');
+  _renderChannelCard(null);
   // channel manager grid
   const mgr = document.getElementById('ax-ch-manager-grid');
   if (mgr) {
-    mgr.innerHTML = CHANNELS.map(c => {
+    const chs = _channels();
+    mgr.innerHTML = chs.map(c => {
       const s   = _channelStates[c.id];
       const cur = s?.current_item;
       const q   = s?.queue || [];
       const nextItem = cur && q.length ? q[q.findIndex(x => x.id === cur.id) + 1] || null : q[0] || null;
       return `
-        <div class="ax-channel-card" style="border-color:${c.color}33;">
+        <div class="ax-channel-card" style="border-color:${c.color || '#1e50ff'}33;">
           <div class="ax-channel-card-header">
-            <div class="ax-channel-card-id" style="color:${c.color};font-size:20px;">${c.id}</div>
+            <div class="ax-channel-card-id" style="color:${c.color || '#1e50ff'};font-size:20px;">${_esc(c.label || c.id)}</div>
             <div>
-              <div class="ax-channel-card-name" style="font-size:14px;">${c.name}</div>
+              <div class="ax-channel-card-name" style="font-size:14px;">${_esc(c.name)}</div>
               <div class="ax-channel-card-status">${cur ? `<span style="color:var(--red)">● ON AIR</span>` : `<span style="color:var(--text-muted)">● OFFLINE</span>`}</div>
             </div>
           </div>
+          <div style="margin:8px 0;font-size:11px;color:var(--text-dim);">${_esc(c.description || '')} · ${_esc(c.channel_type || '')} · ${_esc(c.mode || '')}</div>
           <div style="margin:8px 0;font-size:11px;font-weight:700;letter-spacing:1px;color:var(--text-dim);">CURRENT PROGRAM</div>
           <div class="ax-channel-card-np">${cur ? _esc(cur.title) : '—'}</div>
           <div style="margin:8px 0;font-size:11px;font-weight:700;letter-spacing:1px;color:var(--text-dim);">UP NEXT</div>
           <div class="ax-channel-card-np" style="color:var(--text-dim)">${nextItem ? _esc(nextItem.title) : '—'}</div>
-          <div style="margin:8px 0;font-size:11px;color:var(--text-dim);">${q.length} items · ${s?.loop ? 'Looping' : 'Linear'}</div>
+          <div style="margin:8px 0;font-size:11px;color:var(--text-dim);">${q.length} items · ${s?.loop !== false ? 'Looping' : 'Linear'}</div>
           <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;">
             <button class="ax-btn-sm" onclick="window._AXC.goToSchedule('${c.id}')">📅 Schedule</button>
             <button class="ax-btn-sm ax-btn-playnow" onclick="window._AXC.openPlayNow('${c.id}')">🔴 Play Now</button>
             <button class="ax-btn-sm" onclick="window._AXC.skipChannel('${c.id}')">⏭ Skip</button>
             <button class="ax-btn-sm" onclick="window._AXC.restartChannel('${c.id}')">🔄 Restart</button>
+            <button class="ax-btn-sm" onclick="window._AXC.editChannel('${c.id}')">✏️ Edit</button>
+            <button class="ax-btn-sm ax-btn-danger" onclick="window._AXC.deleteChannel('${c.id}')">🗑 Delete</button>
             <button class="ax-btn-sm ax-btn-danger" onclick="window._AXC.stopChannel('${c.id}')">■ Stop</button>
           </div>
         </div>`;
-    }).join('');
+    }).join('') || '<div style="color:var(--text-dim);font-size:12px;">No channels yet — click CREATE CHANNEL above.</div>';
   }
 }
 
@@ -807,7 +1141,7 @@ function _renderChannels() {
    LIVE CONTROL PANE
 ═══════════════════════════════════════ */
 function _renderLiveCard(channelId) {
-  const ch  = CHANNELS.find(c => c.id === channelId);
+  const ch  = _channels().find(c => c.id === channelId);
   const st  = _channelStates[channelId];
   const cur = st?.current_item;
   const q   = st?.queue || [];
@@ -843,7 +1177,36 @@ function _renderLiveCard(channelId) {
 }
 
 function _bindLiveControl() {
-  CHANNELS.forEach(ch => _renderLiveCard(ch.id));
+  const chs = _channels();
+  const grid = document.getElementById('ax-live-grid');
+  if (!grid) return;
+  // Inject live channel cards dynamically
+  grid.innerHTML = chs.map(ch => `
+    <div class="ax-live-channel-card" id="ax-live-card-${ch.id}">
+      <div class="ax-live-ch-header" style="border-color:${ch.color || '#1e50ff'}44;">
+        <div class="ax-live-ch-id" style="color:${ch.color || '#1e50ff'}">${_esc(ch.label || ch.id)}</div>
+        <div class="ax-live-ch-name">${_esc(ch.name)}</div>
+        <div class="ax-live-ch-status" id="ax-live-status-${ch.id}">● STANDBY</div>
+      </div>
+      <div class="ax-live-np">
+        <div class="ax-live-np-label">CURRENT PROGRAM</div>
+        <div class="ax-live-np-title" id="ax-live-title-${ch.id}">—</div>
+        <div class="ax-live-np-meta" id="ax-live-meta-${ch.id}">No content scheduled</div>
+      </div>
+      <div class="ax-live-upnext">
+        <div class="ax-live-np-label">UP NEXT</div>
+        <div class="ax-live-next-title" id="ax-live-next-${ch.id}">—</div>
+      </div>
+      <div class="ax-live-controls">
+        <button class="ax-btn-sm" onclick="window._AXC.goToSchedule('${ch.id}')">📅 Schedule</button>
+        <button class="ax-btn-sm ax-btn-playnow" onclick="window._AXC.openPlayNow('${ch.id}')">🔴 PLAY NOW</button>
+        <button class="ax-btn-sm" onclick="window._AXC.skipChannel('${ch.id}')">⏭ Skip</button>
+        <button class="ax-btn-sm ax-btn-danger" onclick="window._AXC.stopChannel('${ch.id}')">■ Stop</button>
+      </div>
+      <div class="ax-live-queue-preview" id="ax-live-queue-${ch.id}"></div>
+    </div>`).join('') || '<div style="color:var(--text-dim);font-size:12px;padding:24px;">No channels yet.</div>';
+  // Now update state for each card
+  chs.forEach(ch => _renderLiveCard(ch.id));
 }
 
 /* ═══════════════════════════════════════
@@ -901,17 +1264,22 @@ async function _handleFiles(files) {
 }
 
 /**
- * Upload a single file using the TUS resumable-upload architecture:
+ * Upload a single file using the Supabase signed-URL architecture:
  *
  *   Phase 1 — Worker /authorize (tiny JSON, no file body)
  *     → Firebase token verified server-side
  *     → Founder email confirmed from verified token
- *     → Worker creates TUS resource on Supabase using service-role key
- *     → Returns tusUrl + storagePath + publicUrl
+ *     → Worker POSTs to /storage/v1/object/upload/sign/<bucket>/<path>
+ *       using the service-role key
+ *     → Supabase returns { url: "/object/upload/sign/<bucket>/<path>?token=..." }
+ *     → Worker prepends supabaseUrl + "/storage/v1" — path is NOT rewritten
+ *     → Returns signedUrl + storagePath + publicUrl
  *
- *   Phase 2 — TUS PATCH directly to Supabase (no Worker in the data path)
- *     → Chunked XHR for byte-accurate progress
- *     → Resumable: network errors retry the current chunk
+ *   Phase 2 — PUT directly to Supabase signed URL (no Worker in the data path)
+ *     → XHR PUT to /storage/v1/object/upload/sign/<bucket>/<path>?token=
+ *     → No Authorization header needed — ?token= in URL is the authorisation
+ *     → IMPORTANT: must PUT to /object/upload/sign/ NOT /object/sign/
+ *       (/object/sign/ is the download path and returns HTTP 400 without Auth)
  *     → File never passes through the Worker → no 100 MB CF body limit
  *     → Size limit is the Supabase bucket's file_size_limit (set to 500 MB)
  *
@@ -982,10 +1350,10 @@ async function _uploadFile(file) {
     try { duration_sec = await _getMediaDuration(file); } catch (_) {}
   }
 
-  // ── Phase 1: Worker /authorize — get TUS URL ──────────────────────────
+  // ── Phase 1: Worker /authorize — get signed upload URL ───────────────
   // Sends only a tiny JSON body (fileName, contentType, size).
   // The file is NOT sent here. The Worker verifies the Firebase token and
-  // creates a TUS upload resource on Supabase using the service-role key.
+  // creates a Supabase signed upload URL using the service-role key.
   let authResult;
   try {
     if (!auth.currentUser) throw new Error('FIREBASE SESSION NOT FOUND — please sign in again');
@@ -1022,8 +1390,22 @@ async function _uploadFile(file) {
   }
 
   // ── Phase 2: PUT directly to Supabase signed URL ──────────────────────
-  // The signed URL contains a ?token= that authorises the upload.
-  // No Authorization header needed — the Worker never sees the file.
+  // The signed URL must be /storage/v1/object/upload/sign/<bucket>/<path>?token=...
+  // No Authorization header needed — the token in the URL is the authorisation.
+
+  // Guard: validate the signed URL before sending 93 MB to the wrong endpoint.
+  // If the URL is missing /object/upload/sign/ or token=, the PUT would hit an
+  // endpoint that requires Authorization and return HTTP 400.
+  const _surl = authResult.signedUrl || '';
+  if (!_surl.includes('/object/upload/sign/') || !_surl.includes('token=')) {
+    const _msg = `SIGNED URL INVALID — Worker returned unexpected URL format: ${_surl.slice(0, 120)}`;
+    setStatus('✗ SIGNED URL INVALID — click retry', 'var(--red)');
+    addRetry();
+    _toast(_msg, 'err');
+    console.error('[AURENIX UPLOAD] ' + _msg);
+    return;
+  }
+
   setStatus('UPLOADING…', '');
   setProgress(0, file.size);
 
@@ -1032,14 +1414,14 @@ async function _uploadFile(file) {
       setProgress(loaded, total);
     });
   } catch (uploadErr) {
-    setStatus('✗ STORAGE FAILED — click retry', 'var(--red)');
+    setStatus('✗ UPLOAD TRANSFER: COMPLETE — FINAL STORAGE AUTHORIZATION: FAILED — click retry', 'var(--red)');
     addRetry();
     _toast(uploadErr.message || 'SUPABASE STORAGE UPLOAD FAILED', 'err');
     return;
   }
 
   setProgress(file.size, file.size);
-  setStatus('PROCESSING…', 'var(--blue-bright)');
+  setStatus('UPLOAD TRANSFER: COMPLETE — SAVING…', 'var(--blue-bright)');
 
   // ── Phase 3: Firestore metadata record ───────────────────────────────
   // Force-refresh token before writing so the Firestore SDK has a valid
@@ -1099,10 +1481,17 @@ async function _uploadFile(file) {
 function _signedUpload(file, signedUrl, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+
+    // Log the URL path (not the full token) so browser console shows if it's wrong
+    const _urlPath = signedUrl.split('?')[0];
+    console.log('[AURENIX UPLOAD] PUT', _urlPath, '(token omitted)');
+
     xhr.open('PUT', signedUrl, true);
     // No Authorization header — the ?token= in the URL is the authorisation.
     // Setting Content-Type is required for Supabase to store with the right MIME.
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    // x-upsert: true — overwrite if an object at this path already exists
+    // (safe for retries; the signed URL token controls authorisation)
     xhr.setRequestHeader('x-upsert', 'true');
 
     xhr.upload.addEventListener('progress', e => {
@@ -1110,16 +1499,20 @@ function _signedUpload(file, signedUrl, onProgress) {
     });
 
     xhr.addEventListener('load', () => {
-      if (xhr.status === 200) {
+      // Supabase signed-URL PUT returns 200 on upsert and 200/201 on new objects.
+      // Accept both to avoid a false "authorization" failure on the finalization step.
+      if (xhr.status === 200 || xhr.status === 201) {
         resolve();
       } else {
         // Surface the exact Supabase error message (never contains secrets)
-        let detail = xhr.responseText.slice(0, 300);
+        let detail = xhr.responseText.slice(0, 400);
         try {
           const j = JSON.parse(xhr.responseText);
           detail = j.message || j.error || detail;
         } catch (_) {}
-        reject(new Error(`SUPABASE STORAGE UPLOAD FAILED — HTTP ${xhr.status}: ${detail}`));
+        const msg = `SUPABASE STORAGE UPLOAD FAILED — HTTP ${xhr.status}: ${detail}`;
+        console.error('[AURENIX UPLOAD] PUT failed —', _urlPath, '—', msg);
+        reject(new Error(msg));
       }
     });
     xhr.addEventListener('error', () => reject(new Error('SUPABASE STORAGE UPLOAD FAILED — network error')));
@@ -1190,7 +1583,8 @@ function _openMetaModal(mediaId, defaultTitle) {
         <label class="ax-field-label">Assign to Channel</label>
         <select class="ax-field-input" id="ax-meta-channel">
           <option value="">— Multiple / Unassigned —</option>
-          ${CHANNELS.map(ch => `<option value="${ch.id}" ${ch.id === item.channel ? 'selected' : ''}>${ch.name}</option>`).join('')}
+          <option value="">— No channel —</option>
+          ${_channels().map(ch => `<option value="${ch.id}" ${ch.id === item.channel ? 'selected' : ''}>${_esc(ch.name)}</option>`).join('')}
         </select>
       </div>
       ${isVideo ? `
@@ -1353,24 +1747,8 @@ function _renderMediaGrid(grid, items, showActions) {
    SCHEDULE PANE
 ═══════════════════════════════════════ */
 function _bindSchedulePane() {
-  document.querySelectorAll('.ax-ch-pick-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.ax-ch-pick-btn').forEach(b => {
-        b.classList.remove('active');
-        b.style.borderColor = '';
-        b.style.color = '';
-      });
-      btn.classList.add('active');
-      const ch = CHANNELS.find(c => c.id === btn.dataset.chid);
-      if (ch) { btn.style.borderColor = ch.color; btn.style.color = ch.color; }
-      _schedChannelId = btn.dataset.chid;
-      const lbl = document.getElementById('ax-sched-ch-label');
-      if (lbl) lbl.textContent = `${CHANNELS.find(c => c.id === _schedChannelId)?.name} — Schedule`;
-      _renderSchedItems();
-      _renderOnAir();
-    });
-  });
-
+  // Channel picker bindings are set up in _rebuildDynamicPanes().
+  // Here we only bind the push/clear buttons and search.
   document.getElementById('ax-sched-push-btn')?.addEventListener('click', _pushScheduleLive);
   document.getElementById('ax-sched-clear-btn')?.addEventListener('click', async () => {
     if (!confirm(`Clear the schedule for ${_schedChannelId}?`)) return;
@@ -1477,18 +1855,20 @@ async function _pushScheduleLive() {
     loop,
     updated_at:   serverTimestamp(),
   }, { merge: true });
-  _toast(`${CHANNELS.find(c => c.id === _schedChannelId)?.name} is now LIVE.`);
+  const chName = _channels().find(c => c.id === _schedChannelId)?.name || _schedChannelId;
+  _toast(`${chName} is now LIVE.`);
 }
 
 /* ═══════════════════════════════════════
    STATISTICS
 ═══════════════════════════════════════ */
 function _renderStats() {
+  const chs     = _channels();
   const total   = _mediaLib.length;
   const audios  = _mediaLib.filter(m => ['audio','music','podcast','audio_program','station_id'].includes(m.type)).length;
   const videos  = _mediaLib.filter(m => ['video','music_video','show','trailer','archive','broadcast_clip'].includes(m.type)).length;
-  const live    = CHANNELS.filter(c => _channelStates[c.id]?.current_item).length;
-  const queued  = CHANNELS.reduce((acc, c) => acc + (_channelStates[c.id]?.queue?.length || 0), 0);
+  const live    = chs.filter(c => _channelStates[c.id]?.current_item).length;
+  const queued  = chs.reduce((acc, c) => acc + (_channelStates[c.id]?.queue?.length || 0), 0);
   const totalSec= _mediaLib.reduce((acc, m) => acc + (m.duration_sec || 0), 0);
 
   const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
@@ -1501,20 +1881,20 @@ function _renderStats() {
 
   const statsChEl = document.getElementById('ax-stats-channels');
   if (statsChEl) {
-    statsChEl.innerHTML = CHANNELS.map(ch => {
+    statsChEl.innerHTML = chs.map(ch => {
       const st    = _channelStates[ch.id];
       const cur   = st?.current_item;
       const q     = st?.queue || [];
       const qSec  = q.reduce((a, i) => a + (i.duration_sec || 0), 0);
       return `
         <div class="ax-stats-ch-row">
-          <div class="ax-stats-ch-id" style="color:${ch.color}">${ch.id}</div>
-          <div class="ax-stats-ch-name">${ch.name}</div>
+          <div class="ax-stats-ch-id" style="color:${ch.color || '#1e50ff'}">${_esc(ch.label || ch.id)}</div>
+          <div class="ax-stats-ch-name">${_esc(ch.name)}</div>
           <div class="ax-stats-ch-val">${q.length} items</div>
           <div class="ax-stats-ch-val">${_fmtTimeLong(qSec)} queued</div>
           <div class="ax-stats-ch-state ${cur ? 'live' : ''}">${cur ? '● LIVE' : '● STANDBY'}</div>
         </div>`;
-    }).join('');
+    }).join('') || '<div style="color:var(--text-dim);font-size:12px;">No channels yet.</div>';
   }
 
   // Update security panel verified status
@@ -1578,7 +1958,7 @@ function _openPlayNowModal(channelId) {
   const searchEl= document.getElementById('ax-playnow-search');
   if (!modal) return;
 
-  const ch  = CHANNELS.find(c => c.id === channelId);
+  const ch  = _channels().find(c => c.id === channelId);
   const st  = _channelStates[channelId];
   const cur = st?.current_item;
 
@@ -1657,7 +2037,6 @@ let _bcastMode       = 'queue';
 
 function _openBroadcastModal(mediaId) {
   _bcastMediaId   = mediaId;
-  _bcastChannelId = 'A1';
   _bcastMode      = 'queue';
   const item  = _mediaLib.find(m => m.id === mediaId);
   if (!item) return;
@@ -1665,10 +2044,12 @@ function _openBroadcastModal(mediaId) {
   if (!modal) return;
   const titleEl = document.getElementById('ax-bcast-media-title');
   if (titleEl) titleEl.textContent = `${_typeIcon(item.type)} ${item.title}`;
+  // Rebuild channel picker with current channels then reset selection
+  _rebuildDynamicPanes();
   // Reset pickers
   document.querySelectorAll('#ax-bcast-ch-picker .ax-ch-pick-btn').forEach(b => b.classList.remove('active'));
   document.querySelector('#ax-bcast-ch-picker .ax-ch-pick-btn')?.classList.add('active');
-  _bcastChannelId = document.querySelector('#ax-bcast-ch-picker .ax-ch-pick-btn')?.dataset.chid || 'A1';
+  _bcastChannelId = document.querySelector('#ax-bcast-ch-picker .ax-ch-pick-btn')?.dataset.chid || (_channels()[0]?.id || '');
 
   document.querySelectorAll('.ax-bcast-action-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('ax-bcast-addqueue')?.classList.add('active');
@@ -1725,15 +2106,15 @@ function _openBroadcastModal(mediaId) {
 window._AXC = {
   goToSchedule(channelId) {
     _schedChannelId = channelId;
-    document.querySelectorAll('.ax-ch-pick-btn').forEach(b => {
-      const ch = CHANNELS.find(c => c.id === b.dataset.chid);
+    const ch = _channels().find(c => c.id === channelId);
+    document.querySelectorAll('#ax-sched-ch-picker .ax-ch-pick-btn').forEach(b => {
       const active = b.dataset.chid === channelId;
       b.classList.toggle('active', active);
-      b.style.borderColor = active && ch ? ch.color : '';
-      b.style.color       = active && ch ? ch.color : '';
+      b.style.borderColor = active && ch ? (ch.color || '') : '';
+      b.style.color       = active && ch ? (ch.color || '') : '';
     });
     const lbl = document.getElementById('ax-sched-ch-label');
-    if (lbl) lbl.textContent = `${CHANNELS.find(c => c.id === channelId)?.name} — Schedule`;
+    if (lbl) lbl.textContent = `${ch?.name || channelId} — Schedule`;
     _switchPane('schedule');
     _renderSchedItems();
     _renderOnAir();
@@ -1854,15 +2235,73 @@ window._AXC = {
   async saveChannelSettings(channelId) {
     const descEl = document.querySelector(`.ax-settings-desc[data-chid="${channelId}"]`);
     const loopEl = document.querySelector(`.ax-settings-loop[data-chid="${channelId}"]`);
-    const st  = _channelStates[channelId];
-    const ref = doc(db, 'network_state', channelId);
-    await setDoc(ref, {
-      ...(st || {}),
+    // Save description/loop to the channel doc (not the state doc)
+    await setDoc(doc(db, 'network_channels', channelId), {
       description: descEl?.value || '',
       loop:        loopEl?.checked ?? true,
       updated_at:  serverTimestamp(),
     }, { merge: true });
     _toast(`${channelId} settings saved.`);
+  },
+
+  editChannel(channelId) {
+    _openChannelModal(channelId);
+  },
+
+  async deleteChannel(channelId) {
+    const ch = _channels().find(c => c.id === channelId);
+    if (!ch) return;
+    if (!confirm(`DELETE channel "${ch.name}"?\n\nThis removes the channel from the network. Media in its queue will NOT be deleted from the library.`)) return;
+    try {
+      await deleteDoc(doc(db, 'network_channels', channelId));
+      // Stop the channel state as well
+      await setDoc(doc(db, 'network_state', channelId), { current_item: null, queue: [], loop: false, updated_at: serverTimestamp() }, { merge: true });
+      _toast(`Channel deleted: ${ch.name}`);
+    } catch (e) {
+      _toast('Delete failed: ' + e.message, 'err');
+    }
+  },
+
+  async approveSubmission(submissionId) {
+    try {
+      await setDoc(doc(db, 'media_submissions', submissionId), { status: 'approved', reviewed_at: serverTimestamp() }, { merge: true });
+      _toast('Submission approved.');
+    } catch (e) { _toast('Failed: ' + e.message, 'err'); }
+  },
+
+  async rejectSubmission(submissionId) {
+    try {
+      await setDoc(doc(db, 'media_submissions', submissionId), { status: 'rejected', reviewed_at: serverTimestamp() }, { merge: true });
+      _toast('Submission rejected.');
+    } catch (e) { _toast('Failed: ' + e.message, 'err'); }
+  },
+
+  async importSubmission(submissionId) {
+    const sub = _submissionsLib.find(s => s.id === submissionId);
+    if (!sub) return;
+    try {
+      await addDoc(collection(db, 'network_media'), {
+        title:        sub.title,
+        artist:       sub.artist || '',
+        creator:      sub.submitted_email || sub.submitted_by || '',
+        description:  sub.description || '',
+        type:         sub.type || 'audio',
+        category:     sub.type || 'music',
+        url:          sub.url || '',
+        storage_path: '',
+        duration_sec: 0,
+        size_bytes:   0,
+        status:       'ready',
+        channel:      '',
+        tags:         [],
+        year:         new Date().getFullYear(),
+        uploaded_by:  _user?.uid || '',
+        uploaded_at:  serverTimestamp(),
+        source:       'user_submission',
+        submission_id: submissionId,
+      });
+      _toast('Imported to media library: ' + sub.title);
+    } catch (e) { _toast('Import failed: ' + e.message, 'err'); }
   },
 };
 

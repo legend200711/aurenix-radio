@@ -324,6 +324,25 @@ service cloud.firestore {
     }
 
     // ────────────────────────────────────────────────────────────
+    // MEDIA SUBMISSIONS — /media_submissions/{id}
+    // Users submit; Founder reviews (approve / reject)
+    // ────────────────────────────────────────────────────────────
+    match /media_submissions/{subId} {
+      // User can read their own submission; Founder reads all
+      allow get:    if isAdmin()
+                    || (isSignedIn() && resource.data.submitted_by == request.auth.uid);
+      allow list:   if isAdmin()
+                    || (isSignedIn() && resource.data.submitted_by == request.auth.uid);
+      // Users can create their own pending submission
+      allow create: if isSignedIn()
+                    && request.resource.data.submitted_by == request.auth.uid
+                    && request.resource.data.status == 'pending';
+      // Only Founder can update (approve/reject) or delete
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ────────────────────────────────────────────────────────────
     // NETWORK STATE — /network_state/{channelId}
     // Live playback state per channel; read by all viewers.
     // WRITE restricted to Founder (admin) only.
