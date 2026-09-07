@@ -27,7 +27,6 @@ import {
   query, orderBy, where, upsertUserProfile, addDoc,
 } from './firebase-client.js';
 
-import { oneChannelAdvance } from './aurenix-one-engine.js';
 import { liveTvChannelAdvance, LIVE_TV_CHANNEL_ID } from './aurenix-live-tv-engine.js';
 
 import { supabase } from './supabase-client.js';
@@ -539,7 +538,7 @@ function _buildHero(channels) {
                 <div class="ax-np-title" id="ax-np-title">Connecting to network…</div>
                 <div class="ax-np-artist" id="ax-np-artist"></div>
               </div>
-              <!-- AURENIX ONE live-TV overlays -->
+              <!-- Live-TV overlays -->
               <div id="ax-one-viewer-live" style="display:none;position:absolute;top:12px;left:12px;z-index:10;background:rgba(255,45,85,0.92);color:#fff;font-size:10px;font-weight:900;letter-spacing:2px;padding:3px 8px;border-radius:4px;">● LIVE</div>
               <div id="ax-one-viewer-comm" style="display:none;position:absolute;top:12px;right:12px;z-index:10;background:rgba(184,134,11,0.92);color:#fff;font-size:10px;font-weight:900;letter-spacing:1.5px;padding:3px 8px;border-radius:4px;">📢 COMMERCIAL BREAK</div>
               <div class="ax-autoplay-gate" id="ax-gate">
@@ -839,8 +838,8 @@ function _onActiveChannelUpdate(st) {
   _setNowPlaying(item.title, item.artist || '', item.type || '');
   _updateLiveTVOverlay(item, isComm);
 
-  // For live-TV engine channels (A1 and ALTV): up-next from commercial_queue or auto-selected
-  if (_activeChannel?.id === 'A1' || _activeChannel?.id === LIVE_TV_CHANNEL_ID) {
+  // For live-TV engine channels (ALTV): up-next from commercial_queue or auto-selected
+  if (_activeChannel?.id === LIVE_TV_CHANNEL_ID) {
     const commQ = st.commercial_queue || [];
     if (isComm && commQ.length > 0) {
       _renderUpNext([commQ[0]]);
@@ -1075,14 +1074,7 @@ async function _advance(st) {
     if (!_activeChannel) { _advancing = false; return; }
     const channelId  = _activeChannel.id;
 
-    // ── AURENIX ONE — live-TV engine handles its own advance ─────────────────
-    if (channelId === 'A1') {
-      const currentId = st?.current_item?.id || null;
-      await oneChannelAdvance(currentId);
-      _advancing = false;
-      return;
-    }
-    // ── AURENIX LIVE TV — separate live-TV engine ─────────────────────────────
+    // ── AURENIX LIVE TV — live-TV engine handles its own advance ─────────────
     if (channelId === LIVE_TV_CHANNEL_ID) {
       const currentId = st?.current_item?.id || null;
       await liveTvChannelAdvance(currentId);

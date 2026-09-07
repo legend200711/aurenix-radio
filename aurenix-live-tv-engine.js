@@ -2,7 +2,7 @@
  * AURENIX LIVE TV — 24/7 Live Television Engine
  * aurenix-live-tv-engine.js
  *
- * Completely separate from AURENIX ONE (channel A1).
+ * Primary 24/7 live television engine for AURENIX.
  * Channel ID: ALTV
  * Config collection: channel_live_tv_config
  * State: network_state/ALTV (shared broadcast — all viewers see the same position)

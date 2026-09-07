@@ -363,8 +363,8 @@ service cloud.firestore {
     }
 
     // ────────────────────────────────────────────────────────────
-    // AURENIX ONE ENGINE CONFIG — /channel_one_config/{channelId}
-    // Live channel engine settings (commercial frequency, history).
+    // CHANNEL ONE ENGINE CONFIG — /channel_one_config/{channelId}
+    // Legacy engine settings (commercial frequency, history).
     // Viewers may read (to check is_live). Only Founder can write.
     // ────────────────────────────────────────────────────────────
     match /channel_one_config/{channelId} {
