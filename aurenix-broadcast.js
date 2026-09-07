@@ -450,60 +450,95 @@ function _buildHero(channels) {
               <span class="ax-live-indicator"><span class="ax-live-dot"></span> LIVE</span>
             </div>
             <div class="ax-player-shell">
-              <div class="ax-media-area" id="ax-media-area">
-                <video id="ax-video" playsinline style="width:100%;height:100%;display:none;"></video>
-                <audio id="ax-audio" style="display:none;"></audio>
-                <div class="ax-media-thumbnail" id="ax-thumbnail">
-                  <div style="font-size:72px;opacity:0.12;">◉</div>
-                </div>
-                <div class="ax-media-overlay"></div>
-                <!-- Now Playing overlay on player -->
-                <div class="ax-np-overlay" id="ax-np-overlay">
-                  <div class="ax-np-label" id="ax-np-label-text">NOW PLAYING</div>
-                  <div class="ax-np-title" id="ax-np-title">Connecting to network…</div>
-                  <div class="ax-np-artist" id="ax-np-artist"></div>
-                </div>
-                <!-- LIVE / COMMERCIAL badges -->
-                <div id="ax-one-viewer-live" style="display:none;position:absolute;top:10px;left:10px;z-index:10;background:rgba(255,45,85,0.92);color:#fff;font-size:10px;font-weight:900;letter-spacing:2px;padding:3px 8px;border-radius:4px;">● LIVE</div>
-                <div id="ax-one-viewer-comm" style="display:none;position:absolute;top:10px;right:10px;z-index:10;background:rgba(184,134,11,0.92);color:#fff;font-size:10px;font-weight:900;letter-spacing:1.5px;padding:3px 8px;border-radius:4px;">📢 COMMERCIAL BREAK</div>
-                <!-- Autoplay gate -->
-                <div class="ax-autoplay-gate" id="ax-gate">
-                  <div class="ax-gate-logo">
-                    <svg viewBox="0 0 64 64" fill="none" width="56" height="56">
-                      <polygon points="32,6 58,56 6,56" fill="none" stroke="#b8860b" stroke-width="1.5"/>
-                      <ellipse cx="32" cy="38" rx="13" ry="9" fill="none" stroke="#1e50ff" stroke-width="1.3"/>
-                      <circle cx="32" cy="38" r="2.5" fill="#1e50ff"/>
-                    </svg>
+              <!-- Fullscreen container — this is the element that enters fullscreen -->
+              <div id="ax-fs-container">
+                <div class="ax-media-area" id="ax-media-area">
+                  <video id="ax-video" playsinline style="width:100%;height:100%;display:none;"></video>
+                  <audio id="ax-audio" style="display:none;"></audio>
+                  <div class="ax-media-thumbnail" id="ax-thumbnail">
+                    <div style="font-size:72px;opacity:0.12;">◉</div>
                   </div>
-                  <div class="ax-gate-title">AURENIX</div>
-                  <div class="ax-gate-sub">Click to enter the broadcast</div>
-                  <button class="ax-gate-btn" id="ax-gate-btn">▶ ENTER BROADCAST</button>
+                  <div class="ax-media-overlay"></div>
+                  <!-- Now Playing overlay on player -->
+                  <div class="ax-np-overlay" id="ax-np-overlay">
+                    <div class="ax-np-label" id="ax-np-label-text">NOW PLAYING</div>
+                    <div class="ax-np-title" id="ax-np-title">Connecting to network…</div>
+                    <div class="ax-np-artist" id="ax-np-artist"></div>
+                  </div>
+                  <!-- LIVE / COMMERCIAL badges -->
+                  <div id="ax-one-viewer-live" style="display:none;position:absolute;top:10px;left:10px;z-index:10;background:rgba(255,45,85,0.92);color:#fff;font-size:10px;font-weight:900;letter-spacing:2px;padding:3px 8px;border-radius:4px;">● LIVE</div>
+                  <div id="ax-one-viewer-comm" style="display:none;position:absolute;top:10px;right:10px;z-index:10;background:rgba(184,134,11,0.92);color:#fff;font-size:10px;font-weight:900;letter-spacing:1.5px;padding:3px 8px;border-radius:4px;">📢 COMMERCIAL BREAK</div>
+                  <!-- Autoplay gate -->
+                  <div class="ax-autoplay-gate" id="ax-gate">
+                    <div class="ax-gate-logo">
+                      <svg viewBox="0 0 64 64" fill="none" width="56" height="56">
+                        <polygon points="32,6 58,56 6,56" fill="none" stroke="#b8860b" stroke-width="1.5"/>
+                        <ellipse cx="32" cy="38" rx="13" ry="9" fill="none" stroke="#1e50ff" stroke-width="1.3"/>
+                        <circle cx="32" cy="38" r="2.5" fill="#1e50ff"/>
+                      </svg>
+                    </div>
+                    <div class="ax-gate-title">AURENIX</div>
+                    <div class="ax-gate-sub">Click to enter the broadcast</div>
+                    <button class="ax-gate-btn" id="ax-gate-btn">▶ ENTER BROADCAST</button>
+                  </div>
+                  <!-- Fullscreen overlay controls (visible only in fullscreen) -->
+                  <div class="ax-fs-overlay" id="ax-fs-overlay">
+                    <div class="ax-fs-overlay-gradient"></div>
+                    <div class="ax-fs-ctrl-bar">
+                      <div class="ax-fs-progress-wrap">
+                        <div class="ax-fs-progress-bar" id="ax-fs-progress-bar">
+                          <div class="ax-fs-progress-fill" id="ax-fs-progress-fill"></div>
+                        </div>
+                        <div class="ax-fs-times">
+                          <span id="ax-fs-time-elapsed">0:00</span>
+                          <span id="ax-fs-time-total">—</span>
+                        </div>
+                      </div>
+                      <div class="ax-fs-btns">
+                        <button class="ax-fs-ctrl-btn" id="ax-fs-play-btn" title="Play / Pause" aria-label="Play / Pause">▶</button>
+                        <button class="ax-fs-ctrl-btn" id="ax-fs-mute-btn" title="Mute / Unmute" aria-label="Mute">🔊</button>
+                        <input type="range" class="ax-fs-vol-slider" id="ax-fs-vol-slider" min="0" max="1" step="0.02" value="0.8" aria-label="Volume">
+                        <div class="ax-fs-spacer"></div>
+                        <button class="ax-fs-ctrl-btn ax-fs-exit-btn" id="ax-fs-exit-btn" title="Exit fullscreen" aria-label="Exit fullscreen">
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="8 3 3 3 3 8"></polyline><polyline points="21 8 21 3 16 3"></polyline>
+                            <polyline points="3 16 3 21 8 21"></polyline><polyline points="16 21 21 21 21 16"></polyline>
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              </div>
 
-              <!-- Progress bar -->
-              <div class="ax-progress-wrap">
-                <div class="ax-progress-bar" id="ax-progress-bar">
-                  <div class="ax-progress-fill" id="ax-progress-fill"></div>
+                <!-- Progress bar (normal view) -->
+                <div class="ax-progress-wrap">
+                  <div class="ax-progress-bar" id="ax-progress-bar">
+                    <div class="ax-progress-fill" id="ax-progress-fill"></div>
+                  </div>
+                  <div class="ax-progress-times">
+                    <span id="ax-time-elapsed">0:00</span>
+                    <span id="ax-time-total">—</span>
+                    <span id="ax-time-remaining">—</span>
+                  </div>
                 </div>
-                <div class="ax-progress-times">
-                  <span id="ax-time-elapsed">0:00</span>
-                  <span id="ax-time-total">—</span>
-                  <span id="ax-time-remaining">—</span>
-                </div>
-              </div>
 
-              <!-- Controls -->
-              <div class="ax-controls">
-                <button class="ax-ctrl-btn primary" id="ax-play-btn" title="Play / Pause">▶</button>
-                <div class="ax-volume-wrap">
-                  <button class="ax-ctrl-btn" id="ax-mute-btn" title="Mute">🔊</button>
-                  <input type="range" class="ax-volume-slider" id="ax-vol-slider" min="0" max="1" step="0.02" value="0.8">
+                <!-- Controls (normal view) -->
+                <div class="ax-controls">
+                  <button class="ax-ctrl-btn primary" id="ax-play-btn" title="Play / Pause">▶</button>
+                  <div class="ax-volume-wrap">
+                    <button class="ax-ctrl-btn" id="ax-mute-btn" title="Mute">🔊</button>
+                    <input type="range" class="ax-volume-slider" id="ax-vol-slider" min="0" max="1" step="0.02" value="0.8">
+                  </div>
+                  <div class="ax-controls-spacer"></div>
+                  <button class="ax-ctrl-btn" id="ax-pip-btn" title="Picture-in-Picture" style="display:none;">⧉</button>
+                  <button class="ax-ctrl-btn" id="ax-fs-btn" title="Enter fullscreen" aria-label="Enter fullscreen">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline>
+                      <line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line>
+                    </svg>
+                  </button>
                 </div>
-                <div class="ax-controls-spacer"></div>
-                <button class="ax-ctrl-btn" id="ax-pip-btn" title="Picture-in-Picture" style="display:none;">⧉</button>
-                <button class="ax-ctrl-btn" id="ax-fs-btn" title="Fullscreen">⛶</button>
-              </div>
+              </div><!-- /#ax-fs-container -->
             </div>
           </div>
 
@@ -770,34 +805,156 @@ function _renderEPG(channelId) {
 /* ════════════════════════════════════
    PLAYER CONTROLS
 ════════════════════════════════════ */
+/* ── Fullscreen overlay auto-hide timer ── */
+let _fsHideTimer = null;
+
+function _showFsOverlay() {
+  const overlay = document.getElementById('ax-fs-overlay');
+  const container = document.getElementById('ax-fs-container');
+  if (!overlay) return;
+  overlay.classList.add('visible');
+  if (container) container.classList.remove('ax-fs-hide-cursor');
+  clearTimeout(_fsHideTimer);
+  _fsHideTimer = setTimeout(() => {
+    overlay.classList.remove('visible');
+    if (container) container.classList.add('ax-fs-hide-cursor');
+  }, 3000);
+}
+
+function _updateFsBtn() {
+  const btn = document.getElementById('ax-fs-btn');
+  if (!btn) return;
+  const isFs = !!document.fullscreenElement;
+  if (isFs) {
+    btn.title = 'Exit fullscreen';
+    btn.setAttribute('aria-label', 'Exit fullscreen');
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="8 3 3 3 3 8"></polyline><polyline points="21 8 21 3 16 3"></polyline>
+      <polyline points="3 16 3 21 8 21"></polyline><polyline points="16 21 21 21 21 16"></polyline>
+    </svg>`;
+  } else {
+    btn.title = 'Enter fullscreen';
+    btn.setAttribute('aria-label', 'Enter fullscreen');
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline>
+      <line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line>
+    </svg>`;
+  }
+}
+
+function _toggleFullscreen() {
+  const container = document.getElementById('ax-fs-container');
+  if (!container) return;
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  } else {
+    container.requestFullscreen().catch(() => {});
+  }
+}
+
 function _bindPlayerControls() {
   document.getElementById('ax-gate-btn')?.addEventListener('click', _enterBroadcast);
   document.getElementById('ax-media-area')?.addEventListener('click', (e) => {
     if (!_gateOpen) return;
     if (e.target.closest('#ax-gate')) return;
+    if (e.target.closest('.ax-fs-overlay')) return;
+    if (document.fullscreenElement) { _showFsOverlay(); return; }
     _togglePlayPause();
   });
   document.getElementById('ax-play-btn')?.addEventListener('click', _togglePlayPause);
 
+  // Normal-view volume controls
   const volSlider = document.getElementById('ax-vol-slider');
   volSlider?.addEventListener('input', () => {
     if (_mediaEl) _mediaEl.volume = parseFloat(volSlider.value);
-    _updateMuteBtn();
+    const fsVol = document.getElementById('ax-fs-vol-slider');
+    if (fsVol) fsVol.value = volSlider.value;
+    _updateMuteBtn(); _updateFsMuteBtn();
   });
   document.getElementById('ax-mute-btn')?.addEventListener('click', () => {
     if (_mediaEl) _mediaEl.muted = !_mediaEl.muted;
-    _updateMuteBtn();
+    _updateMuteBtn(); _updateFsMuteBtn();
   });
-  document.getElementById('ax-fs-btn')?.addEventListener('click', () => {
-    const area = document.getElementById('ax-media-area');
-    if (document.fullscreenElement) { document.exitFullscreen(); }
-    else { area?.requestFullscreen().catch(() => {}); }
-  });
+
+  // Normal-view fullscreen button
+  document.getElementById('ax-fs-btn')?.addEventListener('click', _toggleFullscreen);
+
+  // PiP button
   document.getElementById('ax-pip-btn')?.addEventListener('click', () => {
     const v = document.getElementById('ax-video');
     if (document.pictureInPictureElement) { document.exitPictureInPicture(); }
     else if (v && v.style.display !== 'none') { v.requestPictureInPicture().catch(() => {}); }
   });
+
+  // Fullscreen overlay controls
+  document.getElementById('ax-fs-play-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    _togglePlayPause();
+    _showFsOverlay();
+  });
+  document.getElementById('ax-fs-mute-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (_mediaEl) _mediaEl.muted = !_mediaEl.muted;
+    _updateMuteBtn(); _updateFsMuteBtn();
+    _showFsOverlay();
+  });
+  const fsVolSlider = document.getElementById('ax-fs-vol-slider');
+  fsVolSlider?.addEventListener('input', (e) => {
+    e.stopPropagation();
+    const v = parseFloat(fsVolSlider.value);
+    if (_mediaEl) _mediaEl.volume = v;
+    const normVol = document.getElementById('ax-vol-slider');
+    if (normVol) normVol.value = v;
+    _updateMuteBtn(); _updateFsMuteBtn();
+    _showFsOverlay();
+  });
+  document.getElementById('ax-fs-exit-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.exitFullscreen().catch(() => {});
+  });
+
+  // Show overlay on any interaction inside fullscreen container
+  const fsContainer = document.getElementById('ax-fs-container');
+  if (fsContainer) {
+    fsContainer.addEventListener('mousemove', () => {
+      if (document.fullscreenElement) _showFsOverlay();
+    });
+    fsContainer.addEventListener('touchstart', () => {
+      if (document.fullscreenElement) _showFsOverlay();
+    }, { passive: true });
+  }
+
+  // Fullscreen state change — single source of truth
+  document.addEventListener('fullscreenchange', () => {
+    const isFs = !!document.fullscreenElement;
+    const container = document.getElementById('ax-fs-container');
+    if (container) container.classList.toggle('ax-fs-active', isFs);
+    _updateFsBtn();
+    if (isFs) {
+      _showFsOverlay();
+      _syncFsOverlay();
+    } else {
+      clearTimeout(_fsHideTimer);
+      if (container) container.classList.remove('ax-fs-hide-cursor');
+    }
+  });
+}
+
+/* Sync fullscreen overlay with current play state */
+function _syncFsOverlay() {
+  const playBtn = document.getElementById('ax-fs-play-btn');
+  if (playBtn) playBtn.textContent = (_mediaEl && !_mediaEl.paused) ? '⏸' : '▶';
+  _updateFsMuteBtn();
+  // Sync volume slider
+  const fsVol = document.getElementById('ax-fs-vol-slider');
+  const normVol = document.getElementById('ax-vol-slider');
+  if (fsVol && normVol) fsVol.value = normVol.value;
+}
+
+function _updateFsMuteBtn() {
+  const btn = document.getElementById('ax-fs-mute-btn');
+  if (!btn || !_mediaEl) return;
+  btn.textContent = (_mediaEl.muted || _mediaEl.volume === 0) ? '🔇' : '🔊';
 }
 
 function _enterBroadcast() {
@@ -1019,9 +1176,11 @@ function _togglePlayPause() {
 }
 
 function _updatePlayBtn() {
+  const playing = _mediaEl && !_mediaEl.paused;
   const btn = document.getElementById('ax-play-btn');
-  if (!btn) return;
-  btn.textContent = (_mediaEl && !_mediaEl.paused) ? '⏸' : '▶';
+  if (btn) btn.textContent = playing ? '⏸' : '▶';
+  const fsBtn = document.getElementById('ax-fs-play-btn');
+  if (fsBtn) fsBtn.textContent = playing ? '⏸' : '▶';
 }
 
 function _updateMuteBtn() {
@@ -1057,11 +1216,18 @@ function _tick() {
   const panelTime= document.getElementById('ax-np-panel-time');
   const panelRemain = document.getElementById('ax-np-panel-remain');
 
+  const fsFill    = document.getElementById('ax-fs-progress-fill');
+  const fsElapsed = document.getElementById('ax-fs-time-elapsed');
+  const fsTotal   = document.getElementById('ax-fs-time-total');
+
   if (dur > 0) {
     const pct = Math.min(100, (elapsed / dur) * 100);
     if (fill)      fill.style.width     = pct + '%';
+    if (fsFill)    fsFill.style.width   = pct + '%';
     if (elapsedEl) elapsedEl.textContent = _fmtTime(elapsed);
+    if (fsElapsed) fsElapsed.textContent = _fmtTime(elapsed);
     if (totalEl)   totalEl.textContent   = _fmtTime(dur);
+    if (fsTotal)   fsTotal.textContent   = _fmtTime(dur);
     if (remainEl)  remainEl.textContent  = '-' + _fmtTime(Math.max(0, dur - elapsed));
     if (panelTime) panelTime.textContent = _fmtTime(elapsed) + ' / ' + _fmtTime(dur);
     if (panelRemain) panelRemain.textContent = _fmtTime(Math.max(0, dur - elapsed)) + ' remaining';
@@ -1069,8 +1235,11 @@ function _tick() {
     if (elapsed >= dur - 0.5 && !_advancing) _advance(st);
   } else {
     if (fill)      fill.style.width     = '0%';
+    if (fsFill)    fsFill.style.width   = '0%';
     if (elapsedEl) elapsedEl.textContent = _fmtTime(elapsed);
+    if (fsElapsed) fsElapsed.textContent = _fmtTime(elapsed);
     if (totalEl)   totalEl.textContent   = '—';
+    if (fsTotal)   fsTotal.textContent   = '—';
     if (remainEl)  remainEl.textContent  = '—';
     if (panelTime) panelTime.textContent = _fmtTime(elapsed) + ' / —';
     if (panelRemain) panelRemain.textContent = '';

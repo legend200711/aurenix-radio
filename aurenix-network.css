@@ -2438,3 +2438,235 @@ body {
   .ax-volume-slider { display: none; }
   .ax-nav-btn { font-size: 10px; padding: 5px 10px; }
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   AURENIX TRUE FULLSCREEN PLAYER
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── Fullscreen container (normal state) ── */
+#ax-fs-container {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Fullscreen container (fullscreen state) ── */
+#ax-fs-container:fullscreen,
+#ax-fs-container:-webkit-full-screen,
+#ax-fs-container:-moz-full-screen,
+#ax-fs-container:-ms-fullscreen {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100dvh;
+  background: #000;
+  overflow: hidden;
+}
+
+/* In fullscreen: video area fills all remaining space */
+#ax-fs-container.ax-fs-active .ax-media-area,
+#ax-fs-container:fullscreen .ax-media-area,
+#ax-fs-container:-webkit-full-screen .ax-media-area {
+  flex: 1;
+  aspect-ratio: unset;
+  height: 0; /* overridden by flex: 1 */
+}
+
+/* In fullscreen: video fills the whole area with letterbox */
+#ax-fs-container.ax-fs-active .ax-media-area video,
+#ax-fs-container:fullscreen .ax-media-area video,
+#ax-fs-container:-webkit-full-screen .ax-media-area video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block !important;
+}
+
+/* In fullscreen: hide the normal progress bar and controls */
+#ax-fs-container.ax-fs-active .ax-progress-wrap,
+#ax-fs-container.ax-fs-active .ax-controls,
+#ax-fs-container:fullscreen .ax-progress-wrap,
+#ax-fs-container:fullscreen .ax-controls,
+#ax-fs-container:-webkit-full-screen .ax-progress-wrap,
+#ax-fs-container:-webkit-full-screen .ax-controls {
+  display: none;
+}
+
+/* ── Auto-hide cursor in fullscreen when idle ── */
+#ax-fs-container.ax-fs-hide-cursor,
+#ax-fs-container.ax-fs-hide-cursor * {
+  cursor: none !important;
+}
+
+/* ── Fullscreen overlay controls ── */
+.ax-fs-overlay {
+  display: none; /* hidden in normal view */
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  z-index: 20;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+  pointer-events: none;
+}
+
+/* Only show inside fullscreen */
+#ax-fs-container.ax-fs-active .ax-fs-overlay,
+#ax-fs-container:fullscreen .ax-fs-overlay,
+#ax-fs-container:-webkit-full-screen .ax-fs-overlay {
+  display: block;
+}
+
+.ax-fs-overlay.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ax-fs-overlay-gradient {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 160px;
+  background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, transparent 100%);
+  pointer-events: none;
+}
+
+.ax-fs-ctrl-bar {
+  position: relative;
+  padding: 12px 16px 16px;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Fullscreen progress bar */
+.ax-fs-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ax-fs-progress-bar {
+  height: 4px;
+  background: rgba(255,255,255,0.25);
+  border-radius: 2px;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.ax-fs-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #1e50ff, #00c9c0);
+  border-radius: 2px;
+  transition: width 0.8s linear;
+  width: 0%;
+}
+
+.ax-fs-times {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: rgba(255,255,255,0.75);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Fullscreen button row */
+.ax-fs-btns {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ax-fs-ctrl-btn {
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: rgba(255,255,255,0.1);
+  color: #fff;
+  font-size: 17px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+  padding: 0 10px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  flex-shrink: 0;
+}
+
+.ax-fs-ctrl-btn:hover,
+.ax-fs-ctrl-btn:focus {
+  background: rgba(255,255,255,0.2);
+  outline: none;
+}
+
+.ax-fs-ctrl-btn:active {
+  background: rgba(30,80,255,0.5);
+}
+
+/* Exit fullscreen button — slightly more prominent */
+.ax-fs-exit-btn {
+  min-width: 44px;
+  min-height: 44px;
+  background: rgba(30,80,255,0.2);
+  border: 1px solid rgba(30,80,255,0.5);
+}
+
+.ax-fs-exit-btn:hover {
+  background: rgba(30,80,255,0.4);
+}
+
+.ax-fs-spacer { flex: 1; }
+
+/* Fullscreen volume slider */
+.ax-fs-vol-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.25);
+  outline: none;
+  width: 90px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ax-fs-vol-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  cursor: pointer;
+}
+
+.ax-fs-vol-slider::-moz-range-thumb {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  cursor: pointer;
+  border: none;
+}
+
+/* ── Thumbnail display in fullscreen (audio) ── */
+#ax-fs-container.ax-fs-active .ax-media-thumbnail,
+#ax-fs-container:fullscreen .ax-media-thumbnail {
+  position: absolute;
+  inset: 0;
+}
+
+/* ── Now-playing overlay: move up from bottom when in fullscreen so controls don't overlap ── */
+#ax-fs-container.ax-fs-active .ax-np-overlay,
+#ax-fs-container:fullscreen .ax-np-overlay {
+  bottom: 120px;
+}
+
+/* ── Mobile: larger touch targets in fullscreen ── */
+@media (max-width: 600px) {
+  .ax-fs-ctrl-btn {
+    min-width: 48px;
+    min-height: 48px;
+    font-size: 19px;
+  }
+  .ax-fs-vol-slider { width: 70px; }
+  .ax-fs-ctrl-bar { padding: 10px 12px max(14px, env(safe-area-inset-bottom)); }
+}
