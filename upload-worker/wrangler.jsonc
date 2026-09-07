@@ -29,6 +29,10 @@
   //   npx wrangler secret put GOOGLE_REDIRECT_URI
   //     → enter: https://aurenix-upload.nthntjrn.workers.dev/gdrive/callback
   //     ✓ Already configured — subdomain: nthntjrn
+  //     ⚠ This value MUST be registered in Google Cloud → OAuth client → Authorized redirect URIs.
+  //       The downloaded client_secret JSON contained an old URI (upload.nshmjs.workers.dev) —
+  //       that is WRONG.  The Google Cloud Console entry must be:
+  //         https://aurenix-upload.nthntjrn.workers.dev/gdrive/callback
   //
   // ══════════════════════════════════════════════════════════
   //  KV NAMESPACE — Google Drive token storage (new)

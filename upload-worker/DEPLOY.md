@@ -33,23 +33,43 @@ A Cloudflare Worker that acts as a secure bridge between Firebase Auth, Supabase
 
 ## ⚠️ ACTION REQUIRED — Google Cloud Console
 
-The OAuth redirect URI registered in Google Cloud Console must match the Worker URL exactly.
+### ━━ CONFIRMED REDIRECT_URI_MISMATCH ━━
 
-**Go to [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials → your OAuth 2.0 client → Edit**
+| | Value |
+|---|---|
+| **AURENIX is sending** | `https://aurenix-upload.nthntjrn.workers.dev/gdrive/callback` |
+| **Google Cloud currently has** | `https://upload.nshmjs.workers.dev/gdrive/callback` |
 
-Under **Authorized redirect URIs**, add:
+These are **two completely different Worker hostnames** — this is the exact cause of the `redirect_uri_mismatch` error.
+
+### Required fix — Google Cloud Console
+
+**Go to:**
+> [Google Cloud Console](https://console.cloud.google.com/)
+> → Google Auth Platform → Clients → AURENIX Google Drive OAuth Client
+> → Edit → Authorized redirect URIs
+
+**Remove** (or replace) the old entry:
+```
+https://upload.nshmjs.workers.dev/gdrive/callback
+```
+
+**Add** this exact URI:
 ```
 https://aurenix-upload.nthntjrn.workers.dev/gdrive/callback
 ```
 
-⚠️ The downloaded JSON contained `https://upload.nshmjs.workers.dev/gdrive/callback` — this was from a different Worker URL and will cause a `redirect_uri_mismatch` error. **Add the correct URL above** (or replace the old one).
+No trailing slash. Exact case. Click **Save**.
 
-Also confirm under **Authorized JavaScript origins**:
+### Authorized JavaScript origins (verify, do NOT add a path)
+
 ```
 https://legend200711.github.io
 https://remix-studio-4bf8a.web.app
 https://remix-studio-4bf8a.firebaseapp.com
 ```
+
+> ⚠ JavaScript origins must be the bare origin only — no `/gdrive/callback` or any path.
 
 ---
 

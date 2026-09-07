@@ -72,6 +72,7 @@ const BUCKET_FILE_SIZE_LIMIT_BYTES = 524_288_000; // 500 MiB
 /* ─── CORS ────────────────────────────────────────────────────────────────── */
 function corsHeaders(origin) {
   const allowed = [
+    'https://legend200711.github.io',            // AURENIX production frontend
     'https://remix-studio-4bf8a.web.app',
     'https://remix-studio-4bf8a.firebaseapp.com',
     'https://aurenix.com',

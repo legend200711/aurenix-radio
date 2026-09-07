@@ -239,6 +239,27 @@ export async function handleGdriveAuth(request, env, json) {
   const secretErr = checkDriveSecrets(env);
   if (secretErr) return json({ error: secretErr, stage: 'GDRIVE_CONFIG_MISSING' }, 503);
 
+  // ── GOOGLE OAUTH DEBUG ────────────────────────────────────────────────────
+  // Safe identifiers only — client secret, tokens, and full client ID are
+  // NEVER logged.  The last 12 chars of the client ID are enough to confirm
+  // which OAuth credential is in use without exposing the full value.
+  const clientIdSuffix = env.GOOGLE_CLIENT_ID
+    ? '…' + env.GOOGLE_CLIENT_ID.slice(-12)
+    : '(not set)';
+  const workerOrigin = new URL(request.url).origin; // e.g. https://aurenix-upload.nthntjrn.workers.dev
+  console.log(
+    '[GOOGLE OAUTH DEBUG]',
+    JSON.stringify({
+      label:          'GOOGLE OAUTH DEBUG',
+      client_id:      clientIdSuffix,          // safe: last 12 chars only
+      redirect_uri:   env.GOOGLE_REDIRECT_URI, // exact URI sent to Google
+      environment:    workerOrigin.includes('localhost') ? 'development' : 'production',
+      worker_endpoint: workerOrigin + '/gdrive/auth',
+      note:           'redirect_uri must match EXACTLY one Authorized redirect URI in Google Cloud → OAuth client',
+    })
+  );
+  // ─────────────────────────────────────────────────────────────────────────
+
   const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   authUrl.searchParams.set('client_id',     env.GOOGLE_CLIENT_ID);
   authUrl.searchParams.set('redirect_uri',  env.GOOGLE_REDIRECT_URI);
