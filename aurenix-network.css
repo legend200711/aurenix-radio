@@ -1839,3 +1839,211 @@ body {
   .ax-auth-card { padding: 28px 20px; gap: 14px; }
   .ax-auth-screen { gap: 24px; padding: 32px 16px 48px; }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   AURENIX ONE — LIVE TV ENGINE  (Founder Studio + Viewer)
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── FOUNDER STUDIO: AURENIX ONE pane layout ── */
+.ax-one-section-label {
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin: 18px 0 8px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+/* Status bar */
+.ax-one-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin-bottom: 16px;
+}
+.ax-one-status-live {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  color: var(--text);
+  text-transform: uppercase;
+}
+.ax-one-live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+.ax-one-live-dot.live {
+  background: var(--red);
+  box-shadow: 0 0 6px var(--red-glow);
+  animation: ax-one-pulse 1.2s ease-in-out infinite;
+}
+@keyframes ax-one-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
+/* Control buttons grid */
+.ax-one-controls-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ax-one-ctrl-btn {
+  padding: 10px 14px;
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+.ax-one-ctrl-btn:hover {
+  background: var(--surface-mid);
+  border-color: var(--blue-bright);
+  color: var(--blue-bright);
+}
+.ax-one-btn-start {
+  background: rgba(0, 230, 118, 0.12);
+  border-color: rgba(0, 230, 118, 0.35);
+  color: var(--green);
+}
+.ax-one-btn-start:hover {
+  background: rgba(0, 230, 118, 0.2);
+  border-color: var(--green);
+}
+.ax-one-btn-stop {
+  background: rgba(255, 45, 85, 0.10);
+  border-color: rgba(255, 45, 85, 0.3);
+  color: var(--red);
+}
+.ax-one-btn-stop:hover {
+  background: rgba(255, 45, 85, 0.2);
+  border-color: var(--red);
+}
+
+/* On-air / up-next cards */
+.ax-one-on-air-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+@media (max-width: 680px) {
+  .ax-one-on-air-grid { grid-template-columns: 1fr; }
+}
+.ax-one-now-card,
+.ax-one-upnext-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+}
+.ax-one-now-card {
+  border-color: var(--rim-bright);
+}
+.ax-one-card-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 2.5px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+.ax-one-now-title {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.3;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ax-one-now-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+.ax-one-progress-wrap {
+  margin-top: 8px;
+}
+.ax-one-progress-bar {
+  height: 4px;
+  background: var(--surface-hi);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.ax-one-progress-fill {
+  height: 100%;
+  background: var(--blue);
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.6s linear;
+}
+.ax-one-progress-times {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Commercial frequency buttons */
+.ax-one-freq-grid {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ax-one-freq-btn {
+  padding: 7px 18px;
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.ax-one-freq-btn:hover {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+.ax-one-freq-btn.active {
+  background: rgba(184,134,11,0.15);
+  border-color: var(--gold);
+  color: var(--gold-bright);
+}
+
+/* Settings grid */
+.ax-one-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}

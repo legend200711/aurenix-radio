@@ -25,6 +25,22 @@ import {
   query, orderBy, where, limit,
 } from './firebase-client.js';
 
+import {
+  ONE_CHANNEL_ID,
+  COMMERCIAL_FREQ,
+  startOneEngine,
+  stopOneEngine,
+  pauseOneEngine,
+  resumeOneEngine,
+  forceCommercialBreak,
+  skipCurrentProgram as oneSkipProgram,
+  updateMediaLib as oneUpdateMedia,
+  saveOneConfig,
+  getOneConfig,
+  getOneHistory,
+  getOneState,
+} from './aurenix-one-engine.js';
+
 // Supabase client is used ONLY for the delete action (anon DELETE policy
 // on storage.objects is kept intentionally). Uploads go through the
 // Cloudflare Worker instead — supabase is not used for INSERT here.
@@ -102,6 +118,9 @@ let _uploadCategory  = 'music';
 let _pendingMeta     = {};   // fileKey → metadata fields
 let _activePane      = 'dashboard';
 let _broadcastTarget = null; // { channelId, mediaId, mode }
+let _oneEngineRunning = false;
+let _oneConfigUnsub   = null;
+let _oneStateUnsub    = null;
 
 /* ═══════════════════════════════════════
    ENTRY POINT
@@ -166,6 +185,9 @@ export function mountControl(user, isAdmin) {
 
     _subscribeMedia();
     _subscribeSubmissions();
+
+    // AURENIX ONE engine pane
+    _bindOnePane();
 
     // Bind nav
     ctrl.querySelectorAll('.ax-ctrl-nav-btn').forEach(btn => {
@@ -331,6 +353,9 @@ function _buildFounderHTML() {
       <span class="ax-ctrl-nav-icon">🎬</span> Video Library
     </button>
     <div class="ax-ctrl-section-label">BROADCAST</div>
+    <button class="ax-ctrl-nav-btn" data-pane="aurenix-one">
+      <span class="ax-ctrl-nav-icon">🔴</span> AURENIX ONE <span id="ax-one-engine-badge" style="display:none;background:var(--red);color:#fff;border-radius:10px;padding:1px 6px;font-size:9px;margin-left:4px;font-weight:900;letter-spacing:0.5px;">LIVE</span>
+    </button>
     <button class="ax-ctrl-nav-btn" data-pane="channels">
       <span class="ax-ctrl-nav-icon">📺</span> Channel Manager
     </button>
@@ -483,6 +508,109 @@ function _buildFounderHTML() {
       <div class="ax-lib-grid" id="ax-video-lib-grid">
         <div class="ax-empty"><div class="ax-empty-icon">🎬</div><div class="ax-empty-title">Loading…</div></div>
       </div>
+    </div>
+
+    <!-- ══ AURENIX ONE — LIVE TV ENGINE ══ -->
+    <div class="ax-ctrl-pane" id="ax-pane-aurenix-one">
+      <div class="ax-section-title">🔴 AURENIX <span>ONE</span></div>
+
+      <!-- Status Bar -->
+      <div class="ax-one-status-bar" id="ax-one-status-bar">
+        <div class="ax-one-status-live" id="ax-one-status-live">
+          <span class="ax-one-live-dot" id="ax-one-live-dot"></span>
+          <span id="ax-one-status-text">CHANNEL OFFLINE</span>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);" id="ax-one-engine-state">Engine not started</div>
+      </div>
+
+      <!-- Engine Controls -->
+      <div class="ax-one-section-label">LIVE CHANNEL CONTROL</div>
+      <div class="ax-one-controls-grid">
+        <button class="ax-one-ctrl-btn ax-one-btn-start" id="ax-one-start-btn">▶ START CHANNEL</button>
+        <button class="ax-one-ctrl-btn ax-one-btn-stop"  id="ax-one-stop-btn">■ STOP CHANNEL</button>
+        <button class="ax-one-ctrl-btn" id="ax-one-pause-btn">⏸ PAUSE BROADCAST</button>
+        <button class="ax-one-ctrl-btn" id="ax-one-resume-btn">▶ RESUME BROADCAST</button>
+        <button class="ax-one-ctrl-btn" id="ax-one-skip-btn">⏭ SKIP CURRENT PROGRAM</button>
+        <button class="ax-one-ctrl-btn" id="ax-one-force-comm-btn">📢 FORCE COMMERCIAL BREAK</button>
+      </div>
+
+      <!-- Now Playing / Up Next -->
+      <div class="ax-one-section-label">ON AIR</div>
+      <div class="ax-one-on-air-grid">
+        <div class="ax-one-now-card">
+          <div class="ax-one-card-label"><span class="ax-one-live-dot"></span> NOW PLAYING</div>
+          <div class="ax-one-now-title" id="ax-one-now-title">—</div>
+          <div class="ax-one-now-meta"  id="ax-one-now-meta">No broadcast active</div>
+          <div class="ax-one-progress-wrap">
+            <div class="ax-one-progress-bar">
+              <div class="ax-one-progress-fill" id="ax-one-progress-fill"></div>
+            </div>
+            <div class="ax-one-progress-times">
+              <span id="ax-one-elapsed">0:00</span>
+              <span id="ax-one-remain">—</span>
+            </div>
+          </div>
+          <div class="ax-one-comm-indicator" id="ax-one-comm-indicator" style="display:none;">
+            <span style="color:var(--gold);font-weight:700;font-size:11px;letter-spacing:1px;">📢 COMMERCIAL BREAK</span>
+          </div>
+        </div>
+        <div class="ax-one-upnext-card">
+          <div class="ax-one-card-label">UP NEXT</div>
+          <div class="ax-one-now-title" id="ax-one-next-title">—</div>
+          <div class="ax-one-now-meta"  id="ax-one-next-meta"></div>
+        </div>
+      </div>
+
+      <!-- Broadcast History -->
+      <div class="ax-one-section-label" style="margin-top:20px;display:flex;align-items:center;justify-content:space-between;">
+        <span>BROADCAST HISTORY</span>
+        <button class="ax-btn-sm" id="ax-one-refresh-hist">↺ Refresh</button>
+      </div>
+      <div id="ax-one-history-list" style="margin-bottom:20px;">
+        <div style="color:var(--text-dim);font-size:12px;">History will appear here.</div>
+      </div>
+
+      <!-- Commercial Frequency -->
+      <div class="ax-one-section-label">COMMERCIAL FREQUENCY</div>
+      <div class="ax-one-freq-grid">
+        <button class="ax-one-freq-btn" data-freq="off">OFF</button>
+        <button class="ax-one-freq-btn" data-freq="low">LOW</button>
+        <button class="ax-one-freq-btn active" data-freq="normal">NORMAL</button>
+        <button class="ax-one-freq-btn" data-freq="high">HIGH</button>
+      </div>
+
+      <!-- Custom Frequency Settings -->
+      <div class="ax-one-settings-grid" style="margin-top:14px;">
+        <div class="ax-field-group">
+          <label class="ax-field-label">Min programs between breaks</label>
+          <input class="ax-field-input" type="number" id="ax-one-min-prog" min="1" max="99" value="2">
+        </div>
+        <div class="ax-field-group">
+          <label class="ax-field-label">Max programs between breaks</label>
+          <input class="ax-field-input" type="number" id="ax-one-max-prog" min="1" max="99" value="4">
+        </div>
+        <div class="ax-field-group">
+          <label class="ax-field-label">Min commercials per break</label>
+          <input class="ax-field-input" type="number" id="ax-one-min-spots" min="0" max="10" value="1">
+        </div>
+        <div class="ax-field-group">
+          <label class="ax-field-label">Max commercials per break</label>
+          <input class="ax-field-input" type="number" id="ax-one-max-spots" min="0" max="10" value="2">
+        </div>
+        <div class="ax-field-group">
+          <label class="ax-field-label">Avoid-repeat window (# items)</label>
+          <input class="ax-field-input" type="number" id="ax-one-repeat-window" min="0" max="100" value="10">
+        </div>
+      </div>
+      <button class="ax-btn-sm" id="ax-one-save-settings" style="margin-top:10px;">💾 Save Commercial Settings</button>
+
+      <!-- Eligible Content Categories -->
+      <div class="ax-one-section-label" style="margin-top:20px;">ELIGIBLE CONTENT TYPES</div>
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px;">
+        Only Founder-approved media of these types can play on AURENIX ONE.
+        Commercials use a separate pool (promo/trailer/station_id).
+      </div>
+      <div id="ax-one-pool-info" style="font-size:12px;color:var(--text-dim);">Loading pool info…</div>
     </div>
 
     <!-- ══ CHANNEL MANAGER ══ -->
@@ -725,6 +853,265 @@ function _buildFounderHTML() {
 /* ═══════════════════════════════════════
    SUBSCRIPTIONS
 ═══════════════════════════════════════ */
+
+/* ═══════════════════════════════════════
+   AURENIX ONE — FOUNDER STUDIO PANE
+═══════════════════════════════════════ */
+let _oneTickTimer    = null;
+let _oneCurrentFreq  = 'normal';
+
+function _bindOnePane() {
+  // Start Channel
+  document.getElementById('ax-one-start-btn')?.addEventListener('click', async () => {
+    const approvedLib = _mediaLib.filter(m => m.status === 'approved');
+    if (!approvedLib.length) { _toast('No approved media — approve content first.', 'err'); return; }
+    try {
+      await startOneEngine(_mediaLib);
+      _oneEngineRunning = true;
+      _updateOneBadge(true);
+      _renderOneStatus(true, false);
+      _startOneTick();
+      _toast('AURENIX ONE channel started.');
+    } catch (e) { _toast('Start failed: ' + e.message, 'err'); }
+  });
+
+  // Stop Channel
+  document.getElementById('ax-one-stop-btn')?.addEventListener('click', async () => {
+    if (!confirm('Stop AURENIX ONE? The channel will go dark for all viewers.')) return;
+    try {
+      await stopOneEngine();
+      _oneEngineRunning = false;
+      _stopOneTick();
+      _updateOneBadge(false);
+      _renderOneStatus(false, false);
+      _toast('AURENIX ONE stopped.');
+    } catch (e) { _toast('Stop failed: ' + e.message, 'err'); }
+  });
+
+  // Pause
+  document.getElementById('ax-one-pause-btn')?.addEventListener('click', async () => {
+    try {
+      await pauseOneEngine();
+      _renderOneStatus(true, true);
+      _toast('AURENIX ONE paused.');
+    } catch (e) { _toast('Pause failed: ' + e.message, 'err'); }
+  });
+
+  // Resume
+  document.getElementById('ax-one-resume-btn')?.addEventListener('click', async () => {
+    try {
+      await resumeOneEngine();
+      _renderOneStatus(true, false);
+      _toast('AURENIX ONE resumed.');
+    } catch (e) { _toast('Resume failed: ' + e.message, 'err'); }
+  });
+
+  // Skip
+  document.getElementById('ax-one-skip-btn')?.addEventListener('click', async () => {
+    try {
+      await oneSkipProgram();
+      _toast('Skipped — loading next program…');
+    } catch (e) { _toast('Skip failed: ' + e.message, 'err'); }
+  });
+
+  // Force commercial break
+  document.getElementById('ax-one-force-comm-btn')?.addEventListener('click', async () => {
+    try {
+      const ok = await forceCommercialBreak();
+      _toast(ok ? '📢 Commercial break started.' : 'No commercials available yet.', ok ? '' : 'err');
+    } catch (e) { _toast('Force break failed: ' + e.message, 'err'); }
+  });
+
+  // Refresh broadcast history
+  document.getElementById('ax-one-refresh-hist')?.addEventListener('click', _renderOneHistory);
+
+  // Commercial frequency buttons
+  document.querySelectorAll('.ax-one-freq-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      document.querySelectorAll('.ax-one-freq-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      _oneCurrentFreq = btn.dataset.freq;
+      const freq = COMMERCIAL_FREQ[_oneCurrentFreq] || COMMERCIAL_FREQ.normal;
+      // Update input fields
+      const minProg = document.getElementById('ax-one-min-prog');
+      const maxProg = document.getElementById('ax-one-max-prog');
+      const minSpot = document.getElementById('ax-one-min-spots');
+      const maxSpot = document.getElementById('ax-one-max-spots');
+      if (minProg) minProg.value = freq.minPrograms === 999 ? 0 : freq.minPrograms;
+      if (maxProg) maxProg.value = freq.maxPrograms === 999 ? 0 : freq.maxPrograms;
+      if (minSpot) minSpot.value = freq.minSpot;
+      if (maxSpot) maxSpot.value = freq.maxSpot;
+    });
+  });
+
+  // Save settings
+  document.getElementById('ax-one-save-settings')?.addEventListener('click', async () => {
+    const updates = {
+      commercial_freq:       _oneCurrentFreq,
+      min_programs:          parseInt(document.getElementById('ax-one-min-prog')?.value) || 2,
+      max_programs:          parseInt(document.getElementById('ax-one-max-prog')?.value) || 4,
+      min_spots:             parseInt(document.getElementById('ax-one-min-spots')?.value) || 1,
+      max_spots:             parseInt(document.getElementById('ax-one-max-spots')?.value) || 2,
+      avoid_repeat_window:   parseInt(document.getElementById('ax-one-repeat-window')?.value) || 10,
+    };
+    try {
+      await saveOneConfig(updates);
+      _toast('AURENIX ONE settings saved.');
+    } catch (e) { _toast('Save failed: ' + e.message, 'err'); }
+  });
+
+  // Subscribe to A1 state for the on-air panel
+  _subscribeOneStateForPanel();
+
+  // Initial renders
+  _renderOnePoolInfo();
+  _renderOneHistory();
+}
+
+/** Subscribe to network_state/A1 to update the on-air panel in real time. */
+function _subscribeOneStateForPanel() {
+  if (_oneStateUnsub) return;
+  const stateRef = doc(db, 'network_state', ONE_CHANNEL_ID);
+  _oneStateUnsub = onSnapshot(stateRef, snap => {
+    if (!snap.exists()) return;
+    const st = snap.data();
+    const cur = st?.current_item;
+    const isComm = !!(st?.is_commercial);
+
+    const titleEl   = document.getElementById('ax-one-now-title');
+    const metaEl    = document.getElementById('ax-one-now-meta');
+    const commEl    = document.getElementById('ax-one-comm-indicator');
+    const nextTitle = document.getElementById('ax-one-next-title');
+    const nextMeta  = document.getElementById('ax-one-next-meta');
+
+    if (titleEl) titleEl.textContent = cur ? cur.title : '—';
+    if (metaEl)  metaEl.textContent  = cur ? (cur.artist || cur.type || 'media') : 'No broadcast active';
+    if (commEl)  commEl.style.display = isComm ? '' : 'none';
+
+    // "Up next" — if commercial_queue has items show first; else nothing known yet
+    const commQ = st?.commercial_queue || [];
+    if (nextTitle) {
+      if (isComm && commQ.length > 0) {
+        nextTitle.textContent = commQ[0].title;
+        if (nextMeta) nextMeta.textContent = 'Commercial';
+      } else if (isComm) {
+        nextTitle.textContent = 'Program (auto-selected)';
+        if (nextMeta) nextMeta.textContent = 'After commercial break';
+      } else {
+        nextTitle.textContent = 'Auto-selected next';
+        if (nextMeta) nextMeta.textContent = 'Random from approved pool';
+      }
+    }
+
+    // Status bar
+    const isRunning = !!(cur);
+    _renderOneStatus(isRunning, false);
+    _updateOneBadge(isRunning);
+  });
+}
+
+function _renderOneStatus(running, paused) {
+  const dotEl    = document.getElementById('ax-one-live-dot');
+  const textEl   = document.getElementById('ax-one-status-text');
+  const stateEl  = document.getElementById('ax-one-engine-state');
+  if (dotEl)  dotEl.className  = `ax-one-live-dot ${running && !paused ? 'live' : ''}`;
+  if (textEl) textEl.textContent = paused ? 'PAUSED' : (running ? 'BROADCASTING' : 'CHANNEL OFFLINE');
+  if (stateEl) stateEl.textContent = _oneEngineRunning
+    ? (paused ? 'Engine active — paused' : 'Engine running — 24/7 mode')
+    : 'Engine not started — click START CHANNEL';
+}
+
+function _updateOneBadge(live) {
+  const badge = document.getElementById('ax-one-engine-badge');
+  if (badge) badge.style.display = live ? '' : 'none';
+}
+
+function _startOneTick() {
+  if (_oneTickTimer) return;
+  _oneTickTimer = setInterval(_oneTickFn, 800);
+}
+
+function _stopOneTick() {
+  if (_oneTickTimer) { clearInterval(_oneTickTimer); _oneTickTimer = null; }
+}
+
+function _oneTickFn() {
+  const st  = _channelStates[ONE_CHANNEL_ID];
+  const cur = st?.current_item;
+  if (!cur) return;
+
+  const startedAt = st.started_at?.toMillis?.() || Date.now();
+  const elapsed   = (Date.now() - startedAt) / 1000;
+  const dur       = cur.duration_sec || 0;
+
+  const fill    = document.getElementById('ax-one-progress-fill');
+  const elapsed_ = document.getElementById('ax-one-elapsed');
+  const remain  = document.getElementById('ax-one-remain');
+
+  if (dur > 0) {
+    const pct = Math.min(100, (elapsed / dur) * 100);
+    if (fill)    fill.style.width    = pct + '%';
+    if (elapsed_) elapsed_.textContent = _fmtTime(elapsed);
+    if (remain)  remain.textContent  = '-' + _fmtTime(Math.max(0, dur - elapsed));
+  } else {
+    if (fill)    fill.style.width    = '0%';
+    if (elapsed_) elapsed_.textContent = _fmtTime(elapsed);
+    if (remain)  remain.textContent  = '—';
+  }
+}
+
+async function _renderOneHistory() {
+  const listEl = document.getElementById('ax-one-history-list');
+  if (!listEl) return;
+  try {
+    const history = await getOneHistory();
+    if (!history.length) {
+      listEl.innerHTML = '<div style="color:var(--text-dim);font-size:12px;">No broadcast history yet.</div>';
+      return;
+    }
+    // Look up titles from the library
+    const rows = history.slice().reverse().map((id, i) => {
+      const item = _mediaLib.find(m => m.id === id);
+      return `
+        <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);">
+          <span style="font-size:10px;color:var(--text-muted);min-width:22px;text-align:right;">${history.length - i}</span>
+          <span style="font-size:13px;">${_typeIcon(item?.type)}</span>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+              ${_esc(item?.title || id)}
+            </div>
+            <div style="font-size:10px;color:var(--text-dim);">${_esc(item?.type || '—')}</div>
+          </div>
+        </div>`;
+    });
+    listEl.innerHTML = rows.join('');
+  } catch (e) {
+    listEl.innerHTML = `<div style="color:var(--text-dim);font-size:12px;">Could not load history: ${_esc(e.message)}</div>`;
+  }
+}
+
+function _renderOnePoolInfo() {
+  const el = document.getElementById('ax-one-pool-info');
+  if (!el) return;
+  const approved = _mediaLib.filter(m => m.status === 'approved');
+  const PROG_TYPES = ['video','music_video','show','broadcast_clip','audio_program','podcast','station_id','archive','trailer','audio','music'];
+  const COMM_TYPES = ['commercial','promo','trailer','station_id'];
+  const programs    = approved.filter(m => PROG_TYPES.includes(m.type));
+  const commercials = approved.filter(m => COMM_TYPES.includes(m.type));
+  el.innerHTML = `
+    <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:8px;">
+      <div><span style="font-size:18px;font-weight:900;color:var(--blue-bright);">${programs.length}</span>
+           <span style="font-size:11px;color:var(--text-dim);margin-left:4px;">Programs eligible</span></div>
+      <div><span style="font-size:18px;font-weight:900;color:var(--gold);">${commercials.length}</span>
+           <span style="font-size:11px;color:var(--text-dim);margin-left:4px;">Commercials available</span></div>
+      <div><span style="font-size:18px;font-weight:900;color:var(--green);">${approved.length}</span>
+           <span style="font-size:11px;color:var(--text-dim);margin-left:4px;">Total approved</span></div>
+    </div>
+    ${programs.length === 0 ? '<div style="color:var(--orange,#f0a500);font-size:12px;">⚠ No eligible programs — approve media in Pending Approval first.</div>' : ''}
+    ${commercials.length === 0 ? '<div style="color:var(--text-dim);font-size:11px;margin-top:4px;">No commercials/promos — commercial breaks will be skipped.</div>' : ''}`;
+}
+
+
 function _subscribeChannelState(channelId) {
   if (_stateUnsubs[channelId]) return;
   _stateUnsubs[channelId] = onSnapshot(doc(db, 'network_state', channelId), snap => {
@@ -751,6 +1138,9 @@ function _subscribeMedia() {
     _renderDashboardRecent();
     _renderApproval();     // keep approval pane in sync
     _updateApprovalBadge();
+    // Keep AURENIX ONE engine pool in sync
+    if (_oneEngineRunning) oneUpdateMedia(_mediaLib);
+    _renderOnePoolInfo();
   });
 }
 
@@ -1091,6 +1481,18 @@ function _renderDashboard() {
     qEl.innerHTML = chs.map(ch => {
       const st    = _channelStates[ch.id];
       const queue = st?.queue || [];
+      // AURENIX ONE uses a live-TV engine with no fixed queue
+      if (ch.id === ONE_CHANNEL_ID) {
+        const isLive = !!(st?.current_item);
+        return `
+          <div class="ax-dash-q-row">
+            <div class="ax-dash-q-label" style="color:${ch.color || '#1e50ff'}">${_esc(ch.label || ch.id)}</div>
+            <div class="ax-dash-q-bar-wrap">
+              <div class="ax-dash-q-bar" style="width:${isLive ? 100 : 0}%;background:${isLive ? 'var(--red)' : ch.color || '#1e50ff'}"></div>
+            </div>
+            <div class="ax-dash-q-count" style="color:${isLive ? 'var(--red)' : 'var(--text-dim)'};">${isLive ? '🔴 LIVE TV' : '⚫ ENGINE OFF'}</div>
+          </div>`;
+      }
       const max   = 20;
       const pct   = Math.min(100, (queue.length / max) * 100);
       return `
@@ -1126,6 +1528,8 @@ function _checkQueueWarnings() {
   const chs = _channels();
   const warnings = [];
   chs.forEach(ch => {
+    // AURENIX ONE uses a live-TV engine — it has no queue; skip queue warnings.
+    if (ch.id === ONE_CHANNEL_ID) return;
     const st    = _channelStates[ch.id];
     const queue = st?.queue || [];
     const cur   = st?.current_item;
@@ -1579,18 +1983,22 @@ async function _uploadFile(file) {
           `VIDEO TOO LARGE — File size: ${fileMB} MB. Maximum allowed: ${bucketMB} MB. ` +
           `Please use a smaller file.`;
       } else {
-        // File is WITHIN the bucket cap but was rejected anyway.
-        // The Supabase project-level Upload File Size Limit (separate from the bucket cap)
-        // is lower than the bucket cap and is the real constraint.
-        // On the Free plan this is capped at 50 MB and cannot be raised.
-        statusMsg = `✕ UPLOAD REJECTED BY PLATFORM — File: ${fileMB} MB | Bucket cap: ${bucketMB} MB`;
+        // File is WITHIN the bucket cap but Supabase rejected it at the project level.
+        // Supabase has TWO independent limits:
+        //   A. Bucket file_size_limit (500 MB — this is fine)
+        //   B. Project-level "Upload File Size Limit" in the Supabase Dashboard
+        //      (Supabase Free plan default: 50 MB — this is what is rejecting the upload)
+        // AURENIX imposes NO application-level size or content gate beyond these.
+        // Fix: Supabase Dashboard → Storage → Configuration → Upload File Size Limit → 500 MB
+        //      (requires Supabase Pro plan; Free plan is hard-capped at 50 MB by Supabase)
+        statusMsg = `✕ SUPABASE PROJECT LIMIT TOO LOW — File: ${fileMB} MB exceeds Supabase project cap`;
         toastMsg  =
-          `Upload rejected (${fileMB} MB). The file is within the ${bucketMB} MB bucket limit ` +
-          `but the Supabase project-level "Upload File Size Limit" (a separate platform cap) ` +
-          `is set lower than the file size. ` +
-          `Fix: Supabase Dashboard → Storage → Configuration → "Upload File Size Limit" → set to 500 MB or higher. ` +
-          `On the Free plan the maximum is 50 MB; upgrade to Pro to allow up to 5 GB. ` +
-          `Or run /probe-limit on the Worker to confirm the current effective limit.`;
+          `Upload blocked by Supabase (${fileMB} MB file). ` +
+          `The AURENIX bucket allows ${bucketMB} MB, but your Supabase project has a separate ` +
+          `"Upload File Size Limit" (Dashboard → Storage → Configuration) that is set below ${fileMB} MB. ` +
+          `On the Supabase Free plan this project-level cap is 50 MB and cannot be raised. ` +
+          `To upload files larger than 50 MB: upgrade to Supabase Pro (allows up to 5 GB). ` +
+          `AURENIX itself has no content or size gate — this limit is enforced by Supabase.`;
       }
 
       console.error('[AURENIX UPLOAD] Size limit rejection:', rawErrMsg,

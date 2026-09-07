@@ -27,6 +27,8 @@ import {
   query, orderBy, where, upsertUserProfile, addDoc,
 } from './firebase-client.js';
 
+import { oneChannelAdvance } from './aurenix-one-engine.js';
+
 import { supabase } from './supabase-client.js';
 
 /* ════════════════════════════════════
@@ -532,10 +534,13 @@ function _buildHero(channels) {
               </div>
               <div class="ax-media-overlay"></div>
               <div class="ax-np-overlay" id="ax-np-overlay">
-                <div class="ax-np-label">NOW PLAYING</div>
+                <div class="ax-np-label" id="ax-np-label-text">NOW PLAYING</div>
                 <div class="ax-np-title" id="ax-np-title">Connecting to network…</div>
                 <div class="ax-np-artist" id="ax-np-artist"></div>
               </div>
+              <!-- AURENIX ONE live-TV overlays -->
+              <div id="ax-one-viewer-live" style="display:none;position:absolute;top:12px;left:12px;z-index:10;background:rgba(255,45,85,0.92);color:#fff;font-size:10px;font-weight:900;letter-spacing:2px;padding:3px 8px;border-radius:4px;">● LIVE</div>
+              <div id="ax-one-viewer-comm" style="display:none;position:absolute;top:12px;right:12px;z-index:10;background:rgba(184,134,11,0.92);color:#fff;font-size:10px;font-weight:900;letter-spacing:1.5px;padding:3px 8px;border-radius:4px;">📢 COMMERCIAL BREAK</div>
               <div class="ax-autoplay-gate" id="ax-gate">
                 <div class="ax-gate-logo">
                   <svg viewBox="0 0 64 64" fill="none" width="56" height="56">
@@ -763,17 +768,40 @@ function _onActiveChannelUpdate(st) {
     _setNowPlaying('Standby…', '', '');
     _renderUpNext([]);
     _stopMedia();
+    _updateLiveTVOverlay(null, false);
     return;
   }
-  const item = st.current_item;
+  const item   = st.current_item;
+  const isComm = !!(st.is_commercial);
   _setNowPlaying(item.title, item.artist || '', item.type || '');
+  _updateLiveTVOverlay(item, isComm);
 
-  const queue = st.queue || [];
-  const curIdx = queue.findIndex(q => q.id === item.id);
-  _renderUpNext(queue.slice(curIdx + 1, curIdx + 6));
+  // For AURENIX ONE: up-next is from commercial_queue or shows "auto-selected"
+  if (_activeChannel?.id === 'A1') {
+    const commQ = st.commercial_queue || [];
+    if (isComm && commQ.length > 0) {
+      _renderUpNext([commQ[0]]);
+    } else {
+      // Show "AURENIX ONE" branding as next placeholder
+      _renderUpNext([]);
+    }
+  } else {
+    const queue  = st.queue || [];
+    const curIdx = queue.findIndex(q => q.id === item.id);
+    _renderUpNext(queue.slice(curIdx + 1, curIdx + 6));
+  }
 
   if (_gateOpen) _playState(st);
   _startTick();
+}
+
+/** Update the live-TV channel badge and commercial indicator for viewers. */
+function _updateLiveTVOverlay(item, isCommercial) {
+  const commBanner = document.getElementById('ax-one-viewer-comm');
+  if (commBanner) commBanner.style.display = isCommercial ? '' : 'none';
+
+  const liveTag = document.getElementById('ax-one-viewer-live');
+  if (liveTag) liveTag.style.display = item ? '' : 'none';
 }
 
 /* ════════════════════════════════════
@@ -984,6 +1012,19 @@ async function _advance(st) {
   try {
     if (!_activeChannel) { _advancing = false; return; }
     const channelId  = _activeChannel.id;
+
+    // ── AURENIX ONE — live-TV engine handles its own advance ─────────────────
+    // Channel A1 uses a random programming engine instead of a fixed queue.
+    // The engine watches for the needs_next flag and picks the next program.
+    // All viewers share one broadcast state — no per-viewer playlists.
+    if (channelId === 'A1') {
+      const currentId = st?.current_item?.id || null;
+      await oneChannelAdvance(currentId);
+      _advancing = false;
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     const stRef      = doc(db, 'network_state', channelId);
     const stSnap     = await getDoc(stRef);
     if (!stSnap.exists()) { _advancing = false; return; }
