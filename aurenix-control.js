@@ -250,7 +250,9 @@ export function mountControl(user, isAdmin) {
 
     // Worker health check
     _checkWorkerHealth();
+    _checkDriveDiagnostic();
     ctrl.querySelector('#ax-sec-recheck-btn')?.addEventListener('click', _checkWorkerHealth);
+    ctrl.querySelector('#ax-diag-drive-recheck-btn')?.addEventListener('click', _checkDriveDiagnostic);
 
     // Probe upload limit button
     ctrl.querySelector('#ax-sec-probe-limit-btn')?.addEventListener('click', async () => {
@@ -857,6 +859,21 @@ function _buildFounderHTML() {
           </div>
           <div id="ax-sec-limit-result" style="margin-top:8px;font-size:11px;color:var(--text-dim);display:none;white-space:pre-wrap;word-break:break-all;max-height:120px;overflow-y:auto;background:var(--surface-hi);border-radius:4px;padding:8px;"></div>
         </div>
+
+        <!-- ══ GOOGLE DRIVE DIAGNOSTIC ══ -->
+        <div class="ax-security-card" style="grid-column:1/-1;">
+          <div class="ax-security-title">🗂 GOOGLE DRIVE DIAGNOSTIC</div>
+          <div class="ax-security-row"><span>Google Drive Account</span><span class="ax-security-val" id="ax-diag-drive-account">—</span></div>
+          <div class="ax-security-row"><span>Drive Status</span><span class="ax-security-val" id="ax-diag-drive-status">—</span></div>
+          <div class="ax-security-row"><span>AURENIX Media Folder</span><span class="ax-security-val" id="ax-diag-drive-folder-name">—</span></div>
+          <div class="ax-security-row"><span>Folder ID</span><span class="ax-security-val" id="ax-diag-drive-folder-id">—</span></div>
+          <div class="ax-security-row"><span>Folder Access</span><span class="ax-security-val" id="ax-diag-drive-folder-access">—</span></div>
+          <div style="margin-top:8px;">
+            <button class="ax-btn-sm" id="ax-diag-drive-recheck-btn">↺ Re-check Drive</button>
+          </div>
+          <div id="ax-diag-drive-result" style="margin-top:8px;font-size:11px;color:var(--text-dim);display:none;white-space:pre-wrap;word-break:break-all;max-height:80px;overflow-y:auto;background:var(--surface-hi);border-radius:4px;padding:8px;"></div>
+        </div>
+
       </div>
     </div>
 
@@ -1978,15 +1995,30 @@ function _renderSubmissions() {
   }
 
   const statusColor = { pending:'#f0a500', approved:'var(--green)', rejected:'var(--red)' };
-  listEl.innerHTML = items.map(s => `
+  listEl.innerHTML = items.map(s => {
+    // Determine how the file was submitted
+    const hasFile     = !!(s.storage_path || s.url);
+    const fileSizeTxt = s.size_bytes ? _fmtSize(s.size_bytes) : '';
+    const mimeShort   = (s.mime_type || '').split('/')[1] || s.mime_type || '';
+    const fileTag     = hasFile
+      ? `<span style="font-size:10px;background:rgba(30,80,255,0.12);color:var(--blue-bright);border-radius:4px;padding:1px 6px;margin-left:6px;letter-spacing:0.5px;">
+           ${mimeShort ? mimeShort.toUpperCase() : 'FILE'}${fileSizeTxt ? ' · ' + fileSizeTxt : ''}
+         </span>`
+      : `<span style="font-size:10px;background:rgba(240,165,0,0.12);color:#f0a500;border-radius:4px;padding:1px 6px;margin-left:6px;letter-spacing:0.5px;">URL ONLY</span>`;
+
+    return `
     <div class="ax-sub-card" id="ax-sub-${s.id}" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:10px;">
       <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;">
         <div style="flex:1;min-width:0;">
-          <div style="font-size:13px;font-weight:700;color:var(--text);">${_esc(s.title || '(untitled)')}</div>
+          <div style="font-size:13px;font-weight:700;color:var(--text);display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
+            ${_esc(s.title || '(untitled)')}${fileTag}
+          </div>
           <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
             ${_esc(s.artist || '')}${s.artist ? ' · ' : ''}${_esc(s.type || 'media')} · submitted by ${_esc(s.submitted_email || s.submitted_by || '?')}
           </div>
-          ${s.url ? `<div style="font-size:11px;color:var(--blue-bright);margin-top:4px;word-break:break-all;"><a href="${_esc(s.url)}" target="_blank" rel="noopener" style="color:var(--blue-bright);">🔗 ${_esc(s.url.slice(0,60))}…</a></div>` : ''}
+          ${s.file_name ? `<div style="font-size:11px;color:var(--text-dim);margin-top:3px;">📄 ${_esc(s.file_name)}</div>` : ''}
+          ${s.url && s.storage_path ? `<div style="font-size:10px;color:var(--text-dim);margin-top:3px;word-break:break-all;">☁ Supabase Storage · <code style="font-size:10px;">${_esc(s.storage_path)}</code></div>` : ''}
+          ${s.url && !s.storage_path ? `<div style="font-size:11px;color:var(--blue-bright);margin-top:4px;word-break:break-all;"><a href="${_esc(s.url)}" target="_blank" rel="noopener" style="color:var(--blue-bright);">🔗 ${_esc(s.url.slice(0,60))}${s.url.length > 60 ? '…' : ''}</a></div>` : ''}
           ${s.description ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.5;">${_esc(s.description)}</div>` : ''}
           <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">Rights confirmed: ${s.rights_confirmed ? '✓ YES' : '✗ NO'}</div>
         </div>
@@ -2000,7 +2032,8 @@ function _renderSubmissions() {
           ` : ''}
         </div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function _bindChannelManager() {
@@ -3756,6 +3789,79 @@ async function _checkWorkerHealth() {
 }
 
 /* ═══════════════════════════════════════
+   GOOGLE DRIVE DIAGNOSTIC
+═══════════════════════════════════════ */
+/**
+ * Calls GET /gdrive/diagnostic and populates the Drive Diagnostic card
+ * in the Founder Studio Security pane.
+ * Shows: account email, connection status, folder name, masked folder ID,
+ * and whether the folder is currently accessible.
+ * Never displays OAuth secrets or refresh tokens.
+ */
+async function _checkDriveDiagnostic() {
+  const set = (id, text, color) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    if (color) el.style.color = color;
+  };
+
+  set('ax-diag-drive-account',       'checking…', '');
+  set('ax-diag-drive-status',        'checking…', '');
+  set('ax-diag-drive-folder-name',   '—', '');
+  set('ax-diag-drive-folder-id',     '—', '');
+  set('ax-diag-drive-folder-access', '—', '');
+
+  try {
+    if (!auth.currentUser) throw new Error('Not signed in');
+    const idToken = await auth.currentUser.getIdToken(true);
+    const res  = await fetch(UPLOAD_WORKER_URL + '/gdrive/diagnostic', {
+      headers: { 'Authorization': 'Bearer ' + idToken },
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      set('ax-diag-drive-status', '✗ Error: ' + (data.error || data.config_error || 'Unknown'), 'var(--red,#ff2d55)');
+      return;
+    }
+
+    if (!data.connected) {
+      set('ax-diag-drive-account', data.account_email || '—', 'var(--text-dim)');
+      set('ax-diag-drive-status',  'NOT CONNECTED',        'var(--text-dim)');
+      set('ax-diag-drive-folder-name',   'N/A', 'var(--text-dim)');
+      set('ax-diag-drive-folder-id',     'N/A', 'var(--text-dim)');
+      set('ax-diag-drive-folder-access', 'N/A', 'var(--text-dim)');
+      return;
+    }
+
+    set('ax-diag-drive-account', data.account_email || '—', 'var(--text)');
+    set('ax-diag-drive-status',  'CONNECTED', 'var(--green)');
+
+    if (data.folder) {
+      set('ax-diag-drive-folder-name', data.folder.name || 'AURENIX', 'var(--text)');
+      set('ax-diag-drive-folder-id',   data.folder.id_masked || '—',  'var(--text-dim)');
+      const accessStatus = data.folder.status === 'VERIFIED'
+        ? 'VERIFIED ✓'
+        : data.folder.status === 'NOT_FOUND'
+          ? 'NOT FOUND ✗ (will auto-recover on next upload)'
+          : data.folder.status === 'ERROR'
+            ? 'ERROR ✗'
+            : data.folder.status;
+      const accessColor = data.folder.status === 'VERIFIED'
+        ? 'var(--green)'
+        : 'var(--orange,#f0a500)';
+      set('ax-diag-drive-folder-access', accessStatus, accessColor);
+    } else {
+      set('ax-diag-drive-folder-name',   'Not set — will auto-create on first upload', 'var(--orange,#f0a500)');
+      set('ax-diag-drive-folder-id',     'N/A', 'var(--text-dim)');
+      set('ax-diag-drive-folder-access', 'N/A', 'var(--text-dim)');
+    }
+  } catch (err) {
+    set('ax-diag-drive-status', '✗ ' + err.message, 'var(--red,#ff2d55)');
+  }
+}
+
+/* ═══════════════════════════════════════
    PLAY NOW MODAL
 ═══════════════════════════════════════ */
 let _playNowChannelId  = null;
@@ -4197,10 +4303,14 @@ window._AXC = {
         description:  sub.description || '',
         type:         sub.type || 'audio',
         category:     sub.type || 'music',
-        url:          sub.url || '',
-        storage_path: '',
+        // Carry over actual storage location from the uploaded file
+        url:          sub.url          || '',
+        storage_path: sub.storage_path || '',
+        // Carry over real file metadata if present
+        file_name:    sub.file_name    || '',
+        size_bytes:   sub.size_bytes   || 0,
+        mime_type:    sub.mime_type    || '',
         duration_sec: 0,
-        size_bytes:   0,
         // Imported user submissions start as pending_approval — Founder must approve
         // before the media can be added to a channel or broadcast schedule.
         status:       'pending_approval',
@@ -5422,6 +5532,8 @@ function _gdriveHumanError(raw) {
     return 'Google Drive not connected. Go to Storage → Google Drive to connect.';
   if (r.includes('insufficient'))
     return 'Insufficient Google Drive permissions. Reconnect and grant all requested scopes.';
+  if (r.includes('network error') || r.includes('could not connect') || r.includes('temporary connection'))
+    return 'Google Drive upload could not connect. Retrying may resolve a temporary connection problem.';
   if (r.includes('unavailable') || r.includes('503') || r.includes('502'))
     return 'Google Drive unavailable. Try again in a moment.';
   return r;
@@ -5553,6 +5665,22 @@ async function _gdriveUploadFile(file) {
 
   let driveFileId = null;
 
+  // ARCHITECTURE NOTE (v10):
+  // The browser CANNOT PUT directly to googleapis.com/upload/ — Google's
+  // resumable upload endpoint has no CORS headers, so a direct XHR always
+  // fires onerror ("network error") before any bytes are sent.
+  //
+  // Fix: the Worker owns the Google connection.
+  //   1. Browser → POST /gdrive/upload-init → Worker returns upload_id
+  //   2. Browser reads File in chunks and POST each chunk to
+  //      /gdrive/upload-chunk (Worker proxies chunk→Google with Content-Range)
+  //   3. Final chunk response contains the Drive file metadata (id, name, etc.)
+  //
+  // Chunk size: 5 MiB (Google minimum recommended = 256 KiB, must be multiple
+  // of 256 KiB; 5 MiB balances progress granularity vs. round-trip overhead).
+  // For files ≤ 5 MiB (e.g. the 1.5 MB test file), a single chunk is sent.
+  const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MiB
+
   try {
     // ── Pre-flight: get media duration ───────────────────────────────────
     let duration_sec = 0;
@@ -5560,11 +5688,15 @@ async function _gdriveUploadFile(file) {
       try { duration_sec = await _getMediaDuration(file); } catch (_) {}
     }
 
-    // ── Phase 1: Get resumable upload URI from Worker ────────────────────
+    // ── Phase 1: Initialize resumable session via Worker ─────────────────
+    // Worker creates the Drive resumable session and returns an upload_id.
+    // The raw Google upload URI never leaves the Worker.
     if (!auth.currentUser) throw new Error('FIREBASE SESSION NOT FOUND — please sign in again');
-    const idToken = await auth.currentUser.getIdToken(true);
+    let idToken = await auth.currentUser.getIdToken(true);
 
     setStatus('Authorizing with Worker…', 'var(--blue-bright)');
+    console.log('[AURENIX gdrive] POST /gdrive/upload-init — fileName:', file.name, 'size:', file.size, 'type:', file.type);
+
     const initRes = await fetch(UPLOAD_WORKER_URL + '/gdrive/upload-init', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + idToken, 'Content-Type': 'application/json' },
@@ -5577,73 +5709,93 @@ async function _gdriveUploadFile(file) {
     });
     const initData = await initRes.json();
 
-    if (!initRes.ok || !initData.uploadUri) {
+    console.log('[AURENIX gdrive] /gdrive/upload-init HTTP', initRes.status, '— ok:', initData.ok, 'uploadId present:', !!initData.uploadId);
+
+    if (!initRes.ok || !initData.uploadId) {
       const errMsg = _gdriveHumanError(initData.error || `Worker authorization failed — HTTP ${initRes.status}`);
       throw new Error(errMsg);
     }
 
-    const { uploadUri } = initData;
+    const { uploadId } = initData;
 
-    // ── Phase 2: PUT file directly to Drive upload URI ────────────────────
+    // ── Phase 2: Worker-proxied chunked upload ────────────────────────────
+    // Each chunk is POST-ed to /gdrive/upload-chunk.
+    // The Worker streams it to Google using Content-Range.
+    // No CORS problem — browser only talks to the Worker (our own origin).
     setStatus('Uploading to Google Drive…', 'var(--blue-bright)');
     setProgress(0, file.size);
 
-    await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('PUT', uploadUri, true);
-      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    let bytesUploaded = 0;
+    let finalFileMeta = null;
 
-      xhr.upload.addEventListener('progress', e => {
-        if (e.lengthComputable) {
-          setProgress(e.loaded, e.total);
-          // Show milestone percentages in status
-          const pct = Math.round(e.loaded / e.total * 100);
-          if (pct >= 75 && pct < 100) setStatus('Uploading… 75%', 'var(--blue-bright)');
-          else if (pct >= 50 && pct < 75) setStatus('Uploading… 50%', 'var(--blue-bright)');
-          else if (pct >= 25 && pct < 50) setStatus('Uploading… 25%', 'var(--blue-bright)');
-          else if (e.loaded >= e.total) setStatus('Finalizing upload…', 'var(--blue-bright)');
-        }
-      });
+    while (bytesUploaded < file.size) {
+      const chunkStart = bytesUploaded;
+      const chunkEnd   = Math.min(chunkStart + CHUNK_SIZE, file.size) - 1; // inclusive
+      const chunk      = file.slice(chunkStart, chunkEnd + 1);
+      const contentRange = `bytes ${chunkStart}-${chunkEnd}/${file.size}`;
 
-      xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          // Drive returns the file metadata in the response body on completion
-          try {
-            const meta = JSON.parse(xhr.responseText);
-            if (meta?.id) driveFileId = meta.id;
-          } catch (_) {}
-          setProgress(file.size, file.size);
-          resolve();
-        } else {
-          let detail = xhr.responseText ? xhr.responseText.slice(0, 400) : '(empty)';
-          try { const j = JSON.parse(xhr.responseText); detail = j.error?.message || j.message || detail; } catch (_) {}
-          reject(new Error(_gdriveHumanError(`Google Drive upload failed — HTTP ${xhr.status}: ${detail}`)));
-        }
-      });
-      xhr.addEventListener('error', () => reject(new Error('Google Drive upload failed — network error')));
-      xhr.addEventListener('abort', () => reject(new Error('Google Drive upload failed — upload aborted')));
-      xhr.send(file);
-    });
+      console.log('[AURENIX gdrive] POST /gdrive/upload-chunk — range:', contentRange);
+
+      // Refresh token if this is not the first chunk (long uploads may expire the token)
+      if (bytesUploaded > 0) {
+        try { idToken = await auth.currentUser?.getIdToken(false); } catch (_) {}
+      }
+
+      let chunkRes, chunkData;
+      try {
+        chunkRes = await fetch(UPLOAD_WORKER_URL + '/gdrive/upload-chunk', {
+          method: 'POST',
+          headers: {
+            'Authorization':  'Bearer ' + idToken,
+            'Content-Type':   file.type || 'application/octet-stream',
+            'Content-Range':  contentRange,
+            'X-Upload-Id':    uploadId,
+            'X-Total-Size':   String(file.size),
+          },
+          body: chunk,
+        });
+        chunkData = await chunkRes.json();
+      } catch (fetchErr) {
+        console.error('[AURENIX gdrive] chunk fetch error:', fetchErr.message, 'type:', fetchErr.constructor?.name);
+        throw new Error(`Google Drive upload could not connect. Retrying may resolve a temporary connection problem. (${fetchErr.message})`);
+      }
+
+      console.log('[AURENIX gdrive] /gdrive/upload-chunk HTTP', chunkRes.status,
+        '— complete:', chunkData.complete, 'rangeEnd:', chunkData.rangeEnd);
+
+      if (!chunkRes.ok) {
+        const detail  = chunkData.detail  || chunkData.error || '';
+        const retryable = chunkData.retryable === true;
+        const msg = retryable
+          ? `Google Drive upload could not connect. Retrying may resolve a temporary connection problem. (HTTP ${chunkRes.status}${detail ? ': ' + detail.slice(0, 120) : ''})`
+          : _gdriveHumanError(chunkData.error || `Google Drive upload error — HTTP ${chunkRes.status}: ${detail.slice(0, 120)}`);
+        throw new Error(msg);
+      }
+
+      if (chunkData.complete) {
+        // Upload finished — final chunk
+        finalFileMeta = chunkData.file || null;
+        driveFileId   = finalFileMeta?.id || null;
+        bytesUploaded = file.size;
+        setProgress(file.size, file.size);
+        console.log('[AURENIX gdrive] upload complete — driveFileId:', driveFileId);
+      } else {
+        // Chunk accepted — advance cursor.
+        // Use the rangeEnd from Google (authoritative) when available.
+        const confirmedEnd = typeof chunkData.rangeEnd === 'number' && chunkData.rangeEnd >= 0
+          ? chunkData.rangeEnd + 1  // rangeEnd is inclusive
+          : chunkEnd + 1;
+        bytesUploaded = confirmedEnd;
+        setProgress(bytesUploaded, file.size);
+        const pct = Math.round(bytesUploaded / file.size * 100);
+        setStatus(`Uploading to Google Drive… ${pct}%`, 'var(--blue-bright)');
+      }
+    }
 
     setStatus('Upload complete — confirming…', 'var(--green)');
     setProgress(file.size, file.size);
 
-    // ── Phase 3: Finalize — get full Drive file metadata ─────────────────
-    if (!driveFileId) {
-      // Drive didn't return the file ID in the PUT response — fetch via Worker
-      const finalRes = await fetch(UPLOAD_WORKER_URL + '/gdrive/upload-finalize', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + (await auth.currentUser?.getIdToken(true)), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ driveFileId: 'unknown' }),
-      });
-      // If finalize fails, proceed without Drive metadata — file is still uploaded
-      if (finalRes.ok) {
-        const fd = await finalRes.json();
-        if (fd.file?.id) driveFileId = fd.file.id;
-      }
-    }
-
-    // ── Phase 4: Save to Firestore ────────────────────────────────────────
+    // ── Phase 3: Save to Firestore ────────────────────────────────────────
     try { await auth.currentUser?.getIdToken(true); } catch (_) {}
     setStatus('Saving AURENIX media record…', 'var(--blue-bright)');
 
@@ -5687,7 +5839,6 @@ async function _gdriveUploadFile(file) {
           ${driveFileId ? `<div style="margin-top:8px;"><a href="https://drive.google.com/file/d/${_esc(driveFileId)}/view" target="_blank" rel="noopener" style="color:var(--blue-bright);font-size:11px;">🔗 Open in Google Drive</a></div>` : ''}
           <div style="margin-top:10px;display:flex;gap:8px;">
             <button class="ax-btn-sm" style="font-size:11px;" onclick="window._AXC.switchToPane('approval')">🔍 Go to Pending Approval</button>
-            ${driveFileId ? '' : ''}
           </div>
         </div>`;
     }
@@ -5698,17 +5849,30 @@ async function _gdriveUploadFile(file) {
     setTimeout(() => _openMetaModal(docRef.id, file.name.replace(/\.[^.]+$/, '')), 600);
 
   } catch (uploadErr) {
-    const errMsg = _gdriveHumanError(uploadErr.message || 'Upload failed');
+    const rawMsg = uploadErr.message || 'Upload failed';
+    // Determine if this is a connectivity/retryable error vs. a configuration error
+    const isConnectErr = rawMsg.toLowerCase().includes('could not connect') ||
+                         rawMsg.toLowerCase().includes('network error') ||
+                         rawMsg.toLowerCase().includes('temporary connection');
+    const errMsg = isConnectErr
+      ? rawMsg  // already has friendly text from above
+      : _gdriveHumanError(rawMsg);
+
+    console.error('[AURENIX gdrive] upload error:', rawMsg);
     setStatus('✗ ' + errMsg, 'var(--red)');
     setProgress(0, file.size);
     if (resultDiv) {
       resultDiv.style.display = '';
       resultDiv.innerHTML = `
-        <div style="background:rgba(255,45,85,0.08);border:1px solid rgba(255,45,85,0.3);border-radius:8px;padding:14px 16px;font-size:12px;">
+        <div style="background:rgba(255,45,85,0.08);border:1px solid rgba(255,45,85,0.3);border-radius:8px;padding:14px 16px;font-size:12px;line-height:1.7;">
           <div style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:6px;">✗ UPLOAD FAILED</div>
-          <div style="color:var(--text-dim);margin-bottom:10px;">${_esc(errMsg)}</div>
-          <button class="ax-btn-sm" onclick="window._AXC.retryGdriveUpload()" style="margin-right:6px;">↺ Retry</button>
-          <button class="ax-btn-sm" onclick="window._AXC.switchToPane('storage')">💾 Check Drive Connection</button>
+          <div style="color:var(--text-dim);margin-bottom:10px;">${_esc(isConnectErr
+            ? 'Google Drive upload could not connect.\nRetrying may resolve a temporary connection problem.'
+            : errMsg)}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="ax-btn-sm" onclick="window._AXC.retryGdriveUpload()" style="margin-right:2px;">↺ Retry</button>
+            <button class="ax-btn-sm" onclick="window._AXC.switchToPane('storage')">🔗 Check Drive Connection</button>
+          </div>
         </div>`;
       // Store file for retry
       window._AXC._pendingGdriveFile = file;

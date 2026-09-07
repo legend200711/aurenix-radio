@@ -66,6 +66,10 @@ async function clearTokens(kv) {
   await kv.delete(KV_TOKEN_KEY);
 }
 
+async function clearFolder(kv) {
+  await kv.delete(KV_FOLDER_KEY);
+}
+
 async function storeFolder(kv, folder) {
   await kv.put(KV_FOLDER_KEY, JSON.stringify(folder));
 }
@@ -393,7 +397,11 @@ export async function handleGdriveStatus(request, env, json) {
 
 /**
  * POST /gdrive/disconnect
- * Revokes the stored tokens and clears KV. Does NOT delete any Drive files.
+ * Revokes the stored tokens and clears KV (tokens AND folder ID).
+ * Clearing the folder ID is critical — the folder belongs to the
+ * account that was connected; if a different account is reconnected
+ * the old folder ID would be invalid (HTTP 404 on upload-init).
+ * Does NOT delete any Drive files.
  */
 export async function handleGdriveDisconnect(request, env, json) {
   try { await requireFounder(request, env); } catch (e) { return json({ error: e.message }, 401); }
@@ -406,8 +414,12 @@ export async function handleGdriveDisconnect(request, env, json) {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     }).catch(() => {});
   }
-  await clearTokens(env.GDRIVE_KV);
-  // Do NOT clear the folder config — if reconnected it should still be remembered
+  // Clear both tokens AND folder — folder ID belongs to the old account.
+  // A fresh connection will find/create the AURENIX folder under the new account.
+  await Promise.all([
+    clearTokens(env.GDRIVE_KV),
+    clearFolder(env.GDRIVE_KV),
+  ]);
 
   return json({ ok: true, disconnected: true }, 200);
 }
@@ -511,7 +523,50 @@ export async function handleGdriveUploadInit(request, env, json) {
   if (!fileName)                        return json({ error: 'fileName required' }, 400);
   if (!size || typeof size !== 'number') return json({ error: 'size required (number)' }, 400);
 
-  const folder = await loadFolder(env.GDRIVE_KV);
+  // ── Verify / recover the stored folder ──────────────────────────────────
+  // Load the stored folder from KV and verify it still exists and is accessible
+  // under the currently authenticated account.  If the folder is missing or
+  // returns 404/403 (stale ID from a previous account), auto-recover by
+  // finding/creating the AURENIX Media folder in the current account's Drive.
+  let folder = await loadFolder(env.GDRIVE_KV);
+
+  if (folder?.id) {
+    // Verify the folder is accessible
+    try {
+      await driveGet(
+        `https://www.googleapis.com/drive/v3/files/${folder.id}?fields=id,name`,
+        at
+      );
+      // Folder verified — still accessible
+    } catch (verifyErr) {
+      // Folder not accessible (404 = deleted or wrong account, 403 = permissions)
+      // Auto-recover: find or create AURENIX Media folder in the current account
+      console.warn('[AURENIX] Stored Drive folder invalid (' + verifyErr.message.slice(0, 100) + ') — auto-recovering');
+      try {
+        const recovered = await ensureFolder('AURENIX Media', 'root', at);
+        folder = { id: recovered.id, name: recovered.name, webViewLink: recovered.webViewLink, subFolders: {} };
+        await storeFolder(env.GDRIVE_KV, folder);
+        console.log('[AURENIX] Recovered Drive folder: ' + recovered.id);
+      } catch (recoverErr) {
+        // Recovery failed — fall back to Drive root rather than using the invalid ID
+        console.warn('[AURENIX] Folder recovery failed (' + recoverErr.message.slice(0,100) + ') — using Drive root');
+        folder = null;
+      }
+    }
+  }
+
+  // If no folder is configured yet, auto-create AURENIX Media in Drive root
+  if (!folder?.id) {
+    try {
+      const created = await ensureFolder('AURENIX Media', 'root', at);
+      folder = { id: created.id, name: created.name, webViewLink: created.webViewLink, subFolders: {} };
+      await storeFolder(env.GDRIVE_KV, folder);
+    } catch (_) {
+      // Non-fatal: proceed with Drive root as parent
+      folder = null;
+    }
+  }
+
   let parentId = folder?.id || 'root';
 
   // If a subFolder is specified, use that subfolder's ID
@@ -550,7 +605,118 @@ export async function handleGdriveUploadInit(request, env, json) {
   const uploadUri = initRes.headers.get('Location');
   if (!uploadUri) return json({ error: 'Google Drive did not return an upload URI' }, 502);
 
-  return json({ ok: true, uploadUri, parentId }, 200);
+  // Return upload_id only — never return the raw uploadUri to the browser.
+  // The browser talking directly to googleapis.com is blocked by CORS (Google
+  // does not include Access-Control-Allow-Origin on the resumable upload
+  // endpoint).  Instead, the browser sends each chunk to our Worker via
+  // POST /gdrive/upload-chunk, which proxies it to Google server-side.
+  const uploadId = new URL(uploadUri).searchParams.get('upload_id');
+  if (!uploadId) return json({ error: 'Google Drive did not return an upload_id in Location header' }, 502);
+
+  return json({ ok: true, uploadId, parentId, folderName: folder?.name || 'root' }, 200);
+}
+
+/**
+ * POST /gdrive/upload-chunk
+ * Proxies a single chunk (or the entire file for small uploads) from the
+ * browser to the Google Drive resumable upload endpoint.
+ *
+ * This endpoint exists because browsers cannot PUT directly to
+ * https://www.googleapis.com/upload/ — Google's resumable upload endpoint
+ * does NOT include CORS headers, so the browser XHR fires onerror immediately.
+ *
+ * Request headers (from browser):
+ *   Authorization: Bearer <firebase-id-token>
+ *   X-Upload-Id:      <upload_id returned by /gdrive/upload-init>
+ *   Content-Type:     <file MIME type>
+ *   Content-Range:    bytes <start>-<end>/<total>   (or * / total for query)
+ *   X-Total-Size:     <total file bytes as string>   (for validation)
+ *
+ * The raw request body IS the chunk bytes.
+ *
+ * Returns:
+ *   { ok: true, complete: false, rangeEnd: N }   — chunk accepted, more to come
+ *   { ok: true, complete: true, file: { id, name, ... } }  — upload finished
+ *   { error: "..." }  — hard failure
+ *
+ * Google resumable upload reference:
+ *   https://developers.google.com/drive/api/guides/resumable-upload
+ */
+export async function handleGdriveUploadChunk(request, env, json) {
+  // Auth: Founder must be signed in
+  try { await requireFounder(request, env); } catch (e) { return json({ error: e.message }, 401); }
+
+  const uploadId  = request.headers.get('X-Upload-Id')   || '';
+  const mimeType  = request.headers.get('Content-Type')  || 'application/octet-stream';
+  const crHeader  = request.headers.get('Content-Range') || '';
+  const totalStr  = request.headers.get('X-Total-Size')  || '0';
+
+  if (!uploadId) return json({ error: 'X-Upload-Id header required' }, 400);
+
+  // Reconstruct the Google resumable upload URI from the upload_id.
+  // The base path is always the same — only the upload_id token changes.
+  const googleUploadUri =
+    `https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=${encodeURIComponent(uploadId)}`;
+
+  // Build headers for the Google request
+  const googleHeaders = {};
+  if (mimeType) googleHeaders['Content-Type'] = mimeType;
+  if (crHeader)  googleHeaders['Content-Range'] = crHeader;
+
+  // Log (safe — no secrets, no raw URI content)
+  console.log(`[AURENIX gdrive-chunk] upload_id=...${uploadId.slice(-8)} range="${crHeader}" total=${totalStr}`);
+
+  // Stream the request body directly to Google — no buffering of the full file.
+  // Workers support streaming body forwarding since compatibility_date 2023-03-01.
+  let googleRes;
+  try {
+    googleRes = await fetch(googleUploadUri, {
+      method:  'PUT',
+      headers: googleHeaders,
+      body:    request.body,
+      // duplex: 'half' is required for streaming request bodies in Workers
+      duplex:  'half',
+    });
+  } catch (fetchErr) {
+    console.error('[AURENIX gdrive-chunk] Google fetch error:', fetchErr.message);
+    return json({
+      error:   'Worker could not reach Google Drive upload endpoint',
+      detail:  fetchErr.message,
+      retryable: true,
+    }, 502);
+  }
+
+  // Google returns 308 Resume Incomplete while chunks are still being sent.
+  // It returns 200/201 when the upload is complete.
+  // Any 5xx is a retryable server error.
+  if (googleRes.status === 308) {
+    // Chunk accepted — not yet complete
+    const rangeHeader = googleRes.headers.get('Range') || '';
+    // Range header is like "bytes=0-N" when bytes have been received
+    const rangeEnd = rangeHeader ? parseInt(rangeHeader.split('-')[1] || '0', 10) : -1;
+    console.log(`[AURENIX gdrive-chunk] 308 accepted, range="${rangeHeader}"`);
+    return json({ ok: true, complete: false, rangeEnd }, 200);
+  }
+
+  if (googleRes.status === 200 || googleRes.status === 201) {
+    // Upload complete — Google returns file metadata
+    let fileMeta = null;
+    try { fileMeta = await googleRes.json(); } catch (_) {}
+    const fileId = fileMeta?.id || null;
+    console.log(`[AURENIX gdrive-chunk] upload complete, fileId=${fileId}`);
+    return json({ ok: true, complete: true, file: fileMeta }, 200);
+  }
+
+  // Error response from Google
+  let errText = '';
+  try { errText = await googleRes.text(); } catch (_) {}
+  const isRetryable = googleRes.status >= 500;
+  console.error(`[AURENIX gdrive-chunk] Google error HTTP ${googleRes.status}:`, errText.slice(0, 300));
+  return json({
+    error:     `Google Drive upload error — HTTP ${googleRes.status}`,
+    detail:    errText.slice(0, 400),
+    retryable: isRetryable,
+  }, googleRes.status >= 500 ? 502 : 400);
 }
 
 /**
@@ -714,5 +880,80 @@ export async function handleGdriveConfigCheck(request, env, json) {
     config_ready: !err,
     config_error: err || null,
     redirect_uri: env.GOOGLE_REDIRECT_URI || null,
+  }, 200);
+}
+
+/**
+ * GET /gdrive/diagnostic
+ * Returns a safe diagnostic summary for the Founder Studio.
+ * Shows account, folder name, masked folder ID, and whether the folder
+ * is currently accessible in the connected Drive.
+ * Does NOT expose OAuth secrets, refresh tokens, or access tokens.
+ * Requires Firebase Founder token.
+ */
+export async function handleGdriveDiagnostic(request, env, json) {
+  try { await requireFounder(request, env); } catch (e) { return json({ error: e.message }, 401); }
+
+  const secretErr = checkDriveSecrets(env);
+  if (secretErr) return json({ ok: false, config_error: secretErr }, 503);
+
+  const tokens = await loadTokens(env.GDRIVE_KV);
+  if (!tokens) {
+    return json({ ok: true, connected: false, account_email: null, folder: null }, 200);
+  }
+
+  // Get current account info
+  let accountEmail = tokens.email || '';
+  let accountName  = tokens.name  || '';
+  let tokenValid   = false;
+  let at           = null;
+  try {
+    at = await getAccessToken(env);
+    const ui = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: { Authorization: 'Bearer ' + at },
+    });
+    if (ui.ok) {
+      const d = await ui.json();
+      accountEmail = d.email || accountEmail;
+      accountName  = d.name  || accountName;
+      tokenValid = true;
+    }
+  } catch (_) {}
+
+  // Verify folder
+  const folder = await loadFolder(env.GDRIVE_KV);
+  let folderStatus   = 'NOT_SET';
+  let folderName     = null;
+  let folderIdMasked = null;
+
+  if (folder?.id && at) {
+    folderIdMasked = folder.id.slice(0, 4) + '…' + folder.id.slice(-4);
+    folderName     = folder.name || 'AURENIX';
+    try {
+      await driveGet(
+        `https://www.googleapis.com/drive/v3/files/${folder.id}?fields=id,name`,
+        at
+      );
+      folderStatus = 'VERIFIED';
+    } catch (e) {
+      folderStatus = e.message.includes('404') ? 'NOT_FOUND' : 'ERROR';
+    }
+  } else if (folder?.id) {
+    folderIdMasked = folder.id.slice(0, 4) + '…' + folder.id.slice(-4);
+    folderName     = folder.name || 'AURENIX';
+    folderStatus   = 'TOKEN_INVALID';
+  }
+
+  return json({
+    ok: true,
+    connected:     tokenValid,
+    account_email: accountEmail,
+    account_name:  accountName,
+    folder: folderName ? {
+      name:      folderName,
+      id_masked: folderIdMasked,
+      status:    folderStatus,
+      subfolders: folder?.subFolders ? Object.keys(folder.subFolders) : [],
+    } : null,
   }, 200);
 }

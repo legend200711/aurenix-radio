@@ -1,12 +1,19 @@
 /**
- * AURENIX — Founder Upload Worker  (v8 — Google Drive OAuth + resumable upload)
+ * AURENIX — Founder Upload Worker  (v9 — Worker-proxied Drive chunked upload)
  * upload-worker/src/index.js
  *
- * ARCHITECTURE (v8):
+ * ARCHITECTURE (v9):
  *   Adds Google Drive OAuth 2.0 storage as an additional upload destination.
  *   Google OAuth client secret and refresh tokens are NEVER sent to the browser.
  *   All Drive token management is handled server-side in this Worker.
  *   See gdrive.js for the full Drive module.
+ *
+ *   v9 CHANGE — Worker-proxied chunked upload:
+ *   The browser can NOT PUT directly to googleapis.com/upload/ because Google's
+ *   resumable upload endpoint has no CORS headers — the browser XHR fires onerror
+ *   immediately ("network error").  v9 removes the direct browser→Google path and
+ *   routes every chunk through POST /gdrive/upload-chunk.  The Worker streams each
+ *   chunk to Google server-side with the Content-Range header.  No file buffering.
  *
  * Endpoints (existing Supabase):
  *   POST /authorize  — JSON: { fileName, contentType, size }
@@ -21,7 +28,8 @@
  *   POST /gdrive/disconnect       — revoke + clear tokens (does NOT delete Drive files)
  *   GET  /gdrive/folders          — list Drive folders
  *   POST /gdrive/folder-set       — set/create AURENIX folder + subfolders
- *   POST /gdrive/upload-init      — initiate resumable upload (returns upload URI)
+ *   POST /gdrive/upload-init      — initiate resumable session (returns upload_id)
+ *   POST /gdrive/upload-chunk     — proxy a chunk to Google (browser→Worker→Google)
  *   POST /gdrive/upload-finalize  — finalize + return Drive file metadata
  *
  * Environment secrets (set via `wrangler secret put`):
@@ -83,7 +91,7 @@ function corsHeaders(origin) {
   ];
   return {
     'Access-Control-Allow-Methods':  'POST, GET, OPTIONS',
-    'Access-Control-Allow-Headers':  'Authorization, Content-Type',
+    'Access-Control-Allow-Headers':  'Authorization, Content-Type, Content-Range, X-Upload-Id, X-Total-Size',
     'Access-Control-Max-Age':        '86400',
     'Access-Control-Allow-Origin':   (origin && allowed.includes(origin)) ? origin : '*',
   };
@@ -415,8 +423,10 @@ import {
   handleGdriveFolders,
   handleGdriveFolderSet,
   handleGdriveUploadInit,
+  handleGdriveUploadChunk,
   handleGdriveUploadFinalize,
   handleGdriveConfigCheck,
+  handleGdriveDiagnostic,
   handleSubmissionCopyToDrive,
 } from './gdrive.js';
 
@@ -458,8 +468,14 @@ export default {
     if (request.method === 'POST' && p === '/gdrive/upload-init')
       return handleGdriveUploadInit(request, env, gdriveJsonHelper);
 
+    if (request.method === 'POST' && p === '/gdrive/upload-chunk')
+      return handleGdriveUploadChunk(request, env, gdriveJsonHelper);
+
     if (request.method === 'POST' && p === '/gdrive/upload-finalize')
       return handleGdriveUploadFinalize(request, env, gdriveJsonHelper);
+
+    if (request.method === 'GET'  && p === '/gdrive/diagnostic')
+      return handleGdriveDiagnostic(request, env, gdriveJsonHelper);
 
     if (request.method === 'POST' && p === '/submission/copy-to-drive')
       return handleSubmissionCopyToDrive(request, env, gdriveJsonHelper);
@@ -471,7 +487,7 @@ export default {
       return json({
         ok:      !err,
         worker:  'aurenix-upload',
-        version: '2025-09-06-v8-gdrive',
+        version: '2025-09-06-v10-gdrive-cors-proxy',
         SUPABASE_URL:        env.SUPABASE_URL         ? '✓ set' : '✗ MISSING',
         SUPABASE_SERVICE_KEY:env.SUPABASE_SERVICE_KEY ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID  ? '✓ set' : '✗ MISSING',
@@ -885,6 +901,102 @@ export default {
       }
 
       // ── 8. Return signed URL + paths to browser — file is never sent here
+      const publicUrl = `${env.SUPABASE_URL}/storage/v1/object/public/${MEDIA_BUCKET}/${storagePath}`;
+      return json({
+        ok:               true,
+        signedUrl,
+        storagePath,
+        publicUrl,
+        uploadedBy:       tokenEmail,
+        authorizedAt:     new Date().toISOString(),
+        bucketLimitBytes,
+        bucketLimitWarning: bucketLimitWarning || undefined,
+      }, 200, origin);
+    }
+
+    /* ── POST /submission/authorize — any authenticated user signed-URL upload ── */
+    //
+    // Unlike /authorize (Founder-only), this endpoint accepts any Firebase-authenticated
+    // user.  Files are stored under submissions/{uid}/ in the same aurenix-media bucket.
+    // The Founder reviews and approves submissions before they enter any channel.
+    //
+    // Security:
+    //   - Firebase token is cryptographically verified server-side.
+    //   - uid is taken from the verified token — the client cannot spoof it.
+    //   - Files land in submissions/{uid}/ so the Founder can identify the submitter.
+    //   - Storage is NOT publicly writable — a signed URL is required per upload.
+    //   - Service-role key is never sent to the browser.
+    if (request.method === 'POST' && url.pathname === '/submission/authorize') {
+
+      // ── 0. Secrets present
+      const secretErr = checkSecrets(env);
+      if (secretErr) return json({ error: `WORKER CONFIGURATION ERROR — ${secretErr}`, stage: 'WORKER_CONFIGURATION' }, 503, origin);
+
+      // ── 1. Extract Firebase token
+      const authHeader = request.headers.get('Authorization') || '';
+      if (!authHeader.startsWith('Bearer '))
+        return json({ error: 'FIREBASE TOKEN MISSING', stage: 'FIREBASE_TOKEN_MISSING' }, 401, origin);
+      const idToken = authHeader.slice(7).trim();
+      if (!idToken)
+        return json({ error: 'FIREBASE TOKEN MISSING — empty', stage: 'FIREBASE_TOKEN_MISSING' }, 401, origin);
+
+      // ── 2. Verify Firebase token
+      let tokenPayload;
+      try {
+        tokenPayload = await verifyFirebaseToken(idToken, env.FIREBASE_PROJECT_ID);
+      } catch (err) {
+        return json({ error: err.message, stage: 'FIREBASE_TOKEN_INVALID' }, 401, origin);
+      }
+
+      // ── 3. Any authenticated user is allowed (no Founder check)
+      const tokenEmail = (tokenPayload.email || '').trim().toLowerCase();
+      const uid        = tokenPayload.sub;
+      if (!uid)
+        return json({ error: 'SUBMISSION AUTHORIZE FAILED — no uid in token', stage: 'AUTHORIZE_FAILED' }, 401, origin);
+
+      // ── 4. Parse request body (tiny JSON — no file)
+      let body;
+      try { body = await request.json(); }
+      catch { return json({ error: 'SUBMISSION AUTHORIZE FAILED — invalid JSON body', stage: 'AUTHORIZE_FAILED' }, 400, origin); }
+
+      const { fileName, contentType, size } = body || {};
+
+      if (!fileName || typeof fileName !== 'string')
+        return json({ error: 'SUBMISSION AUTHORIZE FAILED — fileName required', stage: 'AUTHORIZE_FAILED' }, 400, origin);
+      if (!size || typeof size !== 'number' || size <= 0)
+        return json({ error: 'SUBMISSION AUTHORIZE FAILED — size required (positive number)', stage: 'AUTHORIZE_FAILED' }, 400, origin);
+
+      const ct = contentType || 'application/octet-stream';
+      const isMedia = ct.startsWith('audio/') || ct.startsWith('video/') ||
+                      ct.startsWith('image/') || ct === 'application/octet-stream' ||
+                      ALLOWED_TYPES.has(ct);
+      if (!isMedia)
+        return json({ error: `SUBMISSION AUTHORIZE FAILED — not a media file type: ${ct}`, stage: 'AUTHORIZE_FAILED' }, 415, origin);
+
+      // ── 5. Build storage path — scoped to submissions/{uid}/
+      const safeName    = fileName.replace(/[^a-z0-9._-]/gi, '_');
+      const storagePath = `submissions/${uid}/${Date.now()}_${safeName}`;
+
+      // ── 6. Ensure bucket file_size_limit >= 500 MiB (same as /authorize)
+      let bucketLimitBytes   = BUCKET_FILE_SIZE_LIMIT_BYTES;
+      let bucketLimitWarning = null;
+      try {
+        const bl = await ensureBucketLimit(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
+        bucketLimitBytes = bl.limitBytes;
+      } catch (blErr) {
+        bucketLimitWarning = blErr.message;
+        console.warn(`[aurenix-upload] submission ensureBucketLimit warning: ${blErr.message}`);
+      }
+
+      // ── 7. Create signed upload URL
+      let signedUrl;
+      try {
+        signedUrl = await createSignedUploadUrl(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, storagePath);
+      } catch (err) {
+        return json({ error: err.message, stage: 'SUPABASE_SIGNED_URL_FAILED' }, 502, origin);
+      }
+
+      // ── 8. Return signed URL — file is never sent through this Worker
       const publicUrl = `${env.SUPABASE_URL}/storage/v1/object/public/${MEDIA_BUCKET}/${storagePath}`;
       return json({
         ok:               true,

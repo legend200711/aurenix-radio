@@ -599,41 +599,103 @@ function _buildHero(channels) {
 
     <!-- SUBMIT CONTENT MODAL -->
     <div class="ax-modal-overlay" id="ax-submit-modal" style="display:none;">
-      <div class="ax-modal-box" style="max-width:520px;">
-        <div class="ax-modal-title">🎤 SUBMIT TO AURENIX</div>
+      <div class="ax-modal-box" style="max-width:560px;width:100%;">
+        <div class="ax-modal-title">🎤 SUBMIT CONTENT TO AURENIX</div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.6;">
-          Upload anything you have the legal right to submit — music, video, funny clips, cat videos, podcasts, music videos, slideshows, and more.
-          The Founder reviews all submissions before they can be broadcast.<br>
-          <strong style="color:var(--text);">Submitting does not publish your content.</strong> Nothing goes on air until the Founder approves it.
+          Upload directly from your phone, tablet, or computer — music, video, funny clips, podcasts, music videos, and more.<br>
+          <strong style="color:var(--text);">Submitting does not publish your content.</strong> The Founder reviews all submissions before anything goes on air.
         </div>
-        <div class="ax-field-group" style="margin-bottom:10px;">
-          <label class="ax-field-label">Title *</label>
-          <input class="ax-field-input" id="ax-sub-title" placeholder="Track or content title">
+
+        <!-- ── FILE PICKER ZONE ── -->
+        <div id="ax-sub-drop-zone" style="
+            border:2px dashed rgba(30,80,255,0.45);border-radius:10px;
+            padding:22px 16px;text-align:center;cursor:pointer;
+            background:rgba(30,80,255,0.04);margin-bottom:14px;
+            transition:border-color 0.15s,background 0.15s;">
+          <div style="font-size:28px;margin-bottom:6px;">📁</div>
+          <div style="font-size:14px;font-weight:700;color:var(--text);letter-spacing:0.5px;">SELECT FILE</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.6;">
+            Tap to choose from your device — phone, tablet, or computer<br>
+            <span style="opacity:0.7;">Video: MP4 WebM MOV · Audio: MP3 WAV AAC · Image: JPG PNG WebP</span>
+          </div>
+          <!-- Hidden inputs — separate for better iOS/Android compatibility -->
+          <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:12px;">
+            <button type="button" id="ax-sub-btn-any"
+                    style="padding:8px 16px;background:var(--blue,#1e50ff);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;letter-spacing:0.5px;">
+              📁 SELECT FILE
+            </button>
+            <button type="button" id="ax-sub-btn-photo"
+                    style="padding:8px 16px;background:rgba(30,80,255,0.15);color:var(--blue-bright,#4d7aff);border:1px solid rgba(30,80,255,0.3);border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">
+              📷 PHOTO
+            </button>
+            <button type="button" id="ax-sub-btn-video"
+                    style="padding:8px 16px;background:rgba(30,80,255,0.15);color:var(--blue-bright,#4d7aff);border:1px solid rgba(30,80,255,0.3);border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">
+              🎥 VIDEO
+            </button>
+            <button type="button" id="ax-sub-btn-audio"
+                    style="padding:8px 16px;background:rgba(30,80,255,0.15);color:var(--blue-bright,#4d7aff);border:1px solid rgba(30,80,255,0.3);border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">
+              🎵 AUDIO
+            </button>
+          </div>
+          <!-- Hidden file inputs (one per accept type for broadest mobile compat) -->
+          <input type="file" id="ax-sub-file-any"   accept="audio/*,video/*,image/*" style="display:none;">
+          <input type="file" id="ax-sub-file-photo" accept="image/*" capture="environment" style="display:none;">
+          <input type="file" id="ax-sub-file-video" accept="video/*" capture="environment" style="display:none;">
+          <input type="file" id="ax-sub-file-audio" accept="audio/*" style="display:none;">
         </div>
-        <div class="ax-field-group" style="margin-bottom:10px;">
-          <label class="ax-field-label">Artist / Creator</label>
-          <input class="ax-field-input" id="ax-sub-artist" placeholder="Your name or artist name">
+
+        <!-- ── SELECTED FILE INFO ── -->
+        <div id="ax-sub-file-info" style="display:none;background:var(--surface,#10101c);border:1px solid var(--border,rgba(255,255,255,0.08));border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <span id="ax-sub-file-icon" style="font-size:20px;flex-shrink:0;">📄</span>
+            <div style="flex:1;min-width:0;">
+              <div id="ax-sub-file-name" style="font-size:13px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+              <div id="ax-sub-file-meta" style="font-size:11px;color:var(--text-dim);margin-top:2px;"></div>
+            </div>
+            <button type="button" id="ax-sub-file-clear" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:16px;padding:4px;flex-shrink:0;" title="Remove file">✕</button>
+          </div>
         </div>
-        <div class="ax-field-group" style="margin-bottom:10px;">
-          <label class="ax-field-label">Content Type</label>
-          <select class="ax-field-input" id="ax-sub-type">
-            <option value="music">🎵 Music</option>
-            <option value="video">🎬 Video</option>
-            <option value="funny_clip">😂 Funny Clip</option>
-            <option value="short_film">🎥 Short Film</option>
-            <option value="podcast">🎙 Podcast</option>
-            <option value="music_video">🎞 Music Video</option>
-            <option value="other">📦 Other</option>
-          </select>
+
+        <!-- ── UPLOAD PROGRESS ── -->
+        <div id="ax-sub-progress" style="display:none;margin-bottom:14px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
+            <span id="ax-sub-progress-status" style="font-size:12px;color:var(--text-dim);">Uploading…</span>
+            <span id="ax-sub-progress-pct" style="font-size:12px;font-weight:700;color:var(--blue-bright,#4d7aff);">0%</span>
+          </div>
+          <div style="height:6px;background:rgba(255,255,255,0.07);border-radius:3px;overflow:hidden;">
+            <div id="ax-sub-progress-bar" style="height:100%;width:0%;background:var(--blue,#1e50ff);border-radius:3px;transition:width 0.1s;"></div>
+          </div>
+          <div id="ax-sub-progress-bytes" style="font-size:10px;color:var(--text-dim);margin-top:4px;text-align:right;"></div>
         </div>
-        <div class="ax-field-group" style="margin-bottom:10px;">
-          <label class="ax-field-label">Media URL (link to your file or stream)</label>
-          <input class="ax-field-input" id="ax-sub-url" type="url" placeholder="https://…">
+
+        <!-- ── METADATA FIELDS ── -->
+        <div id="ax-sub-meta-fields">
+          <div class="ax-field-group" style="margin-bottom:10px;">
+            <label class="ax-field-label">Title *</label>
+            <input class="ax-field-input" id="ax-sub-title" placeholder="Track or content title">
+          </div>
+          <div class="ax-field-group" style="margin-bottom:10px;">
+            <label class="ax-field-label">Artist / Creator</label>
+            <input class="ax-field-input" id="ax-sub-artist" placeholder="Your name or artist name">
+          </div>
+          <div class="ax-field-group" style="margin-bottom:10px;">
+            <label class="ax-field-label">Content Type</label>
+            <select class="ax-field-input" id="ax-sub-type">
+              <option value="music">🎵 Music</option>
+              <option value="video">🎬 Video</option>
+              <option value="funny_clip">😂 Funny Clip</option>
+              <option value="short_film">🎥 Short Film</option>
+              <option value="podcast">🎙 Podcast</option>
+              <option value="music_video">🎞 Music Video</option>
+              <option value="other">📦 Other</option>
+            </select>
+          </div>
+          <div class="ax-field-group" style="margin-bottom:10px;">
+            <label class="ax-field-label">Description</label>
+            <textarea class="ax-field-input" id="ax-sub-desc" rows="2" placeholder="Tell us about your content…" style="resize:vertical;"></textarea>
+          </div>
         </div>
-        <div class="ax-field-group" style="margin-bottom:10px;">
-          <label class="ax-field-label">Description</label>
-          <textarea class="ax-field-input" id="ax-sub-desc" rows="3" placeholder="Tell us about your content…" style="resize:vertical;"></textarea>
-        </div>
+
         <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:14px;cursor:pointer;">
           <input type="checkbox" id="ax-sub-rights" style="margin-top:3px;accent-color:var(--blue);">
           <span style="font-size:11px;color:var(--text-dim);line-height:1.5;">
@@ -645,7 +707,7 @@ function _buildHero(channels) {
         <div class="ax-auth-err" id="ax-sub-err"></div>
         <div class="ax-modal-actions">
           <button class="ax-btn-ghost" id="ax-sub-cancel">CANCEL</button>
-          <button class="ax-btn-primary" id="ax-sub-submit">SUBMIT TO AURENIX</button>
+          <button class="ax-btn-primary" id="ax-sub-submit" disabled style="opacity:0.5;">SUBMIT TO AURENIX</button>
         </div>
       </div>
     </div>
@@ -1096,65 +1158,319 @@ function _renderUpNext(items) {
 /* ════════════════════════════════════
    SUBMIT CONTENT MODAL
 ════════════════════════════════════ */
+
+const UPLOAD_WORKER_URL = 'https://aurenix-upload.nthntjrn.workers.dev';
+
+/** Format bytes human-readable */
+function _subFmtSize(bytes) {
+  if (!bytes) return '0 B';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(2) + ' GB';
+}
+
+/** Pick a file type icon from MIME */
+function _subFileIcon(mime) {
+  if (!mime) return '📄';
+  if (mime.startsWith('video/'))  return '🎬';
+  if (mime.startsWith('audio/'))  return '🎵';
+  if (mime.startsWith('image/'))  return '🖼️';
+  return '📄';
+}
+
+/** Guess a content type option from MIME / filename */
+function _subGuessType(mime, filename) {
+  const ext = (filename?.split('.').pop() || '').toLowerCase();
+  if (mime?.startsWith('video/') || ['mp4','webm','mov','avi','mkv','m4v'].includes(ext)) return 'video';
+  if (mime?.startsWith('audio/') || ['mp3','wav','aac','flac','ogg','m4a','opus'].includes(ext)) return 'music';
+  return 'other';
+}
+
+/**
+ * Upload a file to Supabase via Worker signed URL.
+ * Phase 1: POST /submission/authorize  → signedUrl + storagePath + publicUrl
+ * Phase 2: XHR PUT to signedUrl        → bytes go straight to Supabase
+ */
+async function _subUploadFile(file, onProgress, onStatus) {
+  if (!auth.currentUser) throw new Error('Not signed in — please log in again.');
+  const idToken = await auth.currentUser.getIdToken(true);
+
+  // Phase 1: get signed URL
+  onStatus('AUTHENTICATING…');
+  const authRes  = await fetch(UPLOAD_WORKER_URL + '/submission/authorize', {
+    method:  'POST',
+    headers: { 'Authorization': 'Bearer ' + idToken, 'Content-Type': 'application/json' },
+    body:    JSON.stringify({
+      fileName:    file.name,
+      contentType: file.type || 'application/octet-stream',
+      size:        file.size,
+    }),
+  });
+  const authData = await authRes.json();
+  if (!authRes.ok || !authData.ok)
+    throw new Error(authData.error || `Authorization failed — HTTP ${authRes.status}`);
+
+  const { signedUrl, storagePath, publicUrl } = authData;
+  if (!signedUrl?.includes('/object/upload/sign/') || !signedUrl.includes('token='))
+    throw new Error('Worker returned an invalid signed URL. Please try again.');
+
+  // Phase 2: PUT file to Supabase signed URL
+  onStatus('UPLOADING…');
+  await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', signedUrl);
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.setRequestHeader('x-upsert', 'true');
+    xhr.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded, e.total); };
+    xhr.onload  = () => {
+      if (xhr.status >= 200 && xhr.status < 300) { onProgress(file.size, file.size); resolve(); }
+      else reject(new Error(`Upload failed — HTTP ${xhr.status}: ${xhr.responseText?.slice(0,200)}`));
+    };
+    xhr.onerror = () => reject(new Error('Upload failed — network error'));
+    xhr.send(file);
+  });
+
+  return { storagePath, publicUrl };
+}
+
 function _openSubmitModal() {
   const modal = document.getElementById('ax-submit-modal');
   if (!modal) return;
-  modal.style.display = 'flex';
 
-  document.getElementById('ax-sub-cancel')?.addEventListener('click', () => { modal.style.display = 'none'; });
+  // Per-open state
+  let _selectedFile = null;
+  let _uploading    = false;
+
+  const setErr = msg => {
+    const el = document.getElementById('ax-sub-err');
+    if (!el) return;
+    el.textContent = msg;
+    if (msg) el.classList.add('visible'); else el.classList.remove('visible');
+  };
+
+  const setSubmitEnabled = (on) => {
+    const btn = document.getElementById('ax-sub-submit');
+    if (!btn) return;
+    btn.disabled = !on;
+    btn.style.opacity = on ? '1' : '0.5';
+  };
+
+  const checkSubmitReady = () => {
+    setSubmitEnabled(
+      !_uploading &&
+      !!_selectedFile &&
+      !!document.getElementById('ax-sub-title')?.value.trim() &&
+      !!document.getElementById('ax-sub-rights')?.checked
+    );
+  };
+
+  const showFileInfo = (file) => {
+    const infoEl  = document.getElementById('ax-sub-file-info');
+    const iconEl  = document.getElementById('ax-sub-file-icon');
+    const nameEl  = document.getElementById('ax-sub-file-name');
+    const metaEl  = document.getElementById('ax-sub-file-meta');
+    const titleEl = document.getElementById('ax-sub-title');
+    const typeEl  = document.getElementById('ax-sub-type');
+    if (!infoEl) return;
+    if (file) {
+      if (iconEl) iconEl.textContent = _subFileIcon(file.type);
+      if (nameEl) nameEl.textContent = file.name;
+      if (metaEl) metaEl.textContent = `${_subFmtSize(file.size)}  ·  ${file.type || 'unknown type'}`;
+      infoEl.style.display = '';
+      if (titleEl && !titleEl.value.trim())
+        titleEl.value = file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+      if (typeEl) {
+        const g = _subGuessType(file.type, file.name);
+        if (g !== 'other') typeEl.value = g;
+      }
+    } else {
+      infoEl.style.display = 'none';
+    }
+    checkSubmitReady();
+  };
+
+  const clearFile = () => {
+    _selectedFile = null;
+    showFileInfo(null);
+    ['ax-sub-file-any','ax-sub-file-photo','ax-sub-file-video','ax-sub-file-audio'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    setProgressUI(null);
+  };
+
+  const setProgressUI = (loaded, total) => {
+    const wrap    = document.getElementById('ax-sub-progress');
+    const bar     = document.getElementById('ax-sub-progress-bar');
+    const pctEl   = document.getElementById('ax-sub-progress-pct');
+    const bytesEl = document.getElementById('ax-sub-progress-bytes');
+    if (loaded === null || loaded === undefined) { if (wrap) wrap.style.display = 'none'; return; }
+    if (wrap) wrap.style.display = '';
+    const pct = (total > 0) ? Math.min(99, Math.round(loaded / total * 100)) : 0;
+    if (bar)    bar.style.width   = pct + '%';
+    if (pctEl)  pctEl.textContent = pct + '%';
+    if (bytesEl && total > 0) bytesEl.textContent = `${_subFmtSize(loaded)} / ${_subFmtSize(total)}`;
+  };
+
+  const setStatusMsg = msg => {
+    const el = document.getElementById('ax-sub-progress-status');
+    if (el) el.textContent = msg;
+  };
+
+  // Wire hidden file inputs
+  const wireInput = (inputId) => {
+    const el = document.getElementById(inputId);
+    if (!el) return;
+    el.onchange = () => {
+      const file = el.files?.[0];
+      if (!file) return;
+      _selectedFile = file;
+      showFileInfo(file);
+      setErr('');
+    };
+  };
+  wireInput('ax-sub-file-any');
+  wireInput('ax-sub-file-photo');
+  wireInput('ax-sub-file-video');
+  wireInput('ax-sub-file-audio');
+
+  // Picker buttons
+  document.getElementById('ax-sub-btn-any')?.addEventListener('click', e => {
+    e.stopPropagation(); document.getElementById('ax-sub-file-any')?.click();
+  });
+  document.getElementById('ax-sub-btn-photo')?.addEventListener('click', e => {
+    e.stopPropagation(); document.getElementById('ax-sub-file-photo')?.click();
+  });
+  document.getElementById('ax-sub-btn-video')?.addEventListener('click', e => {
+    e.stopPropagation(); document.getElementById('ax-sub-file-video')?.click();
+  });
+  document.getElementById('ax-sub-btn-audio')?.addEventListener('click', e => {
+    e.stopPropagation(); document.getElementById('ax-sub-file-audio')?.click();
+  });
+
+  // Drop zone click (desktop)
+  document.getElementById('ax-sub-drop-zone')?.addEventListener('click', e => {
+    if (!e.target.closest('button')) document.getElementById('ax-sub-file-any')?.click();
+  });
+
+  // Drag-and-drop (desktop)
+  const dz = document.getElementById('ax-sub-drop-zone');
+  if (dz) {
+    dz.addEventListener('dragover', e => {
+      e.preventDefault();
+      dz.style.borderColor = 'var(--blue,#1e50ff)';
+      dz.style.background  = 'rgba(30,80,255,0.09)';
+    });
+    dz.addEventListener('dragleave', () => { dz.style.borderColor = ''; dz.style.background = ''; });
+    dz.addEventListener('drop', e => {
+      e.preventDefault();
+      dz.style.borderColor = '';
+      dz.style.background  = '';
+      const file = e.dataTransfer?.files?.[0];
+      if (!file) return;
+      const ok = !file.type || file.type.startsWith('audio/') || file.type.startsWith('video/') || file.type.startsWith('image/');
+      if (!ok) { setErr('Unsupported file type. Please select a video, audio, or image file.'); return; }
+      _selectedFile = file;
+      showFileInfo(file);
+      setErr('');
+    });
+  }
+
+  // Clear file button
+  document.getElementById('ax-sub-file-clear')?.addEventListener('click', e => {
+    e.stopPropagation(); clearFile();
+  });
+
+  // Re-check submit state on title / rights changes
+  document.getElementById('ax-sub-title')?.addEventListener('input', checkSubmitReady);
+  document.getElementById('ax-sub-rights')?.addEventListener('change', checkSubmitReady);
+
+  // Cancel
+  document.getElementById('ax-sub-cancel')?.addEventListener('click', () => {
+    if (_uploading) return;
+    modal.style.display = 'none';
+  });
+
+  // Submit
   document.getElementById('ax-sub-submit')?.addEventListener('click', async () => {
-    const titleEl  = document.getElementById('ax-sub-title');
-    const artistEl = document.getElementById('ax-sub-artist');
-    const typeEl   = document.getElementById('ax-sub-type');
-    const urlEl    = document.getElementById('ax-sub-url');
-    const descEl   = document.getElementById('ax-sub-desc');
-    const rightsEl = document.getElementById('ax-sub-rights');
-    const errEl    = document.getElementById('ax-sub-err');
-    const submitBtn= document.getElementById('ax-sub-submit');
-
-    if (errEl) { errEl.textContent = ''; errEl.classList.remove('visible'); }
+    setErr('');
+    const titleEl   = document.getElementById('ax-sub-title');
+    const artistEl  = document.getElementById('ax-sub-artist');
+    const typeEl    = document.getElementById('ax-sub-type');
+    const descEl    = document.getElementById('ax-sub-desc');
+    const rightsEl  = document.getElementById('ax-sub-rights');
+    const submitBtn = document.getElementById('ax-sub-submit');
+    const cancelBtn = document.getElementById('ax-sub-cancel');
 
     const title = titleEl?.value.trim();
-    if (!title) { if (errEl) { errEl.textContent = 'Please enter a title.'; errEl.classList.add('visible'); } return; }
-    if (!rightsEl?.checked) {
-      if (errEl) { errEl.textContent = 'You must confirm you have rights to submit this content.'; errEl.classList.add('visible'); }
-      return;
-    }
+    if (!title)           { setErr('Please enter a title.'); return; }
+    if (!_selectedFile)   { setErr('Please select a file to upload.'); return; }
+    if (!rightsEl?.checked) { setErr('You must confirm you have rights to submit this content.'); return; }
 
-    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'SUBMITTING…'; }
+    _uploading = true;
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.style.opacity = '0.5'; submitBtn.textContent = 'UPLOADING…'; }
+    if (cancelBtn) cancelBtn.disabled = true;
+    setProgressUI(0, _selectedFile.size);
+
+    let storagePath = null;
+    let publicUrl   = null;
 
     try {
+      const result = await _subUploadFile(
+        _selectedFile,
+        (loaded, total) => setProgressUI(loaded, total),
+        (msg)           => setStatusMsg(msg),
+      );
+      storagePath = result.storagePath;
+      publicUrl   = result.publicUrl;
+
+      setStatusMsg('SAVING RECORD…');
+      if (submitBtn) submitBtn.textContent = 'SAVING…';
+
       await addDoc(collection(db, 'media_submissions'), {
-        title:           title,
-        artist:          artistEl?.value.trim() || '',
-        type:            typeEl?.value || 'other',
-        url:             urlEl?.value.trim() || '',
-        description:     descEl?.value.trim() || '',
+        title:            title,
+        artist:           artistEl?.value.trim() || '',
+        type:             typeEl?.value || 'other',
+        description:      descEl?.value.trim() || '',
+        storage_path:     storagePath,
+        url:              publicUrl,
+        file_name:        _selectedFile.name,
+        size_bytes:       _selectedFile.size,
+        mime_type:        _selectedFile.type || 'application/octet-stream',
         rights_confirmed: true,
-        status:          'pending',
-        submitted_by:    _user.uid,
-        submitted_email: _user.email,
-        submitted_at:    serverTimestamp(),
+        status:           'pending',
+        submitted_by:     _user.uid,
+        submitted_email:  _user.email,
+        submitted_at:     serverTimestamp(),
       });
+
       modal.style.display = 'none';
-      if (titleEl) titleEl.value = '';
+      if (titleEl)  titleEl.value  = '';
       if (artistEl) artistEl.value = '';
-      if (urlEl) urlEl.value = '';
-      if (descEl) descEl.value = '';
+      if (descEl)   descEl.value   = '';
       if (rightsEl) rightsEl.checked = false;
-      // Show a simple success toast
-      let toast = document.getElementById('ax-toast');
-      if (!toast) { toast = document.createElement('div'); toast.id = 'ax-toast'; document.body.appendChild(toast); }
+      clearFile();
+
+      const toast = document.getElementById('ax-toast') ||
+        (() => { const t = document.createElement('div'); t.id = 'ax-toast'; document.body.appendChild(t); return t; })();
       toast.textContent = '✓ Submitted! The Founder will review your content.';
       toast.className = 'visible';
       clearTimeout(toast._t);
-      toast._t = setTimeout(() => toast.classList.remove('visible'), 4000);
-    } catch (e) {
-      if (errEl) { errEl.textContent = 'Submission failed: ' + (e.message || e); errEl.classList.add('visible'); }
-    }
+      toast._t = setTimeout(() => toast.classList.remove('visible'), 5000);
 
-    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'SUBMIT TO AURENIX'; }
+    } catch (e) {
+      setErr('Upload failed: ' + (e.message || e));
+      setStatusMsg('FAILED');
+      setProgressUI(null);
+    } finally {
+      _uploading = false;
+      if (submitBtn) { submitBtn.disabled = false; submitBtn.style.opacity = '1'; submitBtn.textContent = 'SUBMIT TO AURENIX'; }
+      if (cancelBtn) cancelBtn.disabled = false;
+    }
   });
+
+  modal.style.display = 'flex';
 }
 
 /* ════════════════════════════════════
