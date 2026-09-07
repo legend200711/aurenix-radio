@@ -25,7 +25,7 @@
  */
 
 import {
-  db,
+  auth, db,
   doc, getDoc, setDoc, collection, getDocs,
   onSnapshot, serverTimestamp, updateDoc,
   query, orderBy, where,
@@ -90,6 +90,22 @@ let _advancing     = false;
  * The engine subscribes to Firestore and drives the channel automatically.
  */
 export async function startOneEngine(mediaLib) {
+  // ── Auth pre-flight ──────────────────────────────────────────────
+  // Force a token refresh so Firestore receives a current ID token.
+  // This guards against the race where auth.currentUser exists but the
+  // token cached by the Firestore SDK is stale or not yet issued.
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    throw new Error('Please log in to continue.');
+  }
+  try {
+    await currentUser.getIdToken(/* forceRefresh= */ true);
+  } catch (tokenErr) {
+    console.error('[AURENIX ONE] Token refresh failed:', tokenErr);
+    // Non-fatal — proceed with the existing token.
+  }
+  // ────────────────────────────────────────────────────────────────
+
   _mediaLib = mediaLib;
   _engineActive = true;
 

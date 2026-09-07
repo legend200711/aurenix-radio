@@ -2,17 +2,53 @@
 
 ## What This Is
 
-A Cloudflare Worker that acts as a secure bridge between Firebase Auth and Supabase Storage.
+A Cloudflare Worker that acts as a secure bridge between Firebase Auth, Supabase Storage, and Google Drive.
 
-**Problem it solves:**
-The AURENIX app uses Firebase Authentication. Supabase Storage RLS cannot verify Firebase tokens — requests arrive as the `anon` Postgres role with no Supabase session. Any RLS policy that requires a real identity will fail with `"new row violates row-level security policy"`. Making storage publicly writable is not acceptable.
+**Google Drive security model:**
+- Google OAuth client secret **never touches browser JavaScript** — it lives only in this Worker as a Cloudflare secret.
+- Google refresh tokens are stored server-side in Cloudflare KV (encrypted at rest by Cloudflare).
+- The Founder's Google password is never requested, stored, or seen by AURENIX.
+- Drive files are private — no public sharing is set on uploaded files.
+- Playback is handled securely through the AURENIX media delivery layer.
 
-**Solution:**
-1. Browser sends Firebase ID token + file to the Worker
-2. Worker verifies the Firebase JWT against Google's public keys (server-side, no SDK needed)
-3. Worker checks `token.email == 'christijerina46@gmail.com'`
-4. Only if verified does the Worker upload to Supabase using the **service-role key**
-5. The service-role key never touches browser JavaScript
+---
+
+## ✅ CURRENT STATUS (as of last deploy)
+
+| Item | Status |
+|------|--------|
+| Worker URL | `https://aurenix-upload.nthntjrn.workers.dev` |
+| SUPABASE_URL | ✓ Set |
+| SUPABASE_SERVICE_KEY | ✓ Set |
+| FIREBASE_PROJECT_ID | ✓ Set (`remix-studio-4bf8a`) |
+| GOOGLE_CLIENT_ID | ✓ Set |
+| GOOGLE_CLIENT_SECRET | ✓ Set (server-side only, never in source code) |
+| GOOGLE_REDIRECT_URI | ✓ Set (`https://aurenix-upload.nthntjrn.workers.dev/gdrive/callback`) |
+| GDRIVE_KV namespace | ✓ Bound (`2c5a879a99c64aaeaf59bc1ed99db0f8`) |
+| Worker version | `2025-09-06-v8-gdrive` |
+| Last deploy | Version ID `9216b14d-50c6-4514-aad9-131085397a91` |
+
+---
+
+## ⚠️ ACTION REQUIRED — Google Cloud Console
+
+The OAuth redirect URI registered in Google Cloud Console must match the Worker URL exactly.
+
+**Go to [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials → your OAuth 2.0 client → Edit**
+
+Under **Authorized redirect URIs**, add:
+```
+https://aurenix-upload.nthntjrn.workers.dev/gdrive/callback
+```
+
+⚠️ The downloaded JSON contained `https://upload.nshmjs.workers.dev/gdrive/callback` — this was from a different Worker URL and will cause a `redirect_uri_mismatch` error. **Add the correct URL above** (or replace the old one).
+
+Also confirm under **Authorized JavaScript origins**:
+```
+https://legend200711.github.io
+https://remix-studio-4bf8a.web.app
+https://remix-studio-4bf8a.firebaseapp.com
+```
 
 ---
 
@@ -25,19 +61,16 @@ The AURENIX app uses Firebase Authentication. Supabase Storage RLS cannot verify
 
 ---
 
-## Step 1 — Install Wrangler
+## Part A — Supabase + Firebase Setup (existing — already done)
+
+### Step 1 — Install Wrangler
 
 ```bash
 npm install -g wrangler
 wrangler login
 ```
 
----
-
-## Step 2 — Set Secrets
-
-Run these three commands. Each will prompt you to paste a value.
-**Never put these values in any file that gets committed to git.**
+### Step 2 — Set Supabase + Firebase Secrets (already set)
 
 ```bash
 cd upload-worker
@@ -53,85 +86,128 @@ npx wrangler secret put FIREBASE_PROJECT_ID
 # Paste: remix-studio-4bf8a
 ```
 
----
-
-## Step 3 — Deploy
+### Step 3 — Deploy
 
 ```bash
 cd upload-worker
 npx wrangler deploy
 ```
 
-You will see output like:
-```
-Published aurenix-upload (1.23 sec)
-  https://aurenix-upload.YOUR_SUBDOMAIN.workers.dev
-```
+Output: `https://aurenix-upload.nthntjrn.workers.dev`
 
-Copy the Worker URL.
+### Step 4 — aurenix-control.js Worker URL
 
----
-
-## Step 4 — Update aurenix-control.js
-
-Open `aurenix-control.js` and find this line near the top:
-
+Already set in the frontend:
 ```js
-const UPLOAD_WORKER_URL = 'https://aurenix-upload.christijerina46.workers.dev';
+const UPLOAD_WORKER_URL = 'https://aurenix-upload.nthntjrn.workers.dev';
 ```
 
-Replace `christijerina46` with your actual Cloudflare workers.dev subdomain.
-Your subdomain is the part before `.workers.dev` in the URL shown after deploy.
-
 ---
 
-## Step 5 — Apply the Supabase SQL
+## Part B — Google Drive OAuth Setup (✅ completed)
 
-Open Supabase Dashboard → SQL Editor → New query.
-Paste the contents of `aurenix-storage-restore.sql` and click **Run**.
+### Step 5 — Google Cloud Project & Drive API (already done)
 
-This will:
-- Ensure both buckets exist (`aurenix-radio`, `aurenix-media`)
-- Remove the old `anon` INSERT policy for `aurenix-media` (no longer needed)
-- Keep `anon` SELECT (needed for playback) and DELETE (for Founder delete action)
-- Keep `aurenix-radio` policies untouched
+The OAuth credentials were created in project `hrs-82459`.
 
-**Existing files in both buckets are preserved.**
+If you need to create from scratch:
+1. Go to [https://console.cloud.google.com/](https://console.cloud.google.com/)
+2. Create a new project (or select an existing one).
+3. Go to **APIs & Services → Library**.
+4. Search for **Google Drive API** → **Enable** it.
 
----
+### Step 6 — Configure OAuth Consent Screen
 
-## Step 6 — Test
+1. Go to **APIs & Services → OAuth consent screen**.
+2. Choose **External** (or Internal if using Google Workspace).
+3. Fill in:
+   - App name: **AURENIX**
+   - User support email: your email
+   - Developer contact email: your email
+4. On **Scopes** tab, add:
+   - `https://www.googleapis.com/auth/drive.file`
+   - `https://www.googleapis.com/auth/userinfo.email`
+   - `https://www.googleapis.com/auth/userinfo.profile`
+5. On **Test users** tab, add your Google account email (needed while app is in "Testing" mode).
+6. Save.
 
-### MP3 test
-1. Sign in as `christijerina46@gmail.com`
-2. Open Founder Studio
-3. Select a small MP3 (< 10 MB)
-4. Upload should reach 100%
-5. File should appear in Media Library
-6. Play the file — audio should stream
-7. Add to AURENIX MUSIC queue
+### Step 7 — ⚠️ UPDATE Authorized Redirect URI in Google Cloud
 
-### MP4 test
-Same flow with a short MP4 file.
+The current `wrangler.jsonc` / Worker URL is:
+```
+https://aurenix-upload.nthntjrn.workers.dev
+```
 
-### Security test
-| Scenario | Expected |
-|----------|----------|
-| Logged-out user opens upload URL | `401 FOUNDER AUTHENTICATION FAILED` |
-| Normal signed-in user tries to upload | `403 FOUNDER ACCESS DENIED` |
-| Founder uploads | `200 ok` → file in Media Library |
+The correct redirect URI to register is:
+```
+https://aurenix-upload.nthntjrn.workers.dev/gdrive/callback
+```
+
+Go to: **Google Cloud Console → APIs & Services → Credentials → [your OAuth client] → Edit**
+
+Add this exact URI to **Authorized redirect URIs**. Without this step, the OAuth flow will fail with `redirect_uri_mismatch`.
+
+### Step 8 — KV Namespace (✅ created)
+
+Already created:
+```
+binding = "GDRIVE_KV"
+id = "2c5a879a99c64aaeaf59bc1ed99db0f8"
+```
+
+If you need to recreate:
+```bash
+cd upload-worker
+npx wrangler kv namespace create GDRIVE_KV
+# Copy the output id into wrangler.jsonc
+```
+
+### Step 9 — Google Drive Secrets (✅ already set)
+
+These are set as Cloudflare Worker secrets (server-side only — never in source):
+
+```bash
+cd upload-worker
+
+npx wrangler secret put GOOGLE_CLIENT_ID
+# ✓ Already set — OAuth client ID from project hrs-82459
+
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+# ✓ Already set — NEVER put this value in any file
+# ⚠ This MUST stay server-side. Never paste it into JS, HTML, or any source file.
+
+npx wrangler secret put GOOGLE_REDIRECT_URI
+# ✓ Already set → https://aurenix-upload.nthntjrn.workers.dev/gdrive/callback
+```
+
+### Step 10 — Redeploy (✅ done)
+
+```bash
+cd upload-worker
+npx wrangler deploy
+```
+
+Current version: `2025-09-06-v8-gdrive`
+
+### Step 11 — Connect Google Drive in AURENIX
+
+1. Open AURENIX → Founder Studio → **Storage → Google Drive**.
+2. Click **CONNECT GOOGLE DRIVE**.
+3. A popup opens Google's official login page.
+4. Sign in with your Google account **directly on Google's page** (AURENIX never sees your password).
+5. Grant the requested Drive permissions.
+6. The popup closes and AURENIX shows: **🟢 GOOGLE DRIVE CONNECTED**.
 
 ---
 
 ## CORS Note
 
-The Worker's `corsHeaders()` function allows requests from:
+The Worker allows requests from:
 - `https://remix-studio-4bf8a.web.app`
 - `https://remix-studio-4bf8a.firebaseapp.com`
 - `https://aurenix.com` / `https://www.aurenix.com`
+- `https://legend200711.github.io`
 - `http://localhost` (dev)
-
-If your Firebase Hosting domain is different, add it to the `allowed` array in `upload-worker/src/index.js`.
 
 ---
 
@@ -141,31 +217,54 @@ If your Firebase Hosting domain is different, add it to the `allowed` array in `
 Founder Browser
   │
   │  1. Firebase login (christijerina46@gmail.com)
-  │  2. Get Firebase ID token
-  │  3. POST /upload  (multipart: file + Authorization: Bearer <token>)
+  │  2. Click CONNECT GOOGLE DRIVE
+  │  3. GET /gdrive/auth → Worker returns Google OAuth URL
+  │  4. Popup opens google.com/oauth/authorize
+  │  5. Founder signs in DIRECTLY ON GOOGLE (AURENIX never sees password)
+  │  6. Google redirects to Worker /gdrive/callback?code=...
   │
   ▼
-Cloudflare Worker  [aurenix-upload.*.workers.dev]
+Cloudflare Worker  [aurenix-upload.nthntjrn.workers.dev]
   │
-  │  4. Verify Firebase JWT (Google public keys, RS256, exp, aud, iss)
-  │  5. Check token.email == 'christijerina46@gmail.com'
-  │  6. Upload to Supabase via service-role key (bypasses RLS)
-  │
-  ▼
-Supabase Storage  [nxsyoreuwmmxtuvmeqbg]
-  │  aurenix-media bucket
-  │  path: media/<firebase_uid>/<timestamp>_<filename>
+  │  7. Worker exchanges code for { access_token, refresh_token } (server-to-server)
+  │  8. Worker stores tokens in Workers KV (encrypted at rest)
+  │  9. Worker returns HTML that sends postMessage to opener and closes popup
   │
   ▼
-Worker returns { ok, storagePath, publicUrl, … }
+Founder Studio shows: 🟢 GOOGLE DRIVE CONNECTED — account: founder@gmail.com
+
+══ Upload flow ══
+
+Founder Browser
+  │
+  │  1. Select video file
+  │  2. POST /gdrive/upload-init (Firebase token + fileName + size)
   │
   ▼
-Founder Studio
-  │  Saves metadata to Firestore network_media/{id}
-  │  (Firestore rules also enforce isAdmin() — double protection)
+Cloudflare Worker
+  │  3. Verify Firebase JWT
+  │  4. Check token.email == Founder email
+  │  5. Load stored access_token (refresh if expired)
+  │  6. POST to Google Drive resumable upload API → get upload URI
+  │  7. Return upload URI to browser (large file never passes through Worker)
   │
   ▼
-Media Library updates → file can be scheduled for 24/7 broadcast
+Founder Browser
+  │  8. PUT large file DIRECTLY to Google Drive upload URI (XHR with progress)
+  │  9. After completion, POST /gdrive/upload-finalize { driveFileId }
+  │
+  ▼
+Cloudflare Worker
+  │  10. Fetch Drive file metadata
+  │  11. Return { id, name, size, webViewLink, ... }
+  │
+  ▼
+Founder Browser
+  │  12. Save to Firestore network_media with status: 'pending_approval'
+  │      + drive_file_id, drive_web_view_link stored alongside
+  │
+  ▼
+AURENIX Media Library — file awaits Founder approval before broadcast
 ```
 
 ---
@@ -174,9 +273,26 @@ Media Library updates → file can be scheduled for 24/7 broadcast
 
 | Threat | Mitigation |
 |--------|------------|
-| Supabase service-role key exposed to browser | **Never sent to browser** — stored as Cloudflare Worker secret |
-| Regular user uploads media | Worker returns `403` — email check is cryptographic (JWT signature verified) |
-| Attacker replays a valid Founder token | Firebase JWT has 1-hour expiry; token is verified on every upload request |
-| Attacker forges a Firebase token | RS256 signature verified against Google's public keys — unforgeable |
-| Attacker uploads oversized file | Worker enforces 500 MB limit before touching Supabase |
-| Attacker uploads disallowed MIME type | Worker validates MIME type from multipart Content-Type |
+| Google client secret exposed | **Stored only as Cloudflare Worker secret** — never in JS/HTML/CSS/GitHub |
+| Google refresh token exposed | **Stored in Cloudflare KV (encrypted at rest)** — never sent to browser |
+| Founder's Google password exposed | **Founder logs in directly on Google's page** — AURENIX never sees it |
+| Attacker steals Drive tokens from KV | Tokens scoped to `drive.file` only — only sees files AURENIX created |
+| Attacker uploads unauthorized files | Worker verifies Firebase JWT + Founder email before issuing upload URI |
+| Drive files publicly exposed | Files are private by default — no public sharing is set |
+| Large video proxied through Worker | **Files go directly browser → Drive** via resumable upload URI |
+| Token expiry | Worker auto-refreshes using stored refresh_token when access_token expires |
+| OAuth JSON committed to git | `.gitignore` blocks `client_secret*.json` — JSON is not tracked |
+
+---
+
+## Git Security
+
+The OAuth client JSON (`client_secret_*.json`) is in `.gitignore` and has never been committed.
+
+Before pushing to GitHub, verify:
+```bash
+git status | grep -i client_secret   # should show nothing
+git ls-files | grep -i client_secret  # should show nothing
+grep -r "GOCSPX" . --include="*.js" --include="*.html" --include="*.json"  # should show nothing
+grep -r "GOOGLE_CLIENT_SECRET" . --include="*.js" --include="*.html"  # should show nothing
+```

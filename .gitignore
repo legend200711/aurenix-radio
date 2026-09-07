@@ -1,0 +1,8 @@
+client_secret*.json
+*client_secret*.json
+node_modules/
+.wrangler/
+upload-worker/.wrangler/
+.env
+.env.*
+.DS_Store

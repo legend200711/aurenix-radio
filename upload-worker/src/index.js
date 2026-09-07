@@ -1,38 +1,39 @@
 /**
- * AURENIX — Founder Upload Worker  (v7 — approval-first, no content rejection)
+ * AURENIX — Founder Upload Worker  (v8 — Google Drive OAuth + resumable upload)
  * upload-worker/src/index.js
  *
- * ARCHITECTURE (v7):
- *   The Worker is an authorisation gate only — it never touches the file.
- *   Content-based rejection is REMOVED.  Any technically-supported file type
- *   and size is accepted.  All uploaded media enters Firestore with
- *   status: 'pending_approval'.  Only the Founder can approve it for broadcast.
+ * ARCHITECTURE (v8):
+ *   Adds Google Drive OAuth 2.0 storage as an additional upload destination.
+ *   Google OAuth client secret and refresh tokens are NEVER sent to the browser.
+ *   All Drive token management is handled server-side in this Worker.
+ *   See gdrive.js for the full Drive module.
  *
- *   UPLOAD ≠ BROADCAST.  Acceptance is not publication.
- *
- *   Solution — Supabase signed upload URL:
- *     1. Browser sends Firebase ID token + fileName + contentType + size (tiny JSON)
- *     2. Worker verifies Firebase JWT (Google JWK, RS256)
- *     3. Worker checks token.email == FOUNDER_EMAIL  (upload is Founder-only)
- *     4. Worker calls PATCH /storage/v1/bucket/<bucket> to ensure the bucket
- *        file_size_limit is set (no artificial app-level cap imposed here).
- *     5. Worker calls POST /storage/v1/object/upload/sign/<bucket>/<path>
- *        using the service-role key — returns a signed URL with ?token=...
- *     6. Worker returns the full signed URL + current bucket limit to the browser
- *     7. Browser PUTs the file directly to that signed URL
- *        — no Authorization header needed, the token is in the URL query string
- *        — XHR upload.onprogress gives byte-accurate progress
- *
- * Endpoints:
+ * Endpoints (existing Supabase):
  *   POST /authorize  — JSON: { fileName, contentType, size }
- *                      Returns: { signedUrl, storagePath, publicUrl, bucketLimitBytes }
- *   GET  /health     — secrets present check (never reveals values)
- *   GET  /diagnose   — full connectivity diagnostic (shows bucket file_size_limit)
+ *   GET  /health     — secrets present check
+ *   GET  /diagnose   — full connectivity diagnostic
+ *
+ * Endpoints (new Google Drive — all require Firebase Founder token):
+ *   GET  /gdrive/config-check     — are Drive OAuth credentials configured?
+ *   GET  /gdrive/auth             — get Google OAuth authorization URL
+ *   GET  /gdrive/callback         — OAuth callback (exchanges code, stores tokens)
+ *   GET  /gdrive/status           — connection status + account info
+ *   POST /gdrive/disconnect       — revoke + clear tokens (does NOT delete Drive files)
+ *   GET  /gdrive/folders          — list Drive folders
+ *   POST /gdrive/folder-set       — set/create AURENIX folder + subfolders
+ *   POST /gdrive/upload-init      — initiate resumable upload (returns upload URI)
+ *   POST /gdrive/upload-finalize  — finalize + return Drive file metadata
  *
  * Environment secrets (set via `wrangler secret put`):
- *   SUPABASE_URL          — https://nxsyoreuwmmxtuvmeqbg.supabase.co
- *   SUPABASE_SERVICE_KEY  — service-role JWT (eyJ..., NOT sb_secret_...)
- *   FIREBASE_PROJECT_ID   — remix-studio-4bf8a
+ *   SUPABASE_URL          — Supabase project URL
+ *   SUPABASE_SERVICE_KEY  — Supabase service-role JWT
+ *   FIREBASE_PROJECT_ID   — Firebase project ID
+ *   GOOGLE_CLIENT_ID      — Google OAuth 2.0 client ID
+ *   GOOGLE_CLIENT_SECRET  — Google OAuth 2.0 client secret (NEVER in browser JS)
+ *   GOOGLE_REDIRECT_URI   — authorized redirect URI (e.g. .../gdrive/callback)
+ *
+ * KV binding (wrangler.jsonc):
+ *   GDRIVE_KV  — Workers KV namespace for Drive token storage
  */
 
 /* ─── Constants ───────────────────────────────────────────────────────────── */
@@ -405,6 +406,18 @@ function checkSecrets(env) {
 }
 
 /* ─── Worker entry point ──────────────────────────────────────────────────── */
+import {
+  handleGdriveAuth,
+  handleGdriveCallback,
+  handleGdriveStatus,
+  handleGdriveDisconnect,
+  handleGdriveFolders,
+  handleGdriveFolderSet,
+  handleGdriveUploadInit,
+  handleGdriveUploadFinalize,
+  handleGdriveConfigCheck,
+} from './gdrive.js';
+
 export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';
@@ -413,6 +426,39 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
 
     const url = new URL(request.url);
+    const p   = url.pathname;
+
+    /* ── Google Drive OAuth routes ──────────────────────────────────────── */
+    // These are all server-side — no client secrets in browser JS.
+    const gdriveJsonHelper = (body, status) => json(body, status, origin);
+
+    if (request.method === 'GET'  && p === '/gdrive/config-check')
+      return handleGdriveConfigCheck(request, env, gdriveJsonHelper);
+
+    if (request.method === 'GET'  && p === '/gdrive/auth')
+      return handleGdriveAuth(request, env, gdriveJsonHelper);
+
+    if (request.method === 'GET'  && p === '/gdrive/callback')
+      return handleGdriveCallback(request, env);
+
+    if (request.method === 'GET'  && p === '/gdrive/status')
+      return handleGdriveStatus(request, env, gdriveJsonHelper);
+
+    if (request.method === 'POST' && p === '/gdrive/disconnect')
+      return handleGdriveDisconnect(request, env, gdriveJsonHelper);
+
+    if (request.method === 'GET'  && p === '/gdrive/folders')
+      return handleGdriveFolders(request, env, gdriveJsonHelper);
+
+    if (request.method === 'POST' && p === '/gdrive/folder-set')
+      return handleGdriveFolderSet(request, env, gdriveJsonHelper);
+
+    if (request.method === 'POST' && p === '/gdrive/upload-init')
+      return handleGdriveUploadInit(request, env, gdriveJsonHelper);
+
+    if (request.method === 'POST' && p === '/gdrive/upload-finalize')
+      return handleGdriveUploadFinalize(request, env, gdriveJsonHelper);
+
 
     /* ── GET /health ─────────────────────────────────────────────────────── */
     if (request.method === 'GET' && url.pathname === '/health') {
@@ -420,13 +466,18 @@ export default {
       return json({
         ok:      !err,
         worker:  'aurenix-upload',
-        version: '2025-09-06-v6-bucket-limit',
+        version: '2025-09-06-v8-gdrive',
         SUPABASE_URL:        env.SUPABASE_URL         ? '✓ set' : '✗ MISSING',
         SUPABASE_SERVICE_KEY:env.SUPABASE_SERVICE_KEY ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID  ? '✓ set' : '✗ MISSING',
+        GOOGLE_CLIENT_ID:    env.GOOGLE_CLIENT_ID     ? '✓ set' : '✗ not set (optional)',
+        GOOGLE_CLIENT_SECRET:env.GOOGLE_CLIENT_SECRET ? '✓ set' : '✗ not set (optional)',
+        GOOGLE_REDIRECT_URI: env.GOOGLE_REDIRECT_URI  ? '✓ set' : '✗ not set (optional)',
+        GDRIVE_KV:           env.GDRIVE_KV            ? '✓ bound' : '✗ not bound (optional)',
         FIREBASE_PROJECT_ID_value: env.FIREBASE_PROJECT_ID || null,
         SUPABASE_URL_value:        env.SUPABASE_URL || null,
         architecture: 'Signed URL — browser PUT to /object/upload/sign/<bucket>/<path>?token=',
+        gdrive_architecture: 'OAuth PKCE — browser redirects to Google, server stores tokens in KV',
         error: err || null,
       }, err ? 503 : 200, origin);
     }
