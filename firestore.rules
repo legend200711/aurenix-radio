@@ -373,6 +373,27 @@ service cloud.firestore {
     }
 
     // ────────────────────────────────────────────────────────────
+    // AURENIX LIVE TV ENGINE CONFIG — /channel_live_tv_config/{id}
+    // Settings for the LIVE TV channel engine.
+    // ────────────────────────────────────────────────────────────
+    match /channel_live_tv_config/{channelId} {
+      allow read:  if true;
+      allow write: if isAdmin();
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // NETWORK COMMERCIALS — /network_commercials/{commercialId}
+    // Founder-created commercials (with image, text, audio).
+    // Only approved commercials enter the LIVE TV system.
+    // ────────────────────────────────────────────────────────────
+    match /network_commercials/{commercialId} {
+      allow read:   if true;
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ────────────────────────────────────────────────────────────
     // DENY ALL UNMATCHED PATHS
     // ────────────────────────────────────────────────────────────
     match /{document=**} {

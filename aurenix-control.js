@@ -41,6 +41,23 @@ import {
   getOneState,
 } from './aurenix-one-engine.js';
 
+import {
+  LIVE_TV_CHANNEL_ID,
+  LIVE_TV_COMMERCIAL_FREQ,
+  startLiveTvEngine,
+  stopLiveTvEngine,
+  pauseLiveTvEngine,
+  resumeLiveTvEngine,
+  forceLiveTvCommercialBreak,
+  skipLiveTvProgram,
+  randomizeLiveTvNext,
+  updateLiveTvMediaLib,
+  saveLiveTvConfig,
+  getLiveTvConfig,
+  getLiveTvHistory,
+  isLiveTvEngineActive,
+} from './aurenix-live-tv-engine.js';
+
 // Supabase client is used ONLY for the delete action (anon DELETE policy
 // on storage.objects is kept intentionally). Uploads go through the
 // Cloudflare Worker instead — supabase is not used for INSERT here.
@@ -87,6 +104,7 @@ const MEDIA_CATEGORIES = [
   { id: 'podcast',       label: '🎙 PODCAST',           accept: 'audio/*',                  type: 'podcast' },
   { id: 'audio_program', label: '🎧 AUDIO PROGRAM',     accept: 'audio/*',                  type: 'audio_program' },
   { id: 'station_id',    label: '📢 STATION ID / INTRO',accept: 'audio/*,video/*',          type: 'station_id' },
+  { id: 'commercial',    label: '📺 COMMERCIAL',         accept: 'video/*,image/*,audio/*', type: 'commercial' },
   { id: 'thumbnail',     label: '🖼 THUMBNAIL',          accept: 'image/*',                  type: 'thumbnail' },
   { id: 'trailer',       label: '🎞 TRAILER',            accept: 'video/*',                  type: 'trailer' },
   { id: 'archive',       label: '📼 ARCHIVED BROADCAST', accept: 'video/*,audio/*',         type: 'archive' },
@@ -118,9 +136,17 @@ let _uploadCategory  = 'music';
 let _pendingMeta     = {};   // fileKey → metadata fields
 let _activePane      = 'dashboard';
 let _broadcastTarget = null; // { channelId, mediaId, mode }
-let _oneEngineRunning = false;
-let _oneConfigUnsub   = null;
-let _oneStateUnsub    = null;
+let _oneEngineRunning  = false;
+let _oneConfigUnsub    = null;
+let _oneStateUnsub     = null;
+// AURENIX LIVE TV state
+let _liveTvEngineRunning = false;
+let _liveTvTickTimer     = null;
+let _liveTvStateUnsub    = null;
+let _liveTvCurrentFreq   = 'normal';
+// Commercial library
+let _commercialLib       = [];
+let _commLibUnsub        = null;
 
 /* ═══════════════════════════════════════
    ENTRY POINT
@@ -203,6 +229,9 @@ export function mountControl(user, isAdmin) {
     _bindLibraryPane();
     _bindChannelManager();
     _bindApprovalPane();
+    _bindLiveTvPane();
+    _bindCommercialStudio();
+    _subscribeCommercialLib();
 
     // Close button
     ctrl.querySelector('#ax-ctrl-close')?.addEventListener('click', _restoreHero);
@@ -355,6 +384,12 @@ function _buildFounderHTML() {
     <div class="ax-ctrl-section-label">BROADCAST</div>
     <button class="ax-ctrl-nav-btn" data-pane="aurenix-one">
       <span class="ax-ctrl-nav-icon">🔴</span> AURENIX ONE <span id="ax-one-engine-badge" style="display:none;background:var(--red);color:#fff;border-radius:10px;padding:1px 6px;font-size:9px;margin-left:4px;font-weight:900;letter-spacing:0.5px;">LIVE</span>
+    </button>
+    <button class="ax-ctrl-nav-btn" data-pane="live-tv">
+      <span class="ax-ctrl-nav-icon">📡</span> AURENIX LIVE TV <span id="ax-livetv-engine-badge" style="display:none;background:var(--red);color:#fff;border-radius:10px;padding:1px 6px;font-size:9px;margin-left:4px;font-weight:900;letter-spacing:0.5px;">LIVE</span>
+    </button>
+    <button class="ax-ctrl-nav-btn" data-pane="commercial-studio">
+      <span class="ax-ctrl-nav-icon">📺</span> Commercial Studio
     </button>
     <button class="ax-ctrl-nav-btn" data-pane="channels">
       <span class="ax-ctrl-nav-icon">📺</span> Channel Manager
@@ -745,6 +780,132 @@ function _buildFounderHTML() {
       </div>
     </div>
 
+    <!-- ══ AURENIX LIVE TV CONTROL ══ -->
+    <div class="ax-ctrl-pane" id="ax-pane-live-tv">
+      <div class="ax-section-title">📡 AURENIX <span>LIVE TV</span></div>
+      <div style="background:rgba(255,45,85,0.08);border:1px solid rgba(255,45,85,0.25);border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:12px;line-height:1.7;color:var(--text-dim);">
+        <strong style="color:#ff2d55;">AURENIX LIVE TV</strong> — 24/7 shared television broadcast. All viewers watch the same live position.
+        Random programs, automatic commercial breaks, Founder-controlled content pool.
+        This is a <strong style="color:var(--text);">completely separate channel</strong> from AURENIX ONE.
+      </div>
+
+      <div class="ax-one-status-bar" id="ax-ltv-status-bar">
+        <div class="ax-one-status-live" id="ax-ltv-status-live">
+          <span class="ax-one-live-dot" id="ax-ltv-live-dot"></span>
+          <span id="ax-ltv-status-text">CHANNEL OFFLINE</span>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);" id="ax-ltv-engine-state">Engine not started</div>
+      </div>
+
+      <div class="ax-one-section-label">LIVE CHANNEL CONTROL</div>
+      <div class="ax-one-controls-grid">
+        <button class="ax-one-ctrl-btn ax-one-btn-start" id="ax-ltv-start-btn">▶ START LIVE TV</button>
+        <button class="ax-one-ctrl-btn ax-one-btn-stop"  id="ax-ltv-stop-btn">■ STOP LIVE TV</button>
+        <button class="ax-one-ctrl-btn" id="ax-ltv-pause-btn">⏸ PAUSE</button>
+        <button class="ax-one-ctrl-btn" id="ax-ltv-resume-btn">▶ RESUME</button>
+        <button class="ax-one-ctrl-btn" id="ax-ltv-skip-btn">⏭ SKIP PROGRAM</button>
+        <button class="ax-one-ctrl-btn" id="ax-ltv-force-comm-btn">📢 FORCE COMMERCIAL BREAK</button>
+        <button class="ax-one-ctrl-btn" id="ax-ltv-randomize-btn">🎲 RANDOMIZE NEXT</button>
+        <button class="ax-one-ctrl-btn" style="color:var(--gold);" id="ax-ltv-goto-comm-btn">📺 MANAGE COMMERCIALS</button>
+      </div>
+
+      <div class="ax-one-section-label">ON AIR — AURENIX LIVE TV</div>
+      <div class="ax-one-on-air-grid">
+        <div class="ax-one-now-card">
+          <div class="ax-one-card-label"><span class="ax-one-live-dot live"></span> NOW PLAYING</div>
+          <div class="ax-one-now-title" id="ax-ltv-now-title">—</div>
+          <div class="ax-one-now-meta"  id="ax-ltv-now-meta">No broadcast active</div>
+          <div class="ax-one-progress-wrap">
+            <div class="ax-one-progress-bar">
+              <div class="ax-one-progress-fill" id="ax-ltv-progress-fill"></div>
+            </div>
+            <div class="ax-one-progress-times">
+              <span id="ax-ltv-elapsed">0:00</span>
+              <span id="ax-ltv-remain">—</span>
+            </div>
+          </div>
+          <div class="ax-one-comm-indicator" id="ax-ltv-comm-indicator" style="display:none;">
+            <span style="color:var(--gold);font-weight:700;font-size:11px;letter-spacing:1px;">📢 COMMERCIAL BREAK</span>
+          </div>
+        </div>
+        <div class="ax-one-upnext-card">
+          <div class="ax-one-card-label">UP NEXT</div>
+          <div class="ax-one-now-title" id="ax-ltv-next-title">—</div>
+          <div class="ax-one-now-meta"  id="ax-ltv-next-meta"></div>
+        </div>
+      </div>
+
+      <div class="ax-one-section-label" style="margin-top:20px;display:flex;align-items:center;justify-content:space-between;">
+        <span>BROADCAST HISTORY</span>
+        <button class="ax-btn-sm" id="ax-ltv-refresh-hist">↺ Refresh</button>
+      </div>
+      <div id="ax-ltv-history-list" style="margin-bottom:20px;">
+        <div style="color:var(--text-dim);font-size:12px;">History will appear here.</div>
+      </div>
+
+      <div class="ax-one-section-label">COMMERCIAL FREQUENCY</div>
+      <div class="ax-one-freq-grid">
+        <button class="ax-ltv-freq-btn" data-freq="off">OFF</button>
+        <button class="ax-ltv-freq-btn" data-freq="low">LOW</button>
+        <button class="ax-ltv-freq-btn active" data-freq="normal">NORMAL</button>
+        <button class="ax-ltv-freq-btn" data-freq="high">HIGH</button>
+      </div>
+
+      <div class="ax-one-settings-grid" style="margin-top:14px;">
+        <div class="ax-field-group">
+          <label class="ax-field-label">Min programs between breaks</label>
+          <input class="ax-field-input" type="number" id="ax-ltv-min-prog" min="1" max="99" value="2">
+        </div>
+        <div class="ax-field-group">
+          <label class="ax-field-label">Max programs between breaks</label>
+          <input class="ax-field-input" type="number" id="ax-ltv-max-prog" min="1" max="99" value="4">
+        </div>
+        <div class="ax-field-group">
+          <label class="ax-field-label">Min commercials per break</label>
+          <input class="ax-field-input" type="number" id="ax-ltv-min-spots" min="0" max="10" value="1">
+        </div>
+        <div class="ax-field-group">
+          <label class="ax-field-label">Max commercials per break</label>
+          <input class="ax-field-input" type="number" id="ax-ltv-max-spots" min="0" max="10" value="2">
+        </div>
+        <div class="ax-field-group">
+          <label class="ax-field-label">Avoid-repeat window (# items)</label>
+          <input class="ax-field-input" type="number" id="ax-ltv-repeat-window" min="0" max="100" value="10">
+        </div>
+      </div>
+      <button class="ax-btn-sm" id="ax-ltv-save-settings" style="margin-top:10px;">💾 Save Settings</button>
+
+      <div class="ax-one-section-label" style="margin-top:20px;">LIVE TV CONTENT POOL</div>
+      <div id="ax-ltv-pool-info" style="font-size:12px;color:var(--text-dim);">Loading pool info…</div>
+    </div>
+
+    <!-- ══ COMMERCIAL STUDIO ══ -->
+    <div class="ax-ctrl-pane" id="ax-pane-commercial-studio">
+      <div class="ax-section-title">📺 Commercial <span>Studio</span></div>
+      <div style="background:rgba(184,134,11,0.1);border:1px solid rgba(184,134,11,0.3);border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:12px;line-height:1.7;color:var(--text-dim);">
+        <strong style="color:var(--gold);">COMMERCIAL STUDIO</strong> — Create, manage, and approve commercials for AURENIX LIVE TV.<br>
+        Only <strong style="color:var(--green);">ACTIVE</strong> commercials can enter the LIVE TV broadcast system.<br>
+        Upload a finished video OR create a commercial from an image + text + music.
+        The Founder controls all approval — do not reject content just because it contains a face, person, or logo.
+      </div>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px;">
+        <button class="ax-btn-primary" id="ax-comm-create-btn" style="font-size:13px;padding:10px 22px;">+ CREATE COMMERCIAL</button>
+        <button class="ax-btn-sm" id="ax-comm-upload-video-btn" style="padding:10px 18px;">⬆ UPLOAD VIDEO COMMERCIAL</button>
+      </div>
+
+      <div class="ax-one-section-label">COMMERCIAL LIBRARY</div>
+      <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;" id="ax-comm-filter-bar">
+        <button class="ax-btn-sm ax-comm-filter active" data-status="all">ALL</button>
+        <button class="ax-btn-sm ax-comm-filter" data-status="active">ACTIVE</button>
+        <button class="ax-btn-sm ax-comm-filter" data-status="inactive">INACTIVE</button>
+        <button class="ax-btn-sm ax-comm-filter" data-status="draft">DRAFT</button>
+      </div>
+      <div id="ax-comm-library-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;">
+        <div style="color:var(--text-dim);font-size:12px;padding:24px;">Loading commercial library…</div>
+      </div>
+    </div>
+
   </main>
 </div>
 
@@ -847,6 +1008,119 @@ function _buildFounderHTML() {
     </div>
   </div>
 </div>
+
+<!-- COMMERCIAL CREATOR MODAL -->
+<div class="ax-modal-overlay" id="ax-comm-modal" style="display:none;">
+  <div class="ax-modal-box" style="max-width:580px;max-height:90vh;overflow-y:auto;">
+    <div class="ax-modal-title" id="ax-comm-modal-title">📺 CREATE COMMERCIAL</div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:16px;line-height:1.6;">
+      Create a commercial from an image + text + music, OR upload a finished video commercial.<br>
+      <strong style="color:var(--text);">Content is never rejected based on subject matter</strong> — people, faces, logos, and cats are all accepted.
+    </div>
+
+    <!-- Type selector -->
+    <div class="ax-one-section-label" style="margin-bottom:8px;">COMMERCIAL TYPE</div>
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+      <button class="ax-btn-sm ax-comm-type-btn active" data-type="image" style="padding:8px 16px;">🖼 FROM IMAGE</button>
+      <button class="ax-btn-sm ax-comm-type-btn" data-type="video" style="padding:8px 16px;">🎬 UPLOAD VIDEO</button>
+    </div>
+
+    <!-- Image-based commercial fields -->
+    <div id="ax-comm-image-fields">
+      <div class="ax-meta-grid">
+        <div class="ax-field-group" style="grid-column:1/-1;">
+          <label class="ax-field-label">Commercial Image * <span style="color:var(--text-dim);font-size:10px;">(person, business, product, logo — anything)</span></label>
+          <div style="border:2px dashed var(--border);border-radius:8px;padding:20px;text-align:center;cursor:pointer;background:var(--surface);" id="ax-comm-img-drop">
+            <div id="ax-comm-img-preview" style="margin-bottom:8px;display:none;"><img id="ax-comm-img-el" style="max-width:100%;max-height:180px;border-radius:6px;" src="" alt=""></div>
+            <div id="ax-comm-img-placeholder">📷 Click or drop image here<br><span style="font-size:10px;color:var(--text-dim);">JPG PNG WebP GIF — any image accepted</span></div>
+            <input type="file" id="ax-comm-img-input" accept="image/*" style="display:none;">
+          </div>
+        </div>
+        <div class="ax-field-group">
+          <label class="ax-field-label">Business / Brand Name</label>
+          <input class="ax-field-input" id="ax-comm-biz-name" placeholder="e.g. ACME Corp">
+        </div>
+        <div class="ax-field-group">
+          <label class="ax-field-label">Website / URL</label>
+          <input class="ax-field-input" id="ax-comm-website" placeholder="e.g. acme.com" type="url">
+        </div>
+        <div class="ax-field-group" style="grid-column:1/-1;">
+          <label class="ax-field-label">Promotional Text / Tagline</label>
+          <input class="ax-field-input" id="ax-comm-promo-text" placeholder="e.g. Check out this website! Best deals in town.">
+        </div>
+        <div class="ax-field-group" style="grid-column:1/-1;">
+          <label class="ax-field-label">Background Music / Audio <span style="color:var(--text-dim);font-size:10px;">(optional — select from approved music library)</span></label>
+          <select class="ax-field-input" id="ax-comm-bg-music">
+            <option value="">— No background music —</option>
+          </select>
+        </div>
+        <div class="ax-field-group">
+          <label class="ax-field-label">Commercial Duration</label>
+          <select class="ax-field-input" id="ax-comm-duration">
+            <option value="10">10 seconds</option>
+            <option value="15">15 seconds</option>
+            <option value="20">20 seconds</option>
+            <option value="30" selected>30 seconds</option>
+            <option value="45">45 seconds</option>
+            <option value="60">60 seconds</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Video upload commercial fields -->
+    <div id="ax-comm-video-fields" style="display:none;">
+      <div class="ax-field-group" style="margin-bottom:12px;">
+        <label class="ax-field-label">Commercial Video File *</label>
+        <div style="border:2px dashed var(--border);border-radius:8px;padding:20px;text-align:center;cursor:pointer;background:var(--surface);" id="ax-comm-vid-drop">
+          <div id="ax-comm-vid-info" style="font-size:12px;color:var(--text-dim);display:none;"></div>
+          <div id="ax-comm-vid-placeholder">🎬 Click or drop video here<br><span style="font-size:10px;color:var(--text-dim);">MP4 WebM MOV — any video content accepted (people, faces, logos, all OK)</span></div>
+          <input type="file" id="ax-comm-vid-input" accept="video/*" style="display:none;">
+        </div>
+        <div id="ax-comm-vid-progress" style="display:none;margin-top:8px;">
+          <div style="height:4px;background:var(--surface-hi);border-radius:2px;overflow:hidden;">
+            <div id="ax-comm-vid-bar" style="height:100%;width:0%;background:var(--blue-bright);transition:width 0.2s;"></div>
+          </div>
+          <div id="ax-comm-vid-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Common fields for both types -->
+    <div class="ax-meta-grid" style="margin-top:8px;">
+      <div class="ax-field-group">
+        <label class="ax-field-label">Commercial Name / Title *</label>
+        <input class="ax-field-input" id="ax-comm-title" placeholder="e.g. ACME Summer Sale">
+      </div>
+      <div class="ax-field-group">
+        <label class="ax-field-label">Advertiser / Client</label>
+        <input class="ax-field-input" id="ax-comm-advertiser" placeholder="e.g. ACME Corp">
+      </div>
+      <div class="ax-field-group" style="grid-column:1/-1;">
+        <label class="ax-field-label">Notes / Description</label>
+        <textarea class="ax-field-input" id="ax-comm-notes" rows="2" placeholder="Internal notes about this commercial" style="resize:vertical;"></textarea>
+      </div>
+    </div>
+
+    <div class="ax-auth-err" id="ax-comm-err" style="margin-top:8px;"></div>
+    <div class="ax-modal-actions" style="margin-top:16px;">
+      <button class="ax-btn-ghost" id="ax-comm-cancel">CANCEL</button>
+      <button class="ax-btn-sm" id="ax-comm-preview-btn" style="padding:10px 18px;">👁 PREVIEW</button>
+      <button class="ax-btn-primary" id="ax-comm-save-btn">💾 SAVE COMMERCIAL</button>
+    </div>
+  </div>
+</div>
+
+<!-- COMMERCIAL PREVIEW MODAL -->
+<div class="ax-modal-overlay" id="ax-comm-preview-modal" style="display:none;">
+  <div class="ax-modal-box" style="max-width:520px;">
+    <div class="ax-modal-title">👁 COMMERCIAL PREVIEW</div>
+    <div id="ax-comm-preview-content" style="background:var(--surface);border-radius:8px;padding:20px;text-align:center;min-height:120px;"></div>
+    <div class="ax-modal-actions" style="margin-top:16px;">
+      <button class="ax-btn-ghost" id="ax-comm-preview-close">CLOSE</button>
+    </div>
+  </div>
+</div>
   `;
 }
 
@@ -863,6 +1137,17 @@ let _oneCurrentFreq  = 'normal';
 function _bindOnePane() {
   // Start Channel
   document.getElementById('ax-one-start-btn')?.addEventListener('click', async () => {
+    // Auth guard — verify Founder session before touching Firestore
+    if (!_user) {
+      _toast('Please log in to continue.', 'err');
+      return;
+    }
+    if (!_isFounder) {
+      _toast('Founder access required.', 'err');
+      console.warn('[AURENIX ONE] START blocked — user is not Founder:', _user?.email);
+      return;
+    }
+
     const approvedLib = _mediaLib.filter(m => m.status === 'approved');
     if (!approvedLib.length) { _toast('No approved media — approve content first.', 'err'); return; }
     try {
@@ -872,7 +1157,21 @@ function _bindOnePane() {
       _renderOneStatus(true, false);
       _startOneTick();
       _toast('AURENIX ONE channel started.');
-    } catch (e) { _toast('Start failed: ' + e.message, 'err'); }
+    } catch (e) {
+      // Log the exact Firebase error code and path for diagnosis
+      console.error('[AURENIX ONE] START failed —',
+        'code:', e?.code,
+        'message:', e?.message,
+        'user:', _user?.email,
+        'isFounder:', _isFounder,
+        'raw:', e,
+      );
+      if (e?.code === 'permission-denied') {
+        _toast('Start failed: Firestore permission denied. Check console for details.', 'err');
+      } else {
+        _toast('Start failed: ' + e.message, 'err');
+      }
+    }
   });
 
   // Stop Channel
@@ -1141,6 +1440,23 @@ function _subscribeMedia() {
     // Keep AURENIX ONE engine pool in sync
     if (_oneEngineRunning) oneUpdateMedia(_mediaLib);
     _renderOnePoolInfo();
+    // Keep AURENIX LIVE TV engine pool in sync
+    if (_liveTvEngineRunning) updateLiveTvMediaLib(_mediaLib);
+    _renderLiveTvPoolInfo();
+    // Refresh commercial modal music dropdown
+    _populateCommMusicDropdown();
+  });
+}
+
+/* ─── COMMERCIAL LIBRARY SUBSCRIPTION ─── */
+function _subscribeCommercialLib() {
+  if (_commLibUnsub) return;
+  const q = query(collection(db, 'network_commercials'), orderBy('created_at', 'desc'));
+  _commLibUnsub = onSnapshot(q, snap => {
+    _commercialLib = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    _renderCommercialLibrary();
+  }, err => {
+    console.warn('[AURENIX] network_commercials snapshot error:', err.message);
   });
 }
 
@@ -1267,23 +1583,38 @@ function _rebuildDynamicPanes() {
   }
 }
 
-/** Seed the 5 initial channels if the network_channels collection is empty. */
+/** Seed the initial channels if the network_channels collection is empty. */
 async function _seedInitialChannels() {
   try {
     const snap = await getDocs(collection(db, 'network_channels'));
-    if (!snap.empty) return; // Already seeded
+    if (!snap.empty) {
+      // Check if ALTV is missing (upgrade existing installs)
+      const existingIds = snap.docs.map(d => d.id);
+      if (!existingIds.includes('ALTV')) {
+        await setDoc(doc(db, 'network_channels', 'ALTV'), {
+          name: 'AURENIX LIVE TV', label: 'LIVE TV', color: '#ff2d55',
+          channel_type: 'mixed', mode: 'random', sort_order: 0,
+          description: '24/7 live television — random videos, music, shows, and commercial breaks.',
+          enabled: true, loop: true, is_live_tv: true,
+          created_at: serverTimestamp(),
+        });
+        console.log('[AURENIX] Added ALTV channel to existing network.');
+      }
+      return;
+    }
     const seeds = [
-      { id: 'A1', name: 'AURENIX ONE',        label: 'ONE',        color: '#1e50ff', channel_type: 'mixed',  mode: 'shuffle',  sort_order: 1, description: 'Mixed programming — music, videos, clips, and more.',         enabled: true, loop: true },
-      { id: 'A2', name: 'AURENIX MUSIC',       label: 'MUSIC',      color: '#b8860b', channel_type: 'music',  mode: 'ordered',  sort_order: 2, description: 'Music-only channel with Founder-curated tracks.',             enabled: true, loop: true },
-      { id: 'A3', name: 'AURENIX VIDEO',       label: 'VIDEO',      color: '#8b00ff', channel_type: 'video',  mode: 'ordered',  sort_order: 3, description: 'Video broadcast channel — films, shows, music videos.',        enabled: true, loop: true },
-      { id: 'A4', name: 'AURENIX FUNNY',       label: 'FUNNY',      color: '#ff9500', channel_type: 'mixed',  mode: 'shuffle',  sort_order: 4, description: 'Comedy and funny clip channel — approved clips only.',         enabled: true, loop: true },
-      { id: 'A5', name: 'AURENIX AFTER DARK',  label: 'AFTER DARK', color: '#9b59b6', channel_type: 'mixed',  mode: 'ordered',  sort_order: 5, description: 'Nighttime independent programming — its own media pool.',      enabled: true, loop: true },
+      { id: 'ALTV',name: 'AURENIX LIVE TV',   label: 'LIVE TV',    color: '#ff2d55', channel_type: 'mixed',  mode: 'random',   sort_order: 0, description: '24/7 live television — random videos, music, shows, and commercial breaks.', enabled: true, loop: true, is_live_tv: true },
+      { id: 'A1',  name: 'AURENIX ONE',        label: 'ONE',        color: '#1e50ff', channel_type: 'mixed',  mode: 'shuffle',  sort_order: 1, description: 'Mixed programming — music, videos, clips, and more.',         enabled: true, loop: true },
+      { id: 'A2',  name: 'AURENIX MUSIC',      label: 'MUSIC',      color: '#b8860b', channel_type: 'music',  mode: 'ordered',  sort_order: 2, description: 'Music-only channel with Founder-curated tracks.',             enabled: true, loop: true },
+      { id: 'A3',  name: 'AURENIX VIDEO',      label: 'VIDEO',      color: '#8b00ff', channel_type: 'video',  mode: 'ordered',  sort_order: 3, description: 'Video broadcast channel — films, shows, music videos.',        enabled: true, loop: true },
+      { id: 'A4',  name: 'AURENIX FUNNY',      label: 'FUNNY',      color: '#ff9500', channel_type: 'mixed',  mode: 'shuffle',  sort_order: 4, description: 'Comedy and funny clip channel — approved clips only.',         enabled: true, loop: true },
+      { id: 'A5',  name: 'AURENIX AFTER DARK', label: 'AFTER DARK', color: '#9b59b6', channel_type: 'mixed',  mode: 'ordered',  sort_order: 5, description: 'Nighttime independent programming — its own media pool.',      enabled: true, loop: true },
     ];
     for (const seed of seeds) {
       const { id, ...data } = seed;
       await setDoc(doc(db, 'network_channels', id), { ...data, created_at: serverTimestamp() });
     }
-    console.log('[AURENIX] Seeded 5 initial channels.');
+    console.log('[AURENIX] Seeded initial channels including AURENIX LIVE TV.');
   } catch (e) {
     console.warn('[AURENIX] Channel seed failed (may already exist or no permission):', e.message);
   }
@@ -1481,16 +1812,17 @@ function _renderDashboard() {
     qEl.innerHTML = chs.map(ch => {
       const st    = _channelStates[ch.id];
       const queue = st?.queue || [];
-      // AURENIX ONE uses a live-TV engine with no fixed queue
-      if (ch.id === ONE_CHANNEL_ID) {
+      // Live-TV engine channels (A1, ALTV) use random engines — no fixed queue
+      if (ch.id === ONE_CHANNEL_ID || ch.id === LIVE_TV_CHANNEL_ID) {
         const isLive = !!(st?.current_item);
+        const isComm = !!(st?.is_commercial);
         return `
           <div class="ax-dash-q-row">
             <div class="ax-dash-q-label" style="color:${ch.color || '#1e50ff'}">${_esc(ch.label || ch.id)}</div>
             <div class="ax-dash-q-bar-wrap">
-              <div class="ax-dash-q-bar" style="width:${isLive ? 100 : 0}%;background:${isLive ? 'var(--red)' : ch.color || '#1e50ff'}"></div>
+              <div class="ax-dash-q-bar" style="width:${isLive ? 100 : 0}%;background:${isLive ? (isComm ? 'var(--gold)' : 'var(--red)') : ch.color || '#1e50ff'}"></div>
             </div>
-            <div class="ax-dash-q-count" style="color:${isLive ? 'var(--red)' : 'var(--text-dim)'};">${isLive ? '🔴 LIVE TV' : '⚫ ENGINE OFF'}</div>
+            <div class="ax-dash-q-count" style="color:${isLive ? (isComm ? 'var(--gold)' : 'var(--red)') : 'var(--text-dim)'};">${isLive ? (isComm ? '📢 COMMERCIAL' : '🔴 LIVE TV') : '⚫ ENGINE OFF'}</div>
           </div>`;
       }
       const max   = 20;
@@ -1528,8 +1860,8 @@ function _checkQueueWarnings() {
   const chs = _channels();
   const warnings = [];
   chs.forEach(ch => {
-    // AURENIX ONE uses a live-TV engine — it has no queue; skip queue warnings.
-    if (ch.id === ONE_CHANNEL_ID) return;
+    // Live-TV engine channels use a random engine — no fixed queue; skip queue warnings.
+    if (ch.id === ONE_CHANNEL_ID || ch.id === LIVE_TV_CHANNEL_ID) return;
     const st    = _channelStates[ch.id];
     const queue = st?.queue || [];
     const cur   = st?.current_item;
@@ -2925,6 +3257,51 @@ function _openBroadcastModal(mediaId) {
    WINDOW ACTIONS (callable from inline HTML)
 ═══════════════════════════════════════ */
 window._AXC = {
+  switchToPane(pane) {
+    _switchPane(pane);
+  },
+
+  editCommercial(commId) {
+    _openCommercialModal(commId);
+  },
+
+  async deleteCommercial(commId) {
+    const comm = _commercialLib.find(c => c.id === commId);
+    if (!comm) return;
+    if (!confirm(`DELETE commercial "${comm.title}"?\nThis cannot be undone.`)) return;
+    try {
+      await deleteDoc(doc(db, 'network_commercials', commId));
+      _toast('Commercial deleted.');
+    } catch (e) { _toast('Delete failed: ' + e.message, 'err'); }
+  },
+
+  async activateCommercial(commId) {
+    try {
+      await updateDoc(doc(db, 'network_commercials', commId), { status: 'active', updated_at: serverTimestamp() });
+      _toast('Commercial activated for LIVE TV.');
+    } catch (e) { _toast('Activate failed: ' + e.message, 'err'); }
+  },
+
+  async deactivateCommercial(commId) {
+    try {
+      await updateDoc(doc(db, 'network_commercials', commId), { status: 'inactive', updated_at: serverTimestamp() });
+      _toast('Commercial deactivated.');
+    } catch (e) { _toast('Deactivate failed: ' + e.message, 'err'); }
+  },
+
+  previewCommercial(commId) {
+    const comm = _commercialLib.find(c => c.id === commId);
+    if (!comm) return;
+    _showCommercialPreview(comm);
+  },
+
+  async toggleLiveTvAssign(mediaId, assigned) {
+    try {
+      await updateDoc(doc(db, 'network_media', mediaId), { live_tv_assigned: assigned, updated_at: serverTimestamp() });
+      _toast(assigned ? 'Added to LIVE TV pool.' : 'Removed from LIVE TV pool.');
+    } catch (e) { _toast('Failed: ' + e.message, 'err'); }
+  },
+
   goToSchedule(channelId) {
     _schedChannelId = channelId;
     const ch = _channels().find(c => c.id === channelId);
@@ -3228,6 +3605,7 @@ function _typeIcon(type) {
   const map = {
     audio:'🎵', music:'🎵', video:'🎬', music_video:'🎞', show:'📺',
     broadcast_clip:'🎥', podcast:'🎙', audio_program:'🎧', station_id:'📢',
+    commercial:'📺', promo:'📢',
     thumbnail:'🖼', trailer:'🎞', archive:'📼',
   };
   return map[type] || '🎬';
@@ -3240,4 +3618,820 @@ function _toast(msg, type = '') {
   el.className = type === 'err' ? 'err visible' : 'visible';
   clearTimeout(el._t);
   el._t = setTimeout(() => el.classList.remove('visible'), 3500);
+}
+
+/* ═══════════════════════════════════════
+   AURENIX LIVE TV — FOUNDER PANE BINDINGS
+═══════════════════════════════════════ */
+
+function _bindLiveTvPane() {
+  // Start
+  document.getElementById('ax-ltv-start-btn')?.addEventListener('click', async () => {
+    if (!_user || !_isFounder) { _toast('Founder access required.', 'err'); return; }
+    const approvedLib = _mediaLib.filter(m => m.status === 'approved');
+    if (!approvedLib.length) { _toast('No approved media — approve content first.', 'err'); return; }
+    try {
+      await startLiveTvEngine(_mediaLib);
+      _liveTvEngineRunning = true;
+      _updateLiveTvBadge(true);
+      _renderLiveTvStatus(true, false);
+      _startLiveTvTick();
+      _toast('AURENIX LIVE TV started.');
+    } catch (e) {
+      console.error('[AURENIX LIVE TV] START failed —', e?.code, e?.message, e);
+      if (e?.code === 'permission-denied') {
+        _toast('Start failed: Firestore permission denied. Check console.', 'err');
+      } else {
+        _toast('Start failed: ' + e.message, 'err');
+      }
+    }
+  });
+
+  // Stop
+  document.getElementById('ax-ltv-stop-btn')?.addEventListener('click', async () => {
+    if (!confirm('Stop AURENIX LIVE TV? The channel will go dark for all viewers.')) return;
+    try {
+      await stopLiveTvEngine();
+      _liveTvEngineRunning = false;
+      _stopLiveTvTick();
+      _updateLiveTvBadge(false);
+      _renderLiveTvStatus(false, false);
+      _toast('AURENIX LIVE TV stopped.');
+    } catch (e) { _toast('Stop failed: ' + e.message, 'err'); }
+  });
+
+  // Pause
+  document.getElementById('ax-ltv-pause-btn')?.addEventListener('click', async () => {
+    try {
+      await pauseLiveTvEngine();
+      _renderLiveTvStatus(true, true);
+      _toast('AURENIX LIVE TV paused.');
+    } catch (e) { _toast('Pause failed: ' + e.message, 'err'); }
+  });
+
+  // Resume
+  document.getElementById('ax-ltv-resume-btn')?.addEventListener('click', async () => {
+    try {
+      await resumeLiveTvEngine();
+      _renderLiveTvStatus(true, false);
+      _toast('AURENIX LIVE TV resumed.');
+    } catch (e) { _toast('Resume failed: ' + e.message, 'err'); }
+  });
+
+  // Skip
+  document.getElementById('ax-ltv-skip-btn')?.addEventListener('click', async () => {
+    try {
+      await skipLiveTvProgram();
+      _toast('Skipped — loading next program…');
+    } catch (e) { _toast('Skip failed: ' + e.message, 'err'); }
+  });
+
+  // Force commercial break
+  document.getElementById('ax-ltv-force-comm-btn')?.addEventListener('click', async () => {
+    try {
+      const ok = await forceLiveTvCommercialBreak();
+      _toast(ok ? '📢 Commercial break started.' : 'No commercials available yet.', ok ? '' : 'err');
+    } catch (e) { _toast('Force break failed: ' + e.message, 'err'); }
+  });
+
+  // Randomize next
+  document.getElementById('ax-ltv-randomize-btn')?.addEventListener('click', async () => {
+    try {
+      const ok = await randomizeLiveTvNext();
+      _toast(ok ? '🎲 Randomized — new program selected.' : 'No eligible programs in pool.', ok ? '' : 'err');
+    } catch (e) { _toast('Randomize failed: ' + e.message, 'err'); }
+  });
+
+  // Manage commercials shortcut
+  document.getElementById('ax-ltv-goto-comm-btn')?.addEventListener('click', () => {
+    _switchPane('commercial-studio');
+  });
+
+  // Refresh history
+  document.getElementById('ax-ltv-refresh-hist')?.addEventListener('click', _renderLiveTvHistory);
+
+  // Commercial frequency buttons
+  document.querySelectorAll('.ax-ltv-freq-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      document.querySelectorAll('.ax-ltv-freq-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      _liveTvCurrentFreq = btn.dataset.freq;
+      const freq = LIVE_TV_COMMERCIAL_FREQ[_liveTvCurrentFreq] || LIVE_TV_COMMERCIAL_FREQ.normal;
+      const minProg = document.getElementById('ax-ltv-min-prog');
+      const maxProg = document.getElementById('ax-ltv-max-prog');
+      const minSpot = document.getElementById('ax-ltv-min-spots');
+      const maxSpot = document.getElementById('ax-ltv-max-spots');
+      if (minProg) minProg.value = freq.minPrograms === 999 ? 0 : freq.minPrograms;
+      if (maxProg) maxProg.value = freq.maxPrograms === 999 ? 0 : freq.maxPrograms;
+      if (minSpot) minSpot.value = freq.minSpot;
+      if (maxSpot) maxSpot.value = freq.maxSpot;
+    });
+  });
+
+  // Save settings
+  document.getElementById('ax-ltv-save-settings')?.addEventListener('click', async () => {
+    const updates = {
+      commercial_freq:     _liveTvCurrentFreq,
+      min_programs:        parseInt(document.getElementById('ax-ltv-min-prog')?.value) || 2,
+      max_programs:        parseInt(document.getElementById('ax-ltv-max-prog')?.value) || 4,
+      min_spots:           parseInt(document.getElementById('ax-ltv-min-spots')?.value) || 1,
+      max_spots:           parseInt(document.getElementById('ax-ltv-max-spots')?.value) || 2,
+      avoid_repeat_window: parseInt(document.getElementById('ax-ltv-repeat-window')?.value) || 10,
+    };
+    try {
+      await saveLiveTvConfig(updates);
+      _toast('AURENIX LIVE TV settings saved.');
+    } catch (e) { _toast('Save failed: ' + e.message, 'err'); }
+  });
+
+  // Subscribe to ALTV state for the on-air panel
+  _subscribeLiveTvStateForPanel();
+
+  // Initial renders
+  _renderLiveTvPoolInfo();
+  _renderLiveTvHistory();
+}
+
+/** Subscribe to network_state/ALTV to update the on-air panel. */
+function _subscribeLiveTvStateForPanel() {
+  if (_liveTvStateUnsub) return;
+  const stateRef = doc(db, 'network_state', LIVE_TV_CHANNEL_ID);
+  _liveTvStateUnsub = onSnapshot(stateRef, snap => {
+    if (!snap.exists()) return;
+    const st  = snap.data();
+    const cur = st?.current_item;
+    const isComm = !!(st?.is_commercial);
+
+    const titleEl   = document.getElementById('ax-ltv-now-title');
+    const metaEl    = document.getElementById('ax-ltv-now-meta');
+    const commEl    = document.getElementById('ax-ltv-comm-indicator');
+    const nextTitle = document.getElementById('ax-ltv-next-title');
+    const nextMeta  = document.getElementById('ax-ltv-next-meta');
+
+    if (titleEl) titleEl.textContent = cur ? cur.title : '—';
+    if (metaEl)  metaEl.textContent  = cur ? (cur.artist || cur.type || 'media') : 'No broadcast active';
+    if (commEl)  commEl.style.display = isComm ? '' : 'none';
+
+    const commQ = st?.commercial_queue || [];
+    if (nextTitle) {
+      if (isComm && commQ.length > 0) {
+        nextTitle.textContent = commQ[0].title;
+        if (nextMeta) nextMeta.textContent = 'Commercial';
+      } else if (isComm) {
+        nextTitle.textContent = 'Program (auto-selected)';
+        if (nextMeta) nextMeta.textContent = 'After commercial break';
+      } else {
+        nextTitle.textContent = 'Auto-selected next';
+        if (nextMeta) nextMeta.textContent = 'Random from approved pool';
+      }
+    }
+
+    const isRunning = !!(cur);
+    _renderLiveTvStatus(isRunning, false);
+    _updateLiveTvBadge(isRunning);
+  });
+}
+
+function _renderLiveTvStatus(running, paused) {
+  const dotEl   = document.getElementById('ax-ltv-live-dot');
+  const textEl  = document.getElementById('ax-ltv-status-text');
+  const stateEl = document.getElementById('ax-ltv-engine-state');
+  if (dotEl)  dotEl.className  = `ax-one-live-dot ${running && !paused ? 'live' : ''}`;
+  if (textEl) textEl.textContent = paused ? 'PAUSED' : (running ? 'BROADCASTING' : 'CHANNEL OFFLINE');
+  if (stateEl) stateEl.textContent = _liveTvEngineRunning
+    ? (paused ? 'Engine active — paused' : 'Engine running — 24/7 mode')
+    : 'Engine not started — click START LIVE TV';
+}
+
+function _updateLiveTvBadge(live) {
+  const badge = document.getElementById('ax-livetv-engine-badge');
+  if (badge) badge.style.display = live ? '' : 'none';
+}
+
+function _startLiveTvTick() {
+  if (_liveTvTickTimer) return;
+  _liveTvTickTimer = setInterval(_liveTvTickFn, 800);
+}
+
+function _stopLiveTvTick() {
+  if (_liveTvTickTimer) { clearInterval(_liveTvTickTimer); _liveTvTickTimer = null; }
+}
+
+function _liveTvTickFn() {
+  const st  = _channelStates[LIVE_TV_CHANNEL_ID];
+  const cur = st?.current_item;
+  if (!cur) return;
+
+  const startedAt = st.started_at?.toMillis?.() || Date.now();
+  const elapsed   = (Date.now() - startedAt) / 1000;
+  const dur       = cur.duration_sec || 0;
+
+  const fill    = document.getElementById('ax-ltv-progress-fill');
+  const elEl    = document.getElementById('ax-ltv-elapsed');
+  const remEl   = document.getElementById('ax-ltv-remain');
+
+  if (dur > 0) {
+    const pct = Math.min(100, (elapsed / dur) * 100);
+    if (fill)  fill.style.width    = pct + '%';
+    if (elEl)  elEl.textContent    = _fmtTime(elapsed);
+    if (remEl) remEl.textContent   = '-' + _fmtTime(Math.max(0, dur - elapsed));
+  } else {
+    if (fill)  fill.style.width    = '0%';
+    if (elEl)  elEl.textContent    = _fmtTime(elapsed);
+    if (remEl) remEl.textContent   = '—';
+  }
+}
+
+async function _renderLiveTvHistory() {
+  const listEl = document.getElementById('ax-ltv-history-list');
+  if (!listEl) return;
+  try {
+    const history = await getLiveTvHistory();
+    if (!history.length) {
+      listEl.innerHTML = '<div style="color:var(--text-dim);font-size:12px;">No broadcast history yet.</div>';
+      return;
+    }
+    const rows = history.slice().reverse().map((id, i) => {
+      const item = _mediaLib.find(m => m.id === id);
+      return `
+        <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);">
+          <span style="font-size:10px;color:var(--text-muted);min-width:22px;text-align:right;">${history.length - i}</span>
+          <span style="font-size:13px;">${_typeIcon(item?.type)}</span>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+              ${_esc(item?.title || id)}
+            </div>
+            <div style="font-size:10px;color:var(--text-dim);">${_esc(item?.type || '—')}</div>
+          </div>
+        </div>`;
+    });
+    listEl.innerHTML = rows.join('');
+  } catch (e) {
+    listEl.innerHTML = `<div style="color:var(--text-dim);font-size:12px;">Could not load history: ${_esc(e.message)}</div>`;
+  }
+}
+
+function _renderLiveTvPoolInfo() {
+  const el = document.getElementById('ax-ltv-pool-info');
+  if (!el) return;
+  const approved = _mediaLib.filter(m => m.status === 'approved');
+  const PROG_TYPES = ['video','music_video','show','broadcast_clip','audio_program','podcast','station_id','archive','trailer','audio','music'];
+  const COMM_TYPES = ['commercial','promo','trailer','station_id'];
+  const programs    = approved.filter(m => PROG_TYPES.includes(m.type) && m.live_tv_assigned !== false);
+  const commercials = approved.filter(m => COMM_TYPES.includes(m.type) && m.live_tv_assigned !== false);
+  // Also count active commercials from the commercial library
+  const libComms    = _commercialLib.filter(c => c.status === 'active');
+  el.innerHTML = `
+    <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:8px;">
+      <div><span style="font-size:18px;font-weight:900;color:var(--blue-bright);">${programs.length}</span>
+           <span style="font-size:11px;color:var(--text-dim);margin-left:4px;">Programs eligible</span></div>
+      <div><span style="font-size:18px;font-weight:900;color:var(--gold);">${commercials.length + libComms.length}</span>
+           <span style="font-size:11px;color:var(--text-dim);margin-left:4px;">Commercials available</span></div>
+      <div><span style="font-size:18px;font-weight:900;color:var(--green);">${approved.length}</span>
+           <span style="font-size:11px;color:var(--text-dim);margin-left:4px;">Total approved</span></div>
+    </div>
+    ${programs.length === 0 ? '<div style="color:var(--orange,#f0a500);font-size:12px;">⚠ No eligible programs — approve media in Pending Approval first.</div>' : ''}
+    ${(commercials.length + libComms.length) === 0 ? '<div style="color:var(--text-dim);font-size:11px;margin-top:4px;">No commercials yet — create one in Commercial Studio.</div>' : ''}`;
+}
+
+/* ═══════════════════════════════════════
+   COMMERCIAL STUDIO BINDINGS
+═══════════════════════════════════════ */
+let _commEditId    = null;  // non-null when editing an existing commercial
+let _commImageFile = null;  // pending image file
+let _commVideoFile = null;  // pending video file
+let _commType      = 'image'; // 'image' | 'video'
+let _commFilter    = 'all';
+
+function _bindCommercialStudio() {
+  // Main "Create Commercial" button
+  document.getElementById('ax-comm-create-btn')?.addEventListener('click', () => {
+    _openCommercialModal(null);
+  });
+
+  // "Upload Video Commercial" shortcut — opens modal pre-set to video type
+  document.getElementById('ax-comm-upload-video-btn')?.addEventListener('click', () => {
+    _openCommercialModal(null, 'video');
+  });
+
+  // Filter bar
+  document.getElementById('ax-comm-filter-bar')?.querySelectorAll('.ax-comm-filter').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.ax-comm-filter').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      _commFilter = btn.dataset.status;
+      _renderCommercialLibrary();
+    });
+  });
+}
+
+function _openCommercialModal(commId, forceType = null) {
+  _commEditId    = commId;
+  _commImageFile = null;
+  _commVideoFile = null;
+  _commType      = forceType || 'image';
+
+  const modal   = document.getElementById('ax-comm-modal');
+  const titleEl = document.getElementById('ax-comm-modal-title');
+  const errEl   = document.getElementById('ax-comm-err');
+  if (!modal) return;
+
+  if (titleEl) titleEl.textContent = commId ? '✏️ EDIT COMMERCIAL' : '📺 CREATE COMMERCIAL';
+  if (errEl) { errEl.textContent = ''; errEl.classList.remove('visible'); }
+
+  // Reset fields
+  const fieldsToReset = ['ax-comm-title','ax-comm-advertiser','ax-comm-notes',
+    'ax-comm-biz-name','ax-comm-website','ax-comm-promo-text'];
+  fieldsToReset.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  const durEl = document.getElementById('ax-comm-duration');
+  if (durEl) durEl.value = '30';
+
+  // Reset image preview
+  const imgEl        = document.getElementById('ax-comm-img-el');
+  const imgPreview   = document.getElementById('ax-comm-img-preview');
+  const imgPlaceholder = document.getElementById('ax-comm-img-placeholder');
+  if (imgEl) imgEl.src = '';
+  if (imgPreview) imgPreview.style.display = 'none';
+  if (imgPlaceholder) imgPlaceholder.style.display = '';
+
+  // Reset video info
+  const vidInfo = document.getElementById('ax-comm-vid-info');
+  const vidPH   = document.getElementById('ax-comm-vid-placeholder');
+  const vidProg = document.getElementById('ax-comm-vid-progress');
+  if (vidInfo) { vidInfo.style.display = 'none'; vidInfo.textContent = ''; }
+  if (vidPH)   vidPH.style.display = '';
+  if (vidProg) vidProg.style.display = 'none';
+
+  // Populate music dropdown
+  _populateCommMusicDropdown();
+
+  // Set type
+  _setCommType(_commType);
+
+  // If editing — populate fields
+  if (commId) {
+    const comm = _commercialLib.find(c => c.id === commId);
+    if (comm) {
+      const get = id => document.getElementById(id);
+      if (get('ax-comm-title'))    get('ax-comm-title').value    = comm.title    || '';
+      if (get('ax-comm-advertiser'))get('ax-comm-advertiser').value = comm.advertiser || '';
+      if (get('ax-comm-notes'))    get('ax-comm-notes').value    = comm.notes    || '';
+      if (get('ax-comm-biz-name')) get('ax-comm-biz-name').value = comm.biz_name || '';
+      if (get('ax-comm-website'))  get('ax-comm-website').value  = comm.website  || '';
+      if (get('ax-comm-promo-text'))get('ax-comm-promo-text').value = comm.promo_text || '';
+      if (get('ax-comm-duration')) get('ax-comm-duration').value = String(comm.duration_sec || 30);
+      if (get('ax-comm-bg-music')) get('ax-comm-bg-music').value = comm.bg_music_id || '';
+      _commType = comm.commercial_type || 'image';
+      _setCommType(_commType);
+      // Show existing image if any
+      if (comm.image_url && imgEl && imgPreview && imgPlaceholder) {
+        imgEl.src = comm.image_url;
+        imgPreview.style.display = '';
+        imgPlaceholder.style.display = 'none';
+      }
+    }
+  }
+
+  modal.style.display = 'flex';
+
+  // ── Type toggle buttons ──
+  modal.querySelectorAll('.ax-comm-type-btn').forEach(btn => {
+    const handler = () => {
+      _commType = btn.dataset.type;
+      _setCommType(_commType);
+    };
+    btn.removeEventListener('click', handler);
+    btn.addEventListener('click', handler);
+  });
+
+  // ── Image drop zone ──
+  const imgDrop  = document.getElementById('ax-comm-img-drop');
+  const imgInput = document.getElementById('ax-comm-img-input');
+  if (imgDrop) {
+    const imgClickHandler = () => imgInput?.click();
+    imgDrop.removeEventListener('click', imgClickHandler);
+    imgDrop.addEventListener('click', imgClickHandler);
+    imgDrop.addEventListener('dragover', e => { e.preventDefault(); imgDrop.style.borderColor = 'var(--blue-bright)'; });
+    imgDrop.addEventListener('dragleave', () => { imgDrop.style.borderColor = ''; });
+    imgDrop.addEventListener('drop', e => {
+      e.preventDefault();
+      imgDrop.style.borderColor = '';
+      const file = e.dataTransfer.files[0];
+      if (file) _handleCommImageFile(file);
+    });
+  }
+  if (imgInput) {
+    imgInput.onchange = () => {
+      const file = imgInput.files[0];
+      if (file) _handleCommImageFile(file);
+      imgInput.value = '';
+    };
+  }
+
+  // ── Video drop zone ──
+  const vidDrop  = document.getElementById('ax-comm-vid-drop');
+  const vidInput = document.getElementById('ax-comm-vid-input');
+  if (vidDrop) {
+    const vidClickHandler = () => vidInput?.click();
+    vidDrop.removeEventListener('click', vidClickHandler);
+    vidDrop.addEventListener('click', vidClickHandler);
+    vidDrop.addEventListener('dragover', e => { e.preventDefault(); vidDrop.style.borderColor = 'var(--blue-bright)'; });
+    vidDrop.addEventListener('dragleave', () => { vidDrop.style.borderColor = ''; });
+    vidDrop.addEventListener('drop', e => {
+      e.preventDefault();
+      vidDrop.style.borderColor = '';
+      const file = e.dataTransfer.files[0];
+      if (file) _handleCommVideoFile(file);
+    });
+  }
+  if (vidInput) {
+    vidInput.onchange = () => {
+      const file = vidInput.files[0];
+      if (file) _handleCommVideoFile(file);
+      vidInput.value = '';
+    };
+  }
+
+  // ── Cancel ──
+  document.getElementById('ax-comm-cancel')?.addEventListener('click', () => {
+    modal.style.display = 'none';
+    _commImageFile = null;
+    _commVideoFile = null;
+  }, { once: true });
+
+  // ── Preview ──
+  document.getElementById('ax-comm-preview-btn')?.addEventListener('click', () => {
+    _previewCommercialModal();
+  }, { once: true });
+
+  // ── Save ──
+  const saveBtn = document.getElementById('ax-comm-save-btn');
+  if (saveBtn) {
+    // Remove any previous listener by replacing the element clone
+    const newSave = saveBtn.cloneNode(true);
+    saveBtn.parentNode.replaceChild(newSave, saveBtn);
+    newSave.addEventListener('click', () => _saveCommercial(modal, errEl));
+  }
+
+  // Close preview modal
+  document.getElementById('ax-comm-preview-close')?.addEventListener('click', () => {
+    const pm = document.getElementById('ax-comm-preview-modal');
+    if (pm) pm.style.display = 'none';
+  });
+}
+
+function _setCommType(type) {
+  const imageFields = document.getElementById('ax-comm-image-fields');
+  const videoFields = document.getElementById('ax-comm-video-fields');
+  document.querySelectorAll('.ax-comm-type-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.type === type);
+  });
+  if (imageFields) imageFields.style.display = type === 'image' ? '' : 'none';
+  if (videoFields) videoFields.style.display = type === 'video' ? '' : 'none';
+}
+
+function _handleCommImageFile(file) {
+  // Accept any image — no content validation
+  if (!file.type.startsWith('image/') && !file.type === '') {
+    _toast('Please select an image file.', 'err');
+    return;
+  }
+  _commImageFile = file;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const imgEl        = document.getElementById('ax-comm-img-el');
+    const imgPreview   = document.getElementById('ax-comm-img-preview');
+    const imgPlaceholder = document.getElementById('ax-comm-img-placeholder');
+    if (imgEl)        imgEl.src = e.target.result;
+    if (imgPreview)   imgPreview.style.display   = '';
+    if (imgPlaceholder) imgPlaceholder.style.display = 'none';
+  };
+  reader.readAsDataURL(file);
+}
+
+function _handleCommVideoFile(file) {
+  // Accept any video file — no content validation
+  _commVideoFile = file;
+  const vidInfo = document.getElementById('ax-comm-vid-info');
+  const vidPH   = document.getElementById('ax-comm-vid-placeholder');
+  if (vidInfo) {
+    vidInfo.textContent = `✓ ${file.name} (${_fmtSize(file.size)})`;
+    vidInfo.style.display = '';
+    vidInfo.style.color = 'var(--green)';
+  }
+  if (vidPH) vidPH.style.display = 'none';
+  // Auto-fill title if empty
+  const titleEl = document.getElementById('ax-comm-title');
+  if (titleEl && !titleEl.value.trim()) {
+    titleEl.value = file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g,' ');
+  }
+}
+
+function _populateCommMusicDropdown() {
+  const sel = document.getElementById('ax-comm-bg-music');
+  if (!sel) return;
+  const currentVal = sel.value;
+  const musicItems = _mediaLib.filter(m =>
+    m.status === 'approved' && ['audio','music','audio_program'].includes(m.type)
+  );
+  sel.innerHTML = '<option value="">— No background music —</option>' +
+    musicItems.map(m => `<option value="${m.id}">${_esc(m.title)}${m.artist ? ' — ' + _esc(m.artist) : ''}</option>`).join('');
+  if (currentVal) sel.value = currentVal;
+}
+
+function _previewCommercialModal() {
+  const previewModal = document.getElementById('ax-comm-preview-modal');
+  const previewContent = document.getElementById('ax-comm-preview-content');
+  if (!previewModal || !previewContent) return;
+
+  const title     = document.getElementById('ax-comm-title')?.value || '(untitled)';
+  const bizName   = document.getElementById('ax-comm-biz-name')?.value || '';
+  const promoText = document.getElementById('ax-comm-promo-text')?.value || '';
+  const website   = document.getElementById('ax-comm-website')?.value || '';
+  const duration  = document.getElementById('ax-comm-duration')?.value || '30';
+  const imgEl     = document.getElementById('ax-comm-img-el');
+  const hasMusicId = document.getElementById('ax-comm-bg-music')?.value;
+  const musicTitle = hasMusicId
+    ? _mediaLib.find(m => m.id === hasMusicId)?.title || 'Selected track'
+    : null;
+
+  let previewHtml = `<div style="font-size:11px;font-weight:700;letter-spacing:2px;color:var(--text-dim);margin-bottom:12px;">📺 COMMERCIAL PREVIEW (${duration}s)</div>`;
+
+  if (_commType === 'image' && imgEl?.src && imgEl.src !== window.location.href) {
+    previewHtml += `<div style="position:relative;background:#000;border-radius:8px;overflow:hidden;margin-bottom:12px;min-height:120px;display:flex;align-items:center;justify-content:center;">
+      <img src="${_esc(imgEl.src)}" style="max-width:100%;max-height:240px;object-fit:contain;" alt="${_esc(title)}">
+      ${bizName ? `<div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.75);padding:8px 12px;text-align:center;">
+        <div style="font-size:14px;font-weight:900;color:#fff;letter-spacing:1px;">${_esc(bizName)}</div>
+        ${promoText ? `<div style="font-size:11px;color:#ccc;margin-top:2px;">${_esc(promoText)}</div>` : ''}
+        ${website ? `<div style="font-size:10px;color:#4d7aff;margin-top:2px;">${_esc(website)}</div>` : ''}
+      </div>` : ''}
+    </div>`;
+  } else if (_commType === 'video' && _commVideoFile) {
+    previewHtml += `<div style="margin-bottom:12px;padding:12px;background:var(--surface-hi);border-radius:6px;">
+      🎬 Video: <strong>${_esc(_commVideoFile.name)}</strong> (${_fmtSize(_commVideoFile.size)})
+    </div>`;
+  }
+
+  if (title)     previewHtml += `<div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px;">${_esc(title)}</div>`;
+  if (musicTitle) previewHtml += `<div style="font-size:11px;color:var(--text-dim);">🎵 Background music: ${_esc(musicTitle)}</div>`;
+  if (!_commImageFile && !_commVideoFile && _commType === 'image') {
+    previewHtml += `<div style="color:var(--orange,#f0a500);font-size:11px;margin-top:8px;">⚠ No image selected yet — upload an image to see the full preview.</div>`;
+  }
+
+  previewContent.innerHTML = previewHtml;
+  previewModal.style.display = 'flex';
+}
+
+async function _saveCommercial(modal, errEl) {
+  // ── VALIDATION ──────────────────────────────────────────────────────────
+  // Only validate technically required fields.
+  // NEVER reject based on visual content (faces, people, logos, cats, etc.)
+  const title = document.getElementById('ax-comm-title')?.value.trim();
+  if (!title) {
+    if (errEl) { errEl.textContent = 'Commercial name / title is required.'; errEl.classList.add('visible'); }
+    return;
+  }
+
+  if (_commType === 'image' && !_commImageFile && !_commEditId) {
+    if (errEl) { errEl.textContent = 'Please select an image for the image-based commercial.'; errEl.classList.add('visible'); }
+    return;
+  }
+  if (_commType === 'video' && !_commVideoFile && !_commEditId) {
+    if (errEl) { errEl.textContent = 'Please select a video file for the video commercial.'; errEl.classList.add('visible'); }
+    return;
+  }
+
+  const saveBtn = document.getElementById('ax-comm-save-btn');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+  if (errEl) { errEl.textContent = ''; errEl.classList.remove('visible'); }
+
+  try {
+    // ── Build commercial record ─────────────────────────────────────────
+    const data = {
+      title,
+      advertiser:    document.getElementById('ax-comm-advertiser')?.value.trim() || '',
+      notes:         document.getElementById('ax-comm-notes')?.value.trim() || '',
+      biz_name:      document.getElementById('ax-comm-biz-name')?.value.trim() || '',
+      website:       document.getElementById('ax-comm-website')?.value.trim() || '',
+      promo_text:    document.getElementById('ax-comm-promo-text')?.value.trim() || '',
+      bg_music_id:   document.getElementById('ax-comm-bg-music')?.value || '',
+      duration_sec:  parseInt(document.getElementById('ax-comm-duration')?.value || '30'),
+      commercial_type: _commType,
+      status:        _commEditId
+        ? (_commercialLib.find(c => c.id === _commEditId)?.status || 'draft')
+        : 'draft',
+      updated_at:    serverTimestamp(),
+    };
+
+    // ── Image upload (if new image selected) ───────────────────────────
+    if (_commType === 'image' && _commImageFile) {
+      if (!auth.currentUser) throw new Error('Please log in.');
+      const idToken = await auth.currentUser.getIdToken(true);
+      const authRes = await fetch(UPLOAD_WORKER_URL + '/authorize', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + idToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: _commImageFile.name, contentType: _commImageFile.type || 'image/jpeg', size: _commImageFile.size }),
+      });
+      const authData = await authRes.json();
+      if (!authRes.ok || !authData.ok) throw new Error(authData.error || 'Image upload authorization failed');
+      // Upload image via signed URL
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', authData.signedUrl, true);
+        xhr.setRequestHeader('Content-Type', _commImageFile.type || 'image/jpeg');
+        xhr.setRequestHeader('x-upsert', 'true');
+        xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error('Image upload failed HTTP ' + xhr.status));
+        xhr.onerror = () => reject(new Error('Image upload network error'));
+        xhr.send(_commImageFile);
+      });
+      data.image_url    = authData.publicUrl;
+      data.storage_path = authData.storagePath;
+    }
+
+    // ── Video upload (if new video selected) ────────────────────────────
+    if (_commType === 'video' && _commVideoFile) {
+      const vidProgress = document.getElementById('ax-comm-vid-progress');
+      const vidBar      = document.getElementById('ax-comm-vid-bar');
+      const vidStatus   = document.getElementById('ax-comm-vid-status');
+      if (vidProgress) vidProgress.style.display = '';
+      if (vidStatus)   vidStatus.textContent = 'Authorizing upload…';
+
+      if (!auth.currentUser) throw new Error('Please log in.');
+      const idToken = await auth.currentUser.getIdToken(true);
+      const authRes = await fetch(UPLOAD_WORKER_URL + '/authorize', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + idToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: _commVideoFile.name, contentType: _commVideoFile.type || 'video/mp4', size: _commVideoFile.size }),
+      });
+      const authData = await authRes.json();
+      if (!authRes.ok || !authData.ok) throw new Error(authData.error || 'Video upload authorization failed');
+      if (vidStatus) vidStatus.textContent = 'Uploading video…';
+      // Upload via signed URL with progress
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', authData.signedUrl, true);
+        xhr.setRequestHeader('Content-Type', _commVideoFile.type || 'video/mp4');
+        xhr.setRequestHeader('x-upsert', 'true');
+        xhr.upload.onprogress = e => {
+          if (e.lengthComputable && vidBar) {
+            vidBar.style.width = Math.min(99, Math.round(e.loaded / e.total * 100)) + '%';
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) { if (vidBar) vidBar.style.width = '100%'; resolve(); }
+          else reject(new Error('Video upload failed HTTP ' + xhr.status + ': ' + xhr.responseText.slice(0,200)));
+        };
+        xhr.onerror = () => reject(new Error('Video upload network error'));
+        xhr.send(_commVideoFile);
+      });
+      if (vidStatus) vidStatus.textContent = '✓ Video uploaded';
+      data.video_url    = authData.publicUrl;
+      data.storage_path = authData.storagePath;
+      // Get duration
+      try {
+        const dur = await _getMediaDuration(_commVideoFile);
+        if (dur > 0) data.duration_sec = dur;
+      } catch (_) {}
+    }
+
+    // ── Save to Firestore ───────────────────────────────────────────────
+    if (_commEditId) {
+      await updateDoc(doc(db, 'network_commercials', _commEditId), data);
+      _toast(`Commercial updated: ${title}`);
+    } else {
+      data.created_at = serverTimestamp();
+      data.created_by = _user?.email || '';
+      const docRef = await addDoc(collection(db, 'network_commercials'), data);
+      _toast(`✓ Commercial saved: ${title}`);
+      // Also add to media library as type=commercial for the programming engine
+      await addDoc(collection(db, 'network_media'), {
+        title,
+        artist:        data.advertiser || '',
+        creator:       _user?.email || '',
+        description:   data.notes || '',
+        type:          'commercial',
+        category:      'commercial',
+        url:           data.video_url || data.image_url || '',
+        storage_path:  data.storage_path || '',
+        duration_sec:  data.duration_sec || 30,
+        size_bytes:    (_commVideoFile?.size || _commImageFile?.size || 0),
+        mime_type:     (_commVideoFile?.type || _commImageFile?.type || ''),
+        status:        'approved',            // Founder-created commercials auto-approved
+        channel:       LIVE_TV_CHANNEL_ID,
+        live_tv_assigned: true,
+        commercial_id: docRef.id,
+        tags:          ['commercial'],
+        year:          new Date().getFullYear(),
+        uploaded_by:   _user?.uid || '',
+        uploaded_at:   serverTimestamp(),
+      });
+    }
+
+    modal.style.display = 'none';
+    _commImageFile = null;
+    _commVideoFile = null;
+
+  } catch (e) {
+    console.error('[AURENIX] Commercial save error:', e);
+    if (errEl) { errEl.textContent = 'Save failed: ' + e.message; errEl.classList.add('visible'); }
+    _toast('Commercial save failed: ' + e.message, 'err');
+  }
+
+  if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '💾 SAVE COMMERCIAL'; }
+}
+
+/* ═══════════════════════════════════════
+   COMMERCIAL LIBRARY RENDERER
+═══════════════════════════════════════ */
+
+function _renderCommercialLibrary() {
+  const grid = document.getElementById('ax-comm-library-grid');
+  if (!grid) return;
+
+  const items = _commFilter === 'all'
+    ? _commercialLib
+    : _commercialLib.filter(c => c.status === _commFilter);
+
+  if (!items.length) {
+    grid.innerHTML = `
+      <div style="grid-column:1/-1;text-align:center;padding:40px 20px;color:var(--text-dim);">
+        <div style="font-size:36px;margin-bottom:12px;">📺</div>
+        <div style="font-size:14px;font-weight:700;margin-bottom:6px;">No Commercials Yet</div>
+        <div style="font-size:12px;margin-bottom:16px;">Create your first commercial using the button above.</div>
+        <button class="ax-btn-primary" onclick="window._AXC.switchToPane('commercial-studio');document.getElementById('ax-comm-create-btn')?.click();" style="font-size:12px;padding:8px 20px;">+ CREATE COMMERCIAL</button>
+      </div>`;
+    return;
+  }
+
+  const statusColors = { active:'var(--green)', inactive:'var(--text-dim)', draft:'var(--orange,#f0a500)' };
+  const statusLabels = { active:'✓ ACTIVE', inactive:'⏸ INACTIVE', draft:'✏ DRAFT' };
+
+  grid.innerHTML = items.map(c => {
+    const thumb = c.image_url
+      ? `<img src="${_esc(c.image_url)}" style="width:100%;height:140px;object-fit:cover;border-radius:6px 6px 0 0;" loading="lazy">`
+      : `<div style="width:100%;height:80px;display:flex;align-items:center;justify-content:center;font-size:36px;background:var(--surface-hi);border-radius:6px 6px 0 0;">📺</div>`;
+    const statusColor = statusColors[c.status] || 'var(--text-dim)';
+    const statusLabel = statusLabels[c.status] || c.status?.toUpperCase() || 'DRAFT';
+    const dur = c.duration_sec ? `${c.duration_sec}s` : '—';
+    const created = c.created_at ? _relDate(c.created_at) : '—';
+
+    return `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+        ${thumb}
+        <div style="padding:12px;">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:6px;">
+            <div style="font-size:13px;font-weight:700;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(c.title)}</div>
+            <span style="font-size:9px;font-weight:700;letter-spacing:1px;color:${statusColor};white-space:nowrap;">${statusLabel}</span>
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
+            ${c.advertiser ? _esc(c.advertiser) + ' · ' : ''}${_esc(c.commercial_type || 'image')} · ${dur} · ${created}
+          </div>
+          ${c.biz_name ? `<div style="font-size:11px;color:var(--text-dim);">🏢 ${_esc(c.biz_name)}</div>` : ''}
+          ${c.website  ? `<div style="font-size:10px;color:var(--blue-bright);">${_esc(c.website)}</div>` : ''}
+          <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="ax-btn-sm" onclick="window._AXC.previewCommercial('${c.id}')">👁 Preview</button>
+            <button class="ax-btn-sm" onclick="window._AXC.editCommercial('${c.id}')">✏ Edit</button>
+            ${c.status !== 'active'
+              ? `<button class="ax-btn-sm" style="background:var(--green);color:#000;font-weight:700;" onclick="window._AXC.activateCommercial('${c.id}')">✓ ACTIVATE</button>`
+              : `<button class="ax-btn-sm ax-btn-danger" onclick="window._AXC.deactivateCommercial('${c.id}')">⏸ Deactivate</button>`}
+            <button class="ax-btn-sm ax-btn-danger" onclick="window._AXC.deleteCommercial('${c.id}')">🗑 Delete</button>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function _showCommercialPreview(comm) {
+  const previewModal   = document.getElementById('ax-comm-preview-modal');
+  const previewContent = document.getElementById('ax-comm-preview-content');
+  if (!previewModal || !previewContent) return;
+
+  let html = `<div style="font-size:11px;font-weight:700;letter-spacing:2px;color:var(--text-dim);margin-bottom:12px;">📺 ${_esc(comm.title)} (${comm.duration_sec || '—'}s)</div>`;
+
+  if (comm.image_url) {
+    html += `<div style="position:relative;background:#000;border-radius:8px;overflow:hidden;margin-bottom:12px;">
+      <img src="${_esc(comm.image_url)}" style="width:100%;max-height:260px;object-fit:contain;" alt="${_esc(comm.title)}">
+      ${comm.biz_name ? `<div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.8);padding:10px 14px;text-align:center;">
+        <div style="font-size:15px;font-weight:900;color:#fff;">${_esc(comm.biz_name)}</div>
+        ${comm.promo_text ? `<div style="font-size:11px;color:#ccc;margin-top:2px;">${_esc(comm.promo_text)}</div>` : ''}
+        ${comm.website ? `<div style="font-size:10px;color:#4d7aff;margin-top:2px;">${_esc(comm.website)}</div>` : ''}
+      </div>` : ''}
+    </div>`;
+  } else if (comm.video_url) {
+    html += `<video src="${_esc(comm.video_url)}" controls style="width:100%;max-height:260px;border-radius:8px;background:#000;" preload="metadata"></video>`;
+  }
+
+  if (comm.bg_music_id) {
+    const track = _mediaLib.find(m => m.id === comm.bg_music_id);
+    if (track) html += `<div style="font-size:11px;color:var(--text-dim);margin-top:8px;">🎵 Background music: ${_esc(track.title)}</div>`;
+  }
+
+  const statusLabel = { active:'✓ ACTIVE', inactive:'⏸ INACTIVE', draft:'✏ DRAFT' }[comm.status] || (comm.status || 'DRAFT').toUpperCase();
+  html += `<div style="margin-top:10px;font-size:11px;font-weight:700;letter-spacing:1px;">Status: ${statusLabel}</div>`;
+
+  previewContent.innerHTML = html;
+  previewModal.style.display = 'flex';
 }

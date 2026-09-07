@@ -28,6 +28,7 @@ import {
 } from './firebase-client.js';
 
 import { oneChannelAdvance } from './aurenix-one-engine.js';
+import { liveTvChannelAdvance, LIVE_TV_CHANNEL_ID } from './aurenix-live-tv-engine.js';
 
 import { supabase } from './supabase-client.js';
 
@@ -776,13 +777,12 @@ function _onActiveChannelUpdate(st) {
   _setNowPlaying(item.title, item.artist || '', item.type || '');
   _updateLiveTVOverlay(item, isComm);
 
-  // For AURENIX ONE: up-next is from commercial_queue or shows "auto-selected"
-  if (_activeChannel?.id === 'A1') {
+  // For live-TV engine channels (A1 and ALTV): up-next from commercial_queue or auto-selected
+  if (_activeChannel?.id === 'A1' || _activeChannel?.id === LIVE_TV_CHANNEL_ID) {
     const commQ = st.commercial_queue || [];
     if (isComm && commQ.length > 0) {
       _renderUpNext([commQ[0]]);
     } else {
-      // Show "AURENIX ONE" branding as next placeholder
       _renderUpNext([]);
     }
   } else {
@@ -1014,12 +1014,16 @@ async function _advance(st) {
     const channelId  = _activeChannel.id;
 
     // ── AURENIX ONE — live-TV engine handles its own advance ─────────────────
-    // Channel A1 uses a random programming engine instead of a fixed queue.
-    // The engine watches for the needs_next flag and picks the next program.
-    // All viewers share one broadcast state — no per-viewer playlists.
     if (channelId === 'A1') {
       const currentId = st?.current_item?.id || null;
       await oneChannelAdvance(currentId);
+      _advancing = false;
+      return;
+    }
+    // ── AURENIX LIVE TV — separate live-TV engine ─────────────────────────────
+    if (channelId === LIVE_TV_CHANNEL_ID) {
+      const currentId = st?.current_item?.id || null;
+      await liveTvChannelAdvance(currentId);
       _advancing = false;
       return;
     }
