@@ -1368,6 +1368,87 @@ function _buildFounderHTML() {
     </div>
   </div>
 </div>
+
+<!-- APPROVE DESTINATION MODAL -->
+<div class="ax-modal-overlay" id="ax-approve-dest-modal" style="display:none;">
+  <div class="ax-modal-box" style="max-width:580px;max-height:90vh;overflow-y:auto;">
+    <div class="ax-modal-title">✓ APPROVE SUBMISSION</div>
+    <div id="ax-approve-dest-media-info" style="font-size:13px;font-weight:700;color:var(--text);padding:10px 14px;background:var(--surface);border-radius:6px;margin-bottom:16px;"></div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:20px;line-height:1.7;padding:10px 14px;background:rgba(30,80,255,0.06);border:1px solid rgba(30,80,255,0.18);border-radius:6px;">
+      <strong style="color:var(--text);">Where do you want this media to go?</strong><br>
+      Approval does <strong style="color:var(--orange,#f0a500);">not</strong> automatically broadcast. You control storage and channel assignment separately.
+    </div>
+
+    <!-- STORAGE DESTINATION -->
+    <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:var(--text-dim);text-transform:uppercase;margin-bottom:10px;">STORAGE DESTINATION</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;" id="ax-approve-dest-storage-btns">
+      <button class="ax-approve-dest-storage-btn active" data-storage="supabase"
+              style="flex:1;min-width:160px;padding:12px 16px;background:rgba(30,80,255,0.12);border:2px solid var(--blue-bright);border-radius:8px;color:var(--blue-bright);font-size:12px;font-weight:700;cursor:pointer;text-align:center;line-height:1.5;">
+        ☁ SUPABASE STORAGE<br><span style="font-size:10px;font-weight:400;opacity:0.7;">Keep in current location</span>
+      </button>
+      <button class="ax-approve-dest-storage-btn" data-storage="gdrive"
+              style="flex:1;min-width:160px;padding:12px 16px;background:var(--surface);border:2px solid var(--border);border-radius:8px;color:var(--text-dim);font-size:12px;font-weight:700;cursor:pointer;text-align:center;line-height:1.5;" id="ax-approve-dest-gdrive-btn">
+        🔵 GOOGLE DRIVE<br><span style="font-size:10px;font-weight:400;opacity:0.7;">Copy to Drive (server-side)</span>
+      </button>
+    </div>
+    <div id="ax-approve-dest-gdrive-warn" style="display:none;font-size:11px;color:var(--orange,#f0a500);margin-bottom:10px;padding:8px 12px;background:rgba(240,165,0,0.08);border:1px solid rgba(240,165,0,0.25);border-radius:5px;">
+      ⚠ Google Drive is not connected. Go to <strong>Storage → Google Drive</strong> to connect it first.
+    </div>
+
+    <!-- STORAGE MODE -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px;" id="ax-approve-dest-mode-btns">
+      <button class="ax-approve-dest-mode-btn active" data-mode="storage_and_channel"
+              style="flex:1;min-width:110px;padding:8px 12px;background:rgba(30,80,255,0.1);border:2px solid var(--blue-bright);border-radius:6px;color:var(--blue-bright);font-size:11px;font-weight:700;cursor:pointer;text-align:center;">
+        STORAGE + CHANNEL
+      </button>
+      <button class="ax-approve-dest-mode-btn" data-mode="storage_only"
+              style="flex:1;min-width:110px;padding:8px 12px;background:var(--surface);border:2px solid var(--border);border-radius:6px;color:var(--text-dim);font-size:11px;font-weight:700;cursor:pointer;text-align:center;">
+        STORAGE ONLY
+      </button>
+      <button class="ax-approve-dest-mode-btn" data-mode="channel_only"
+              style="flex:1;min-width:110px;padding:8px 12px;background:var(--surface);border:2px solid var(--border);border-radius:6px;color:var(--text-dim);font-size:11px;font-weight:700;cursor:pointer;text-align:center;">
+        CHANNEL ONLY
+      </button>
+    </div>
+
+    <!-- CHANNEL DESTINATION -->
+    <div id="ax-approve-dest-channels-section">
+      <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:var(--text-dim);text-transform:uppercase;margin-bottom:10px;">CHANNEL DESTINATION</div>
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.6;">
+        Select one or more channels. Media will be <strong style="color:var(--text);">available</strong> to those channels but not automatically broadcast.
+        You control when it actually enters programming.
+      </div>
+      <div id="ax-approve-dest-channel-list" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;"></div>
+      <div style="font-size:10px;color:var(--text-dim);margin-bottom:16px;">☑ Multiple channels allowed. Newly created channels appear here automatically.</div>
+
+      <!-- PROGRAMMING STATUS -->
+      <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:var(--text-dim);text-transform:uppercase;margin-bottom:10px;">PROGRAMMING STATUS</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px;" id="ax-approve-dest-prog-btns">
+        <button class="ax-approve-dest-prog-btn active" data-prog="ready"
+                style="flex:1;min-width:90px;padding:8px 12px;background:rgba(30,80,255,0.1);border:2px solid var(--blue-bright);border-radius:6px;color:var(--blue-bright);font-size:11px;font-weight:700;cursor:pointer;text-align:center;">
+          READY
+        </button>
+        <button class="ax-approve-dest-prog-btn" data-prog="scheduled"
+                style="flex:1;min-width:90px;padding:8px 12px;background:var(--surface);border:2px solid var(--border);border-radius:6px;color:var(--text-dim);font-size:11px;font-weight:700;cursor:pointer;text-align:center;">
+          SCHEDULED
+        </button>
+        <button class="ax-approve-dest-prog-btn" data-prog="hold"
+                style="flex:1;min-width:90px;padding:8px 12px;background:var(--surface);border:2px solid var(--border);border-radius:6px;color:var(--text-dim);font-size:11px;font-weight:700;cursor:pointer;text-align:center;">
+          ON HOLD
+        </button>
+      </div>
+    </div>
+
+    <div id="ax-approve-dest-status" style="display:none;font-size:12px;color:var(--text-dim);padding:8px 12px;background:var(--surface);border-radius:5px;margin-bottom:12px;line-height:1.6;"></div>
+    <div class="ax-auth-err" id="ax-approve-dest-err" style="margin-bottom:10px;"></div>
+    <div class="ax-modal-actions">
+      <button class="ax-btn-ghost" id="ax-approve-dest-cancel">CANCEL</button>
+      <button class="ax-btn-primary" id="ax-approve-dest-confirm" style="background:var(--green);border-color:var(--green);color:#000;font-weight:900;">
+        ✓ APPROVE &amp; ASSIGN
+      </button>
+    </div>
+  </div>
+</div>
   `;
 }
 
@@ -2918,6 +2999,128 @@ function _updateApprovalBadge() {
   }
 }
 
+/* ── APPROVE DESTINATION MODAL ── */
+// State for the modal
+let _approveDestMediaId   = null;
+let _approveDestStorage   = 'supabase';  // 'supabase' | 'gdrive'
+let _approveDestMode      = 'storage_and_channel'; // 'storage_and_channel' | 'storage_only' | 'channel_only'
+let _approveDestChannels  = new Set();   // set of channelIds selected
+let _approveDestProg      = 'ready';     // 'ready' | 'scheduled' | 'hold'
+
+/**
+ * Open the Approve Destination modal for a given mediaId.
+ * This replaces the old direct `approveMedia()` one-click approval.
+ */
+function _openApproveDestModal(mediaId) {
+  const item = _mediaLib.find(m => m.id === mediaId);
+  if (!item) return;
+
+  _approveDestMediaId  = mediaId;
+  _approveDestStorage  = 'supabase';
+  _approveDestMode     = 'storage_and_channel';
+  _approveDestChannels = new Set();
+  _approveDestProg     = 'ready';
+
+  const modal = document.getElementById('ax-approve-dest-modal');
+  if (!modal) return;
+
+  // Media info banner
+  const infoEl = document.getElementById('ax-approve-dest-media-info');
+  if (infoEl) {
+    infoEl.innerHTML = `
+      <span style="font-size:16px;margin-right:8px;">${_typeIcon(item.type)}</span>
+      ${_esc(item.title || '(untitled)')}
+      <span style="font-size:10px;font-weight:400;color:var(--text-dim);margin-left:8px;">${_esc(item.type || 'media')}${item.size_bytes ? ' · ' + _fmtSize(item.size_bytes) : ''}${item.mime_type ? ' · ' + _esc(item.mime_type) : ''}</span>`;
+  }
+
+  // Reset storage selection UI
+  modal.querySelectorAll('.ax-approve-dest-storage-btn').forEach(b => {
+    const isActive = b.dataset.storage === 'supabase';
+    b.classList.toggle('active', isActive);
+    b.style.background   = isActive ? 'rgba(30,80,255,0.12)' : 'var(--surface)';
+    b.style.borderColor  = isActive ? 'var(--blue-bright)' : 'var(--border)';
+    b.style.color        = isActive ? 'var(--blue-bright)' : 'var(--text-dim)';
+  });
+  document.getElementById('ax-approve-dest-gdrive-warn').style.display = 'none';
+
+  // Reset mode buttons
+  modal.querySelectorAll('.ax-approve-dest-mode-btn').forEach(b => {
+    const isActive = b.dataset.mode === 'storage_and_channel';
+    b.classList.toggle('active', isActive);
+    b.style.background  = isActive ? 'rgba(30,80,255,0.1)' : 'var(--surface)';
+    b.style.borderColor = isActive ? 'var(--blue-bright)' : 'var(--border)';
+    b.style.color       = isActive ? 'var(--blue-bright)' : 'var(--text-dim)';
+  });
+
+  // Reset prog buttons
+  modal.querySelectorAll('.ax-approve-dest-prog-btn').forEach(b => {
+    const isActive = b.dataset.prog === 'ready';
+    b.classList.toggle('active', isActive);
+    b.style.background  = isActive ? 'rgba(30,80,255,0.1)' : 'var(--surface)';
+    b.style.borderColor = isActive ? 'var(--blue-bright)' : 'var(--border)';
+    b.style.color       = isActive ? 'var(--blue-bright)' : 'var(--text-dim)';
+  });
+
+  // Populate channel list dynamically from live channel list
+  _refreshApproveDestChannelList();
+
+  // Show/hide channels section based on mode
+  _approveDestUpdateSectionsVisibility();
+
+  // Clear status/error
+  const statusEl = document.getElementById('ax-approve-dest-status');
+  const errEl    = document.getElementById('ax-approve-dest-err');
+  if (statusEl) { statusEl.style.display = 'none'; statusEl.textContent = ''; }
+  if (errEl)    { errEl.textContent = ''; errEl.classList.remove('visible'); }
+
+  modal.style.display = 'flex';
+}
+
+/** Rebuild the channel checkboxes in the approve-dest modal. */
+function _refreshApproveDestChannelList() {
+  const container = document.getElementById('ax-approve-dest-channel-list');
+  if (!container) return;
+  const chs = _channels();
+  if (!chs.length) {
+    container.innerHTML = '<div style="font-size:11px;color:var(--text-dim);">No channels yet — create one in Channel Manager.</div>';
+    return;
+  }
+  container.innerHTML = chs.map(ch => {
+    const checked = _approveDestChannels.has(ch.id);
+    return `<label style="display:inline-flex;align-items:center;gap:7px;padding:8px 14px;background:${checked ? 'rgba(30,80,255,0.12)' : 'var(--surface)'};border:2px solid ${checked ? (ch.color || 'var(--blue-bright)') : 'var(--border)'};border-radius:7px;cursor:pointer;font-size:12px;font-weight:700;color:${checked ? (ch.color || 'var(--blue-bright)') : 'var(--text-dim)'};transition:all 0.1s;">
+      <input type="checkbox" data-chid="${ch.id}" style="display:none;" ${checked ? 'checked' : ''}>
+      ${_esc(ch.label || ch.id)} — ${_esc(ch.name)}
+    </label>`;
+  }).join('');
+
+  // Bind checkbox clicks
+  container.querySelectorAll('label').forEach(lbl => {
+    lbl.addEventListener('click', () => {
+      const input = lbl.querySelector('input');
+      const chid  = input.dataset.chid;
+      const ch    = _channels().find(c => c.id === chid);
+      if (_approveDestChannels.has(chid)) {
+        _approveDestChannels.delete(chid);
+        lbl.style.background   = 'var(--surface)';
+        lbl.style.borderColor  = 'var(--border)';
+        lbl.style.color        = 'var(--text-dim)';
+      } else {
+        _approveDestChannels.add(chid);
+        lbl.style.background   = 'rgba(30,80,255,0.12)';
+        lbl.style.borderColor  = ch?.color || 'var(--blue-bright)';
+        lbl.style.color        = ch?.color || 'var(--blue-bright)';
+      }
+    });
+  });
+}
+
+function _approveDestUpdateSectionsVisibility() {
+  const chSection = document.getElementById('ax-approve-dest-channels-section');
+  if (chSection) {
+    chSection.style.display = _approveDestMode === 'storage_only' ? 'none' : '';
+  }
+}
+
 function _bindApprovalPane() {
   document.getElementById('ax-approval-filter-bar')?.querySelectorAll('.ax-approval-filter').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -2927,6 +3130,196 @@ function _bindApprovalPane() {
       _renderApproval();
     });
   });
+
+  // ── APPROVE DESTINATION MODAL BINDINGS ───────────────────────────────────
+  const modal = document.getElementById('ax-approve-dest-modal');
+  if (!modal) return;
+
+  // Storage buttons
+  modal.querySelectorAll('.ax-approve-dest-storage-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const storage = btn.dataset.storage;
+      // If Google Drive selected, check it's connected first
+      if (storage === 'gdrive') {
+        const connected = _gdriveStatus?.connected;
+        const warnEl = document.getElementById('ax-approve-dest-gdrive-warn');
+        if (!connected) {
+          if (warnEl) warnEl.style.display = '';
+          return; // Don't allow selection if not connected
+        }
+        if (warnEl) warnEl.style.display = 'none';
+      }
+      _approveDestStorage = storage;
+      modal.querySelectorAll('.ax-approve-dest-storage-btn').forEach(b => {
+        const active = b.dataset.storage === storage;
+        b.classList.toggle('active', active);
+        b.style.background   = active ? 'rgba(30,80,255,0.12)' : 'var(--surface)';
+        b.style.borderColor  = active ? 'var(--blue-bright)'   : 'var(--border)';
+        b.style.color        = active ? 'var(--blue-bright)'   : 'var(--text-dim)';
+      });
+    });
+  });
+
+  // Mode buttons
+  modal.querySelectorAll('.ax-approve-dest-mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _approveDestMode = btn.dataset.mode;
+      modal.querySelectorAll('.ax-approve-dest-mode-btn').forEach(b => {
+        const active = b.dataset.mode === _approveDestMode;
+        b.classList.toggle('active', active);
+        b.style.background  = active ? 'rgba(30,80,255,0.1)' : 'var(--surface)';
+        b.style.borderColor = active ? 'var(--blue-bright)'  : 'var(--border)';
+        b.style.color       = active ? 'var(--blue-bright)'  : 'var(--text-dim)';
+      });
+      _approveDestUpdateSectionsVisibility();
+    });
+  });
+
+  // Programming status buttons
+  modal.querySelectorAll('.ax-approve-dest-prog-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _approveDestProg = btn.dataset.prog;
+      modal.querySelectorAll('.ax-approve-dest-prog-btn').forEach(b => {
+        const active = b.dataset.prog === _approveDestProg;
+        b.classList.toggle('active', active);
+        b.style.background  = active ? 'rgba(30,80,255,0.1)' : 'var(--surface)';
+        b.style.borderColor = active ? 'var(--blue-bright)'  : 'var(--border)';
+        b.style.color       = active ? 'var(--blue-bright)'  : 'var(--text-dim)';
+      });
+    });
+  });
+
+  // Cancel
+  document.getElementById('ax-approve-dest-cancel')?.addEventListener('click', () => {
+    modal.style.display = 'none';
+    _approveDestMediaId = null;
+  });
+
+  // Confirm — the main approval logic
+  document.getElementById('ax-approve-dest-confirm')?.addEventListener('click', () => {
+    _executeApproveAndAssign();
+  });
+}
+
+/**
+ * Execute the approval + storage/channel assignment chosen in the modal.
+ * Called when Founder clicks "APPROVE & ASSIGN".
+ */
+async function _executeApproveAndAssign() {
+  const mediaId = _approveDestMediaId;
+  if (!mediaId) return;
+  const item = _mediaLib.find(m => m.id === mediaId);
+  if (!item) return;
+
+  const modal    = document.getElementById('ax-approve-dest-modal');
+  const statusEl = document.getElementById('ax-approve-dest-status');
+  const errEl    = document.getElementById('ax-approve-dest-err');
+  const confirmBtn = document.getElementById('ax-approve-dest-confirm');
+
+  const setStatus = (msg) => {
+    if (statusEl) { statusEl.style.display = ''; statusEl.textContent = msg; }
+  };
+  const setErr = (msg) => {
+    if (errEl) { errEl.textContent = msg; errEl.classList.add('visible'); }
+  };
+  const clearErr = () => {
+    if (errEl) { errEl.textContent = ''; errEl.classList.remove('visible'); }
+  };
+
+  clearErr();
+  if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = 'Approving…'; }
+
+  // Collect selected channels
+  const selectedChannels = [..._approveDestChannels];
+  const includeChannels  = _approveDestMode !== 'storage_only' && selectedChannels.length > 0;
+
+  try {
+    // ── STEP 1: Mark approved in Firestore ──────────────────────────────────
+    setStatus('Saving approval status…');
+    const updateData = {
+      status:             'approved',
+      approved_at:        serverTimestamp(),
+      approved_by:        _user?.email || '',
+      programming_status: _approveDestProg,
+      storage_backend:    _approveDestStorage,
+      assigned_channels:  includeChannels ? selectedChannels : [],
+    };
+    await updateDoc(doc(db, 'network_media', mediaId), updateData);
+
+    // ── STEP 2: Google Drive copy (server-side, if selected) ─────────────────
+    if (_approveDestStorage === 'gdrive' && item.storage_path) {
+      setStatus('Copying to Google Drive (server-side)…');
+      try {
+        const idToken  = await auth.currentUser.getIdToken(true);
+        const copyRes  = await fetch(UPLOAD_WORKER_URL + '/submission/copy-to-drive', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + idToken, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            storagePath: item.storage_path,
+            fileName:    item.title || item.storage_path.split('/').pop() || 'media',
+            mimeType:    item.mime_type || 'application/octet-stream',
+          }),
+        });
+        const copyData = await copyRes.json();
+        if (!copyRes.ok || !copyData.ok) {
+          // Non-fatal: approval is already saved; log the Drive copy failure
+          console.warn('[AURENIX] Drive copy failed:', copyData.error);
+          setStatus(`⚠ Drive copy failed: ${copyData.error || 'Unknown error'}. Media stays in Supabase. Approval saved.`);
+          _toast(`Drive copy failed: ${copyData.error || 'see console'}. Approved in Supabase.`, 'warn');
+        } else {
+          // Update Firestore with Drive file info
+          await updateDoc(doc(db, 'network_media', mediaId), {
+            drive_file_id:  copyData.driveFileId,
+            drive_view_url: copyData.viewUrl || '',
+            storage_backend: 'google_drive',
+          });
+          setStatus('✓ Copied to Google Drive. Firestore updated.');
+        }
+      } catch (driveErr) {
+        console.warn('[AURENIX] Drive copy exception:', driveErr);
+        setStatus(`⚠ Drive copy error: ${driveErr.message}. Approval already saved.`);
+      }
+    }
+
+    // ── STEP 3: Log channel assignments in Firestore ─────────────────────────
+    if (includeChannels) {
+      setStatus('Saving channel assignments…');
+      // Record on the media doc which channels it is assigned to
+      // (actual scheduling is still manual via the Broadcast Scheduler)
+      await updateDoc(doc(db, 'network_media', mediaId), {
+        assigned_channels: selectedChannels,
+        channel: selectedChannels[0] || '',  // primary channel (backward-compat)
+        updated_at: serverTimestamp(),
+      });
+    }
+
+    // ── Done ─────────────────────────────────────────────────────────────────
+    const chNames = selectedChannels.map(id => {
+      const ch = _channels().find(c => c.id === id);
+      return ch?.name || id;
+    }).join(', ');
+
+    const summaryParts = [
+      `✓ APPROVED — "${item.title || mediaId}"`,
+      `Storage: ${_approveDestStorage === 'gdrive' ? 'Google Drive' : 'Supabase'}`,
+      _approveDestMode !== 'storage_only' && selectedChannels.length
+        ? `Channels: ${chNames}`
+        : _approveDestMode === 'storage_only'
+          ? 'Storage only (no channel yet)'
+          : 'No channel selected (Storage only)',
+      `Programming: ${_approveDestProg.toUpperCase()}`,
+    ];
+    _toast(summaryParts.filter(Boolean).join(' · '));
+    if (modal) modal.style.display = 'none';
+    _approveDestMediaId = null;
+
+  } catch (e) {
+    console.error('[AURENIX] Approval failed:', e);
+    setErr('Approval failed: ' + e.message);
+    _toast('Approval failed: ' + e.message, 'err');
+  } finally {
+    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = '✓ APPROVE & ASSIGN'; }
+  }
 }
 
 function _renderApproval() {
@@ -2997,18 +3390,26 @@ function _renderApproval() {
         </div>
 
         <!-- Action buttons -->
-        <div style="display:flex;flex-direction:column;gap:8px;flex-shrink:0;min-width:140px;">
+        <div style="display:flex;flex-direction:column;gap:8px;flex-shrink:0;min-width:150px;">
           ${isPending ? `
-            <button class="ax-btn-sm" style="background:var(--green);color:#000;font-weight:900;letter-spacing:0.5px;padding:8px 16px;"
+            <button class="ax-btn-sm" style="background:var(--green);color:#000;font-weight:900;letter-spacing:0.5px;padding:10px 16px;font-size:13px;"
                     onclick="window._AXC.approveMedia('${m.id}')">✓ APPROVE</button>
+            <div style="font-size:9px;color:var(--text-dim);text-align:center;margin-top:-4px;margin-bottom:2px;">Opens storage + channel selector</div>
             <button class="ax-btn-sm ax-btn-danger" style="font-weight:700;padding:8px 16px;"
                     onclick="window._AXC.rejectMedia('${m.id}')">✕ REJECT</button>
             <button class="ax-btn-sm" style="font-weight:700;padding:8px 16px;"
                     onclick="window._AXC.requestChanges('${m.id}')">↻ REQUEST CHANGES</button>
           ` : isApproved ? `
             <div style="font-size:11px;font-weight:700;color:var(--green);text-align:center;margin-bottom:4px;">✓ APPROVED</div>
+            ${m.storage_backend === 'google_drive'
+              ? `<div style="font-size:10px;color:#4285f4;text-align:center;margin-bottom:4px;">🔵 Google Drive</div>`
+              : `<div style="font-size:10px;color:var(--blue-bright);text-align:center;margin-bottom:4px;">☁ Supabase</div>`
+            }
+            ${(m.assigned_channels||[]).length ? `<div style="font-size:9px;color:var(--text-dim);text-align:center;margin-bottom:4px;">Channels: ${_esc((m.assigned_channels||[]).join(', '))}</div>` : ''}
+            ${m.programming_status ? `<div style="font-size:9px;font-weight:700;letter-spacing:1px;color:var(--text-dim);text-align:center;margin-bottom:6px;">${_esc(m.programming_status.toUpperCase())}</div>` : ''}
             <button class="ax-btn-sm" onclick="window._AXC.openBroadcast('${m.id}')">📡 Add to Broadcast</button>
             <button class="ax-btn-sm" onclick="window._AXC.addToSched('${m.id}')">📅 Schedule</button>
+            <button class="ax-btn-sm" onclick="window._AXC.approveMedia('${m.id}')" style="font-size:10px;">✏ Change Destination</button>
             <button class="ax-btn-sm ax-btn-danger" style="font-size:10px;"
                     onclick="window._AXC.rejectMedia('${m.id}')">✕ Revoke Approval</button>
           ` : `
@@ -3101,7 +3502,16 @@ function _renderMediaGrid(grid, items, showActions) {
       <div class="ax-media-card-body">
         <div class="ax-media-card-title" title="${_esc(m.title)}">${_esc(m.title)}</div>
         <div class="ax-media-card-meta">${_esc(m.artist || m.creator || '')}${m.uploaded_at ? ' · ' + _relDate(m.uploaded_at) : ''}${m.size_bytes ? ' · ' + _fmtSize(m.size_bytes) : ''}</div>
-        ${isDrive ? `<div style="font-size:9px;color:#4285f4;margin-top:2px;font-weight:700;">🔵 GOOGLE DRIVE</div>` : ''}
+        <div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:3px;">
+          ${isDrive
+            ? `<span style="font-size:9px;color:#4285f4;font-weight:700;background:rgba(66,133,244,0.12);padding:1px 5px;border-radius:3px;">🔵 DRIVE</span>`
+            : `<span style="font-size:9px;color:var(--blue-bright);font-weight:700;background:rgba(30,80,255,0.1);padding:1px 5px;border-radius:3px;">☁ SUPABASE</span>`}
+          ${(m.assigned_channels||[]).map(chId => {
+              const ch = _channels().find(c => c.id === chId);
+              return `<span style="font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;background:${(ch?.color||'#1e50ff')}22;color:${ch?.color||'#4d7aff'};">${_esc(ch?.label || chId)}</span>`;
+            }).join('')}
+          ${m.programming_status && m.programming_status !== 'ready' ? `<span style="font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;background:rgba(240,165,0,0.12);color:var(--orange,#f0a500);">${_esc(m.programming_status.toUpperCase())}</span>` : ''}
+        </div>
       </div>
       ${showActions ? `
       <div class="ax-media-card-actions">
@@ -3724,17 +4134,10 @@ window._AXC = {
   },
 
   // ── APPROVAL WORKFLOW: network_media ─────────────────────────────────────
-  // Approve a media item — it can now enter channels, playlists, and schedules.
-  async approveMedia(mediaId) {
-    const item = _mediaLib.find(m => m.id === mediaId);
-    try {
-      await updateDoc(doc(db, 'network_media', mediaId), {
-        status:      'approved',
-        approved_at: serverTimestamp(),
-        approved_by: _user?.email || '',
-      });
-      _toast(`✓ APPROVED — "${item?.title || mediaId}" is ready for broadcast.`);
-    } catch (e) { _toast('Approve failed: ' + e.message, 'err'); }
+  // Approve a media item — opens Approve Destination modal.
+  // APPROVAL DOES NOT AUTOMATICALLY BROADCAST. Founder chooses storage + channels first.
+  approveMedia(mediaId) {
+    _openApproveDestModal(mediaId);
   },
 
   // Reject a media item — it cannot enter channels or schedules.

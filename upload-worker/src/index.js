@@ -416,6 +416,7 @@ import {
   handleGdriveUploadInit,
   handleGdriveUploadFinalize,
   handleGdriveConfigCheck,
+  handleSubmissionCopyToDrive,
 } from './gdrive.js';
 
 export default {
@@ -458,6 +459,9 @@ export default {
 
     if (request.method === 'POST' && p === '/gdrive/upload-finalize')
       return handleGdriveUploadFinalize(request, env, gdriveJsonHelper);
+
+    if (request.method === 'POST' && p === '/submission/copy-to-drive')
+      return handleSubmissionCopyToDrive(request, env, gdriveJsonHelper);
 
 
     /* ── GET /health ─────────────────────────────────────────────────────── */

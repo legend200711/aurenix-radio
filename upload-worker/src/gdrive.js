@@ -566,6 +566,126 @@ export async function handleGdriveUploadFinalize(request, env, json) {
  * Returns whether Google Drive OAuth credentials are configured (no auth required).
  * Used by the frontend to show/hide the setup instructions.
  */
+/**
+ * POST /submission/copy-to-drive  { storagePath, fileName, mimeType }
+ * Server-side: reads the file from Supabase storage using the service-role key,
+ * then uploads it to Google Drive using the configured AURENIX folder.
+ * The browser sends only a tiny JSON payload — the file bytes never leave the server.
+ * Requires Firebase Founder token in the Authorization header.
+ * Google credentials are NEVER exposed to the client.
+ */
+export async function handleSubmissionCopyToDrive(request, env, json) {
+  // Auth: Founder only
+  try { await requireFounder(request, env); } catch (e) { return json({ error: e.message }, 401); }
+
+  // Drive connected?
+  let at;
+  try { at = await getAccessToken(env); } catch (e) {
+    return json({ error: 'Google Drive not connected: ' + e.message, connected: false }, 400);
+  }
+
+  // Body
+  let body = {};
+  try { body = await request.json(); } catch (_) { return json({ error: 'Invalid JSON body' }, 400); }
+
+  const { storagePath, fileName, mimeType } = body || {};
+  if (!storagePath) return json({ error: 'storagePath required' }, 400);
+  if (!fileName)    return json({ error: 'fileName required' }, 400);
+
+  const MEDIA_BUCKET_LOCAL = 'aurenix-media';
+  const supabaseUrl        = env.SUPABASE_URL;
+  const serviceKey         = env.SUPABASE_SERVICE_KEY;
+
+  if (!supabaseUrl || !serviceKey)
+    return json({ error: 'Supabase not configured — SUPABASE_URL and SUPABASE_SERVICE_KEY required' }, 503);
+
+  // Determine Drive parent folder
+  const folder  = await loadFolder(env.GDRIVE_KV);
+  const parentId = folder?.id || 'root';
+
+  const fileMimeType = mimeType || 'application/octet-stream';
+
+  // ── Step 1: Fetch the file from Supabase using the service-role key ──────
+  const supabaseObjectUrl = `${supabaseUrl}/storage/v1/object/${MEDIA_BUCKET_LOCAL}/${storagePath}`;
+  let fileResponse;
+  try {
+    fileResponse = await fetch(supabaseObjectUrl, {
+      headers: {
+        'Authorization': `Bearer ${serviceKey}`,
+        'apikey':        serviceKey,
+      },
+    });
+  } catch (fetchErr) {
+    return json({ error: 'Supabase fetch failed: ' + fetchErr.message }, 502);
+  }
+
+  if (!fileResponse.ok) {
+    const errText = await fileResponse.text().catch(() => '');
+    return json({ error: `Supabase object not found — HTTP ${fileResponse.status}: ${errText.slice(0,200)}` }, 404);
+  }
+
+  const contentLength = fileResponse.headers.get('content-length');
+  const fileSize      = contentLength ? parseInt(contentLength, 10) : null;
+
+  // ── Step 2: Initiate resumable upload on Google Drive ─────────────────────
+  const safeFileName = String(fileName).replace(/[<>:"/\\|?*]/g, '_').slice(0, 255) ||
+    storagePath.split('/').pop() || 'media';
+
+  const initRes = await fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,webViewLink,size',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization':         'Bearer ' + at,
+        'Content-Type':          'application/json',
+        'X-Upload-Content-Type': fileMimeType,
+        ...(fileSize ? { 'X-Upload-Content-Length': String(fileSize) } : {}),
+      },
+      body: JSON.stringify({
+        name:    safeFileName,
+        parents: [parentId],
+      }),
+    }
+  );
+
+  if (!initRes.ok) {
+    const errText = await initRes.text().catch(() => '');
+    return json({ error: `Drive upload init failed — HTTP ${initRes.status}: ${errText.slice(0,300)}` }, 502);
+  }
+
+  const uploadUri = initRes.headers.get('Location');
+  if (!uploadUri) return json({ error: 'Google Drive did not return an upload URI' }, 502);
+
+  // ── Step 3: Stream the file body from Supabase → Google Drive ────────────
+  const uploadHeaders = {
+    'Content-Type': fileMimeType,
+  };
+  if (fileSize) uploadHeaders['Content-Length'] = String(fileSize);
+
+  const uploadRes = await fetch(uploadUri, {
+    method:  'PUT',
+    headers: uploadHeaders,
+    body:    fileResponse.body,   // stream directly — no large buffer in Worker memory
+    duplex:  'half',
+  });
+
+  if (!uploadRes.ok) {
+    const errText = await uploadRes.text().catch(() => '');
+    return json({ error: `Drive upload failed — HTTP ${uploadRes.status}: ${errText.slice(0,300)}` }, 502);
+  }
+
+  // ── Step 4: Return file metadata ──────────────────────────────────────────
+  let driveMeta = {};
+  try { driveMeta = await uploadRes.json(); } catch (_) {}
+
+  const driveFileId = driveMeta.id || '';
+  const viewUrl     = driveFileId
+    ? `https://drive.google.com/file/d/${driveFileId}/view`
+    : (driveMeta.webViewLink || '');
+
+  return json({ ok: true, driveFileId, viewUrl, name: driveMeta.name || safeFileName }, 200);
+}
+
 export async function handleGdriveConfigCheck(request, env, json) {
   const err = checkDriveSecrets(env);
   return json({

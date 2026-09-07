@@ -25,8 +25,9 @@ A Cloudflare Worker that acts as a secure bridge between Firebase Auth, Supabase
 | GOOGLE_CLIENT_SECRET | ✓ Set (server-side only, never in source code) |
 | GOOGLE_REDIRECT_URI | ✓ Set (`https://aurenix-upload.nthntjrn.workers.dev/gdrive/callback`) |
 | GDRIVE_KV namespace | ✓ Bound (`2c5a879a99c64aaeaf59bc1ed99db0f8`) |
-| Worker version | `2025-09-06-v8-gdrive` |
-| Last deploy | Version ID `9216b14d-50c6-4514-aad9-131085397a91` |
+| Worker version | `2025-09-06-v9-approval-routing` |
+| Last deploy | *Pending next deploy* |
+| NEW: POST /submission/copy-to-drive | ✓ Added — server-side Supabase→Drive copy |
 
 ---
 
