@@ -2047,3 +2047,394 @@ body {
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 10px;
 }
+
+
+/* ══════════════════════════════════════════════════════════════════
+   AURENIX MULTI-CHANNEL TV NETWORK — Extended Styles
+   Added for multi-channel TV upgrade
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── TV Network Header ──────────────────────────────────────── */
+.ax-network-header {
+  text-align: center;
+  padding: 32px 24px 20px;
+}
+.ax-network-title {
+  font-size: clamp(28px, 5vw, 52px);
+  font-weight: 900;
+  letter-spacing: 0.22em;
+  color: #c8d0e8;
+  line-height: 1;
+  margin-bottom: 6px;
+}
+.ax-network-title span { color: var(--blue-bright); }
+.ax-network-sub {
+  font-size: clamp(12px, 2vw, 18px);
+  letter-spacing: 3px;
+  color: var(--blue-bright);
+  font-weight: 600;
+}
+.ax-network-tagline {
+  font-size: 11px;
+  letter-spacing: 4px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-top: 4px;
+}
+
+/* ── TV Layout (main + sidebar) ─────────────────────────────── */
+.ax-tv-layout {
+  max-width: 1200px;
+  margin: 0 auto;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 24px;
+  align-items: start;
+  padding: 0 20px 40px;
+}
+.ax-tv-main { display: flex; flex-direction: column; gap: 0; }
+.ax-tv-sidebar { display: flex; flex-direction: column; gap: 14px; }
+
+/* ── Channel badge (above player) ───────────────────────────── */
+.ax-channel-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  border-radius: 4px 4px 0 0;
+  background: var(--blue);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  width: fit-content;
+  transition: background 0.3s;
+}
+.ax-badge-num {
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  opacity: 0.9;
+}
+.ax-badge-dot { opacity: 0.5; }
+.ax-live-indicator {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  letter-spacing: 2px;
+  opacity: 0.9;
+}
+
+/* ── Progress times (3-column: elapsed / total / remaining) ─── */
+.ax-progress-times {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 5px;
+  font-variant-numeric: tabular-nums;
+}
+.ax-progress-times span:nth-child(2) { text-align: center; }
+.ax-progress-times span:nth-child(3) { text-align: right; }
+
+/* ── Now Playing info panel (below player) ──────────────────── */
+.ax-now-playing-panel {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  border-top: none;
+}
+.ax-np-panel-left { flex: 1; min-width: 0; }
+.ax-np-panel-right {
+  text-align: right;
+  flex-shrink: 0;
+}
+.ax-np-panel-label {
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 2.5px;
+  color: var(--red);
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+.ax-np-panel-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+.ax-np-panel-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ax-np-panel-time {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--blue-bright);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 2px;
+}
+.ax-np-panel-remain {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Channel list: number + icon ────────────────────────────── */
+.ax-ch-num {
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  width: 22px;
+  flex-shrink: 0;
+  text-align: center;
+}
+.ax-ch-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+}
+
+/* ── EPG / TV Guide Panel ───────────────────────────────────── */
+.ax-epg-panel {
+  min-height: 120px;
+}
+.ax-epg-tabs {
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.ax-epg-tabs::-webkit-scrollbar { display: none; }
+.ax-epg-tab {
+  flex-shrink: 0;
+  padding: 7px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+.ax-epg-tab:hover { color: var(--text); background: var(--blue-dim); }
+.ax-epg-tab.active {
+  color: var(--ch-color, var(--blue-bright));
+  border-bottom-color: var(--ch-color, var(--blue-bright));
+  background: rgba(30,80,255,0.06);
+}
+
+.ax-epg-body { padding: 4px 0; }
+.ax-epg-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  transition: background var(--transition);
+}
+.ax-epg-row:last-child { border-bottom: none; }
+.ax-epg-row.current { background: rgba(255,45,85,0.06); border-left: 2px solid var(--red); }
+.ax-epg-badge {
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  width: 46px;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+.ax-epg-row.current .ax-epg-badge { color: var(--red); }
+.ax-epg-info { flex: 1; min-width: 0; }
+.ax-epg-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ax-epg-row.current .ax-epg-title { color: #fff; font-weight: 700; }
+.ax-epg-meta { font-size: 10px; color: var(--text-dim); margin-top: 1px; }
+.ax-epg-remain {
+  font-size: 10px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  padding-top: 2px;
+}
+.ax-epg-empty {
+  padding: 16px 14px;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ── Channel Commercial Toggle (Founder Studio) ─────────────── */
+.ax-comm-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.ax-comm-toggle-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.5px;
+}
+.ax-comm-toggle {
+  display: flex;
+  gap: 0;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border-hi);
+}
+.ax-comm-toggle-btn {
+  padding: 5px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.ax-comm-toggle-btn.on.active  { background: rgba(0,230,118,0.18); color: var(--green); }
+.ax-comm-toggle-btn.off.active { background: rgba(255,45,85,0.12); color: var(--red); }
+
+/* ── Channel commercial settings card ──────────────────────── */
+.ax-ch-comm-settings {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-top: 12px;
+}
+.ax-ch-comm-title {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.ax-ch-comm-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.ax-ch-comm-row label {
+  font-size: 11px;
+  color: var(--text-dim);
+  flex: 1;
+}
+.ax-ch-comm-row select,
+.ax-ch-comm-row input[type="number"] {
+  background: var(--panel);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: 12px;
+  width: 140px;
+  outline: none;
+}
+.ax-ch-comm-row select:focus,
+.ax-ch-comm-row input:focus { border-color: var(--blue-bright); }
+
+/* ── Channel Mode selector ──────────────────────────────────── */
+.ax-ch-mode-grid {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.ax-ch-mode-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.ax-ch-mode-btn.active {
+  background: var(--blue-dim);
+  border-color: var(--blue-bright);
+  color: var(--blue-bright);
+}
+
+/* ── Responsive TV layout ───────────────────────────────────── */
+@media (max-width: 960px) {
+  .ax-tv-layout {
+    grid-template-columns: 1fr;
+    padding: 0 12px 32px;
+  }
+  .ax-tv-sidebar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .ax-epg-panel {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 640px) {
+  .ax-tv-sidebar {
+    grid-template-columns: 1fr;
+  }
+  .ax-network-header {
+    padding: 20px 16px 12px;
+  }
+  .ax-network-title {
+    font-size: clamp(22px, 8vw, 38px);
+  }
+  .ax-now-playing-panel {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .ax-np-panel-right {
+    text-align: left;
+  }
+  .ax-progress-times {
+    grid-template-columns: 1fr 1fr;
+  }
+  .ax-progress-times span:nth-child(2) { display: none; }
+  .ax-progress-times span:nth-child(3) { text-align: right; }
+  .ax-channel-badge { font-size: 10px; padding: 4px 10px; }
+  .ax-epg-tab { font-size: 9px; padding: 6px 10px; }
+}
+@media (max-width: 480px) {
+  .ax-controls { gap: 8px; padding: 10px 12px; }
+  .ax-ctrl-btn { width: 32px; height: 32px; font-size: 13px; }
+  .ax-ctrl-btn.primary { width: 38px; height: 38px; }
+  .ax-volume-slider { display: none; }
+  .ax-nav-btn { font-size: 10px; padding: 5px 10px; }
+}

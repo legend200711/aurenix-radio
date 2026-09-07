@@ -1105,16 +1105,23 @@ function _buildFounderHTML() {
         <option value="music">MUSIC</option>
         <option value="video">VIDEO</option>
         <option value="audio">AUDIO</option>
+        <option value="comedy">COMEDY</option>
+        <option value="gaming">GAMING</option>
+        <option value="podcasts">PODCASTS</option>
+        <option value="horror">HORROR</option>
+        <option value="sports">SPORTS</option>
+        <option value="movies">MOVIES</option>
+        <option value="sci-fi">SCI-FI</option>
         <option value="custom">CUSTOM</option>
       </select>
     </div>
     <div class="ax-field-group" style="margin-bottom:10px;">
       <label class="ax-field-label">Programming Mode</label>
       <select class="ax-field-input" id="ax-ch-mode">
-        <option value="ordered">ORDERED</option>
-        <option value="shuffle">SHUFFLE</option>
-        <option value="random">RANDOM</option>
-        <option value="scheduled">SCHEDULED</option>
+        <option value="random">RANDOM (24/7 auto-select)</option>
+        <option value="ordered">ORDERED (queue in order)</option>
+        <option value="shuffle">SHUFFLE (randomize queue)</option>
+        <option value="scheduled">SCHEDULED (manual program)</option>
       </select>
     </div>
     <div class="ax-field-group" style="margin-bottom:10px;">
@@ -1125,6 +1132,39 @@ function _buildFounderHTML() {
       <input type="checkbox" id="ax-ch-enabled" checked>
       Channel enabled (visible to users)
     </label>
+
+    <!-- Anti-repeat -->
+    <div class="ax-field-group" style="margin-bottom:10px;">
+      <label class="ax-field-label">Anti-repeat window (# programs)</label>
+      <input class="ax-field-input" type="number" id="ax-ch-anti-repeat" min="0" max="50" value="5"
+             style="max-width:140px;" title="Do not repeat the same item within this many programs">
+    </div>
+
+    <!-- Commercials -->
+    <div style="padding:12px 14px;background:rgba(184,134,11,0.07);border:1px solid rgba(184,134,11,0.2);border-radius:6px;margin-bottom:12px;">
+      <label class="ax-loop-toggle" style="margin-bottom:8px;">
+        <input type="checkbox" id="ax-ch-comm-enabled">
+        <span style="font-size:12px;font-weight:700;color:var(--text);">Enable Commercials</span>
+      </label>
+      <div id="ax-ch-comm-section" style="display:none;">
+        <div class="ax-ch-comm-row">
+          <label>Commercial frequency</label>
+          <select class="ax-field-input" id="ax-ch-comm-freq" style="max-width:180px;">
+            <option value="every">Every program</option>
+            <option value="every2">Every 2 programs</option>
+            <option value="every3">Every 3 programs</option>
+            <option value="low">Low (every 4–7)</option>
+            <option value="normal" selected>Normal (every 2–4)</option>
+            <option value="high">High (every 1–2)</option>
+          </select>
+        </div>
+        <div class="ax-ch-comm-row">
+          <label>Max commercials per break</label>
+          <input class="ax-field-input" type="number" id="ax-ch-comm-max" min="1" max="10" value="2" style="max-width:80px;">
+        </div>
+      </div>
+    </div>
+
     <div class="ax-auth-err" id="ax-ch-err" style="margin-bottom:8px;"></div>
     <div class="ax-modal-actions">
       <button class="ax-btn-ghost" id="ax-ch-modal-cancel">CANCEL</button>
@@ -1489,7 +1529,14 @@ function _rebuildDynamicPanes() {
           <input type="checkbox" class="ax-settings-loop" data-chid="${ch.id}" ${ch.loop !== false ? 'checked' : ''}>
           Loop continuously
         </label>
-        <button class="ax-btn-sm" style="margin-top:10px;" onclick="window._AXC.saveChannelSettings('${ch.id}')">Save</button>
+        <div style="margin-top:8px;font-size:11px;color:var(--text-dim);">
+          Commercials: <strong style="color:${ch.commercial_enabled ? 'var(--green)' : 'var(--text-muted)'};">${ch.commercial_enabled ? 'ON (' + (ch.commercial_freq || 'normal') + ')' : 'OFF'}</strong>
+          · Mode: <strong style="color:var(--blue-bright);">${ch.mode || 'ordered'}</strong>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;">
+          <button class="ax-btn-sm" onclick="window._AXC.saveChannelSettings('${ch.id}')">Save</button>
+          <button class="ax-btn-sm" onclick="window._AXC.editChannel('${ch.id}')">✏️ Edit</button>
+        </div>
       </div>`).join('') || '<div style="color:var(--text-dim);font-size:12px;">No channels yet.</div>';
   }
 
@@ -1646,6 +1693,13 @@ function _openChannelModal(channelId) {
   const errEl    = document.getElementById('ax-ch-err');
   if (!modal) return;
 
+  // Helper: show/hide commercial settings section
+  const _updateCommSettingsVis = () => {
+    const commOn = document.getElementById('ax-ch-comm-enabled')?.checked;
+    const section = document.getElementById('ax-ch-comm-section');
+    if (section) section.style.display = commOn ? '' : 'none';
+  };
+
   if (channelId) {
     const ch = _channels().find(c => c.id === channelId);
     if (!ch) return;
@@ -1657,7 +1711,11 @@ function _openChannelModal(channelId) {
     document.getElementById('ax-ch-type').value    = ch.channel_type || 'mixed';
     document.getElementById('ax-ch-mode').value    = ch.mode    || 'ordered';
     document.getElementById('ax-ch-color').value   = ch.color   || '#1e50ff';
-    document.getElementById('ax-ch-enabled').checked = ch.enabled !== false;
+    document.getElementById('ax-ch-enabled').checked    = ch.enabled !== false;
+    document.getElementById('ax-ch-comm-enabled').checked = !!(ch.commercial_enabled);
+    document.getElementById('ax-ch-comm-freq').value   = ch.commercial_freq    || 'normal';
+    document.getElementById('ax-ch-comm-max').value    = ch.max_commercials_per_break || 2;
+    document.getElementById('ax-ch-anti-repeat').value = ch.avoid_repeat_window || 5;
   } else {
     if (titleEl) titleEl.textContent = '➕ CREATE CHANNEL';
     if (saveBtn) saveBtn.textContent = 'CREATE CHANNEL';
@@ -1667,9 +1725,15 @@ function _openChannelModal(channelId) {
     document.getElementById('ax-ch-type').value    = 'mixed';
     document.getElementById('ax-ch-mode').value    = 'ordered';
     document.getElementById('ax-ch-color').value   = '#1e50ff';
-    document.getElementById('ax-ch-enabled').checked = true;
+    document.getElementById('ax-ch-enabled').checked     = true;
+    document.getElementById('ax-ch-comm-enabled').checked = false;
+    document.getElementById('ax-ch-comm-freq').value    = 'normal';
+    document.getElementById('ax-ch-comm-max').value     = 2;
+    document.getElementById('ax-ch-anti-repeat').value  = 5;
   }
   if (errEl) { errEl.textContent = ''; errEl.classList.remove('visible'); }
+  _updateCommSettingsVis();
+  document.getElementById('ax-ch-comm-enabled')?.addEventListener('change', _updateCommSettingsVis);
   modal.style.display = 'flex';
 
   document.getElementById('ax-ch-modal-cancel')?.addEventListener('click', () => { modal.style.display = 'none'; }, { once: true });
@@ -1679,16 +1743,21 @@ function _openChannelModal(channelId) {
     if (!name)  { errEl.textContent = 'Channel Name is required.'; errEl.classList.add('visible'); return; }
     if (!label) { errEl.textContent = 'Short Label is required.';  errEl.classList.add('visible'); return; }
 
+    const commEnabled = !!(document.getElementById('ax-ch-comm-enabled')?.checked);
     const data = {
       name,
-      label:        label.toUpperCase(),
-      description:  document.getElementById('ax-ch-desc').value.trim(),
-      channel_type: document.getElementById('ax-ch-type').value,
-      mode:         document.getElementById('ax-ch-mode').value,
-      color:        document.getElementById('ax-ch-color').value,
-      enabled:      document.getElementById('ax-ch-enabled').checked,
-      loop:         true,
-      updated_at:   serverTimestamp(),
+      label:                    label.toUpperCase(),
+      description:              document.getElementById('ax-ch-desc').value.trim(),
+      channel_type:             document.getElementById('ax-ch-type').value,
+      mode:                     document.getElementById('ax-ch-mode').value,
+      color:                    document.getElementById('ax-ch-color').value,
+      enabled:                  document.getElementById('ax-ch-enabled').checked,
+      loop:                     true,
+      commercial_enabled:       commEnabled,
+      commercial_freq:          commEnabled ? (document.getElementById('ax-ch-comm-freq')?.value || 'normal') : 'off',
+      max_commercials_per_break:commEnabled ? parseInt(document.getElementById('ax-ch-comm-max')?.value || '2', 10) : 2,
+      avoid_repeat_window:      parseInt(document.getElementById('ax-ch-anti-repeat')?.value || '5', 10),
+      updated_at:               serverTimestamp(),
     };
     if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
     try {
@@ -1887,7 +1956,7 @@ function _renderChannels() {
               <div class="ax-channel-card-status">${cur ? `<span style="color:var(--red)">● ON AIR</span>` : `<span style="color:var(--text-muted)">● OFFLINE</span>`}</div>
             </div>
           </div>
-          <div style="margin:8px 0;font-size:11px;color:var(--text-dim);">${_esc(c.description || '')} · ${_esc(c.channel_type || '')} · ${_esc(c.mode || '')}</div>
+          <div style="margin:8px 0;font-size:11px;color:var(--text-dim);">${_esc(c.description || '')} · <strong>${_esc(c.channel_type || '')}</strong> · Mode: <strong style="color:var(--blue-bright)">${_esc(c.mode || '')}</strong> · Commercials: <strong style="color:${c.commercial_enabled ? 'var(--green)' : 'var(--text-muted)'}">${c.commercial_enabled ? 'ON' : 'OFF'}</strong></div>
           <div style="margin:8px 0;font-size:11px;font-weight:700;letter-spacing:1px;color:var(--text-dim);">CURRENT PROGRAM</div>
           <div class="ax-channel-card-np">${cur ? _esc(cur.title) : '—'}</div>
           <div style="margin:8px 0;font-size:11px;font-weight:700;letter-spacing:1px;color:var(--text-dim);">UP NEXT</div>
@@ -3798,11 +3867,12 @@ window._AXC = {
     const descEl = document.querySelector(`.ax-settings-desc[data-chid="${channelId}"]`);
     const loopEl = document.querySelector(`.ax-settings-loop[data-chid="${channelId}"]`);
     // Save description/loop to the channel doc (not the state doc)
-    await setDoc(doc(db, 'network_channels', channelId), {
+    const updates = {
       description: descEl?.value || '',
       loop:        loopEl?.checked ?? true,
       updated_at:  serverTimestamp(),
-    }, { merge: true });
+    };
+    await setDoc(doc(db, 'network_channels', channelId), updates, { merge: true });
     _toast(`${channelId} settings saved.`);
   },
 
