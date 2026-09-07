@@ -35,7 +35,10 @@ import { supabase } from './supabase-client.js';
 ═══════════════════════════════════════ */
 const FOUNDER_EMAIL = 'christijerina46@gmail.com';
 const MEDIA_BUCKET  = 'aurenix-media';
-const MAX_FILE_MB   = 500;
+// No client-side file-size cap is imposed.
+// The Supabase bucket file_size_limit (enforced by the Worker) is the real limit.
+// Surfacing the actual storage-provider error is better than an arbitrary app limit.
+const MAX_FILE_MB   = null; // intentionally unset — no artificial limit
 
 /**
  * URL of the deployed Cloudflare Worker that brokers uploads.
@@ -177,6 +180,7 @@ export function mountControl(user, isAdmin) {
     _bindSchedulePane();
     _bindLibraryPane();
     _bindChannelManager();
+    _bindApprovalPane();
 
     // Close button
     ctrl.querySelector('#ax-ctrl-close')?.addEventListener('click', _restoreHero);
@@ -304,6 +308,9 @@ function _buildFounderHTML() {
     <button class="ax-ctrl-nav-btn active" data-pane="dashboard">
       <span class="ax-ctrl-nav-icon">🏠</span> Dashboard
     </button>
+    <button class="ax-ctrl-nav-btn" data-pane="approval" id="ax-nav-approval">
+      <span class="ax-ctrl-nav-icon">🔍</span> Pending Approval <span id="ax-approval-badge" style="display:none;background:var(--orange,#f0a500);color:#000;border-radius:10px;padding:1px 6px;font-size:10px;margin-left:4px;font-weight:900;"></span>
+    </button>
     <button class="ax-ctrl-nav-btn" data-pane="network">
       <span class="ax-ctrl-nav-icon">📡</span> Network Control
     </button>
@@ -402,9 +409,34 @@ function _buildFounderHTML() {
       </div>
     </div>
 
+    <!-- ══ PENDING APPROVAL PANE ══ -->
+    <div class="ax-ctrl-pane" id="ax-pane-approval">
+      <div class="ax-section-title">Pending <span>Approval</span></div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:12px;line-height:1.7;color:var(--text-dim);">
+        <strong style="color:var(--text);">UPLOAD → PENDING APPROVAL → APPROVE / REJECT → BROADCAST</strong><br>
+        Every uploaded file lands here first. Preview it, then approve or reject.<br>
+        Only <strong style="color:var(--green);">APPROVED</strong> media can be added to a channel, playlist, or broadcast schedule.
+      </div>
+      <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;" id="ax-approval-filter-bar">
+        <button class="ax-btn-sm ax-approval-filter active" data-status="pending_approval">PENDING</button>
+        <button class="ax-btn-sm ax-approval-filter" data-status="approved">APPROVED</button>
+        <button class="ax-btn-sm ax-approval-filter" data-status="rejected">REJECTED</button>
+        <button class="ax-btn-sm ax-approval-filter" data-status="all">ALL</button>
+      </div>
+      <div id="ax-approval-list">
+        <div style="color:var(--text-dim);font-size:12px;padding:24px;">Loading…</div>
+      </div>
+    </div>
+
     <!-- ══ UPLOAD CENTER ══ -->
     <div class="ax-ctrl-pane" id="ax-pane-upload">
       <div class="ax-section-title">Upload <span>Center</span></div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:12px;line-height:1.7;color:var(--text-dim);">
+        <strong style="color:var(--text);">Upload anything you have the legal right to submit.</strong><br>
+        All submissions are reviewed by the Founder before they can be broadcast.<br>
+        Accepted: moving video, people, faces, music videos, slideshows, cat videos, podcasts, funny clips, large MP4s — any technically-supported file.<br>
+        <strong style="color:var(--orange,#f0a500);">Uploading does not broadcast.</strong> The Founder reviews and approves each file before it enters any channel or playlist.
+      </div>
       <div class="ax-upload-categories">
         ${MEDIA_CATEGORIES.map(cat => `
           <button class="ax-upload-cat-btn ${cat.id === 'music' ? 'active' : ''}" data-cat="${cat.id}" data-accept="${cat.accept}">
@@ -416,7 +448,7 @@ function _buildFounderHTML() {
         <div class="ax-upload-title">DROP MEDIA HERE</div>
         <div class="ax-upload-sub">or SELECT FILES — multiple files supported</div>
         <div class="ax-upload-sub" style="margin-top:6px;font-size:11px;opacity:0.6;">
-          Audio: MP3 WAV AAC OGG FLAC M4A &nbsp;|&nbsp; Video: MP4 WebM MOV AVI &nbsp;|&nbsp; Images: JPG PNG WebP
+          Audio: MP3 WAV AAC OGG FLAC M4A &nbsp;|&nbsp; Video: MP4 WebM MOV AVI MKV &nbsp;|&nbsp; Images: JPG PNG WebP GIF
         </div>
         <input type="file" id="ax-file-input" multiple accept="audio/*,video/*,image/*" style="display:none;">
       </div>
@@ -549,10 +581,12 @@ function _buildFounderHTML() {
         <div class="ax-security-card">
           <div class="ax-security-title">🔒 ACCESS CONTROLS</div>
           <div class="ax-security-row"><span>Upload Media</span><span class="ax-security-val ax-badge-founder">FOUNDER ONLY</span></div>
+          <div class="ax-security-row"><span>Approve / Reject</span><span class="ax-security-val ax-badge-founder">FOUNDER ONLY</span></div>
           <div class="ax-security-row"><span>Delete Media</span><span class="ax-security-val ax-badge-founder">FOUNDER ONLY</span></div>
           <div class="ax-security-row"><span>Modify Schedules</span><span class="ax-security-val ax-badge-founder">FOUNDER ONLY</span></div>
           <div class="ax-security-row"><span>Channel Control</span><span class="ax-security-val ax-badge-founder">FOUNDER ONLY</span></div>
           <div class="ax-security-row"><span>Play Now / Interrupt</span><span class="ax-security-val ax-badge-founder">FOUNDER ONLY</span></div>
+          <div class="ax-security-row"><span>Add to Channel/Playlist</span><span class="ax-security-val" style="color:var(--orange,#f0a500)">APPROVED ONLY</span></div>
           <div class="ax-security-row"><span>View Public Broadcast</span><span class="ax-security-val" style="color:var(--green)">ALL VISITORS</span></div>
           <div class="ax-security-row"><span>Firestore Write Guard</span><span class="ax-security-val" style="color:var(--green)">SERVER-SIDE ✓</span></div>
         </div>
@@ -715,6 +749,8 @@ function _subscribeMedia() {
     _renderSchedItems();
     _renderStats();
     _renderDashboardRecent();
+    _renderApproval();     // keep approval pane in sync
+    _updateApprovalBadge();
   });
 }
 
@@ -1298,17 +1334,17 @@ function _bindUploadPane() {
 
 async function _handleFiles(files) {
   if (!files.length) return;
-  const allowed = files.filter(f =>
+  // Accept any audio, video, or image file regardless of visual content.
+  // Content classification (people, faces, music videos, slideshows, etc.)
+  // is NOT performed here and does NOT block upload.
+  const valid = files.filter(f =>
     f.type.startsWith('audio/') ||
     f.type.startsWith('video/') ||
-    f.type.startsWith('image/')
+    f.type.startsWith('image/') ||
+    !f.type  // unknown MIME — let the Worker decide
   );
-  if (!allowed.length) { _toast('No supported files selected.', 'err'); return; }
-  const tooBig = allowed.filter(f => f.size > MAX_FILE_MB * 1024 * 1024);
-  if (tooBig.length) {
-    _toast(`${tooBig.length} file(s) exceed ${MAX_FILE_MB} MB limit and were skipped.`, 'err');
-  }
-  const valid = allowed.filter(f => f.size <= MAX_FILE_MB * 1024 * 1024);
+  if (!valid.length) { _toast('No supported media files selected.', 'err'); return; }
+  // No client-side size limit — the storage provider enforces the real cap.
   // Upload concurrently (max 3 at a time)
   for (let i = 0; i < valid.length; i += 3) {
     await Promise.allSettled(valid.slice(i, i + 3).map(f => _uploadFile(f)));
@@ -1629,7 +1665,10 @@ async function _uploadFile(file) {
         duration_sec,
         size_bytes:   file.size,
         mime_type:    file.type || 'application/octet-stream',
-        status:       'ready',
+        // APPROVAL WORKFLOW: all uploads start as pending_approval.
+        // Only the Founder can move this to 'approved'.
+        // Only approved media can enter a channel or broadcast schedule.
+        status:       'pending_approval',
         channel:      '',
         tags:         [],
         year:         new Date().getFullYear(),
@@ -1637,10 +1676,10 @@ async function _uploadFile(file) {
         uploaded_at:  serverTimestamp(),
       });
 
-      setStatus('✓ UPLOAD COMPLETE  ✓ STORAGE VERIFIED  ✓ MEDIA RECORD SAVED  ✓ READY', 'var(--green)');
+      setStatus('✓ UPLOADED  ✓ STORAGE VERIFIED  ✓ RECORD SAVED  — PENDING APPROVAL', 'var(--orange,#f0a500)');
       const destEl = document.getElementById(`dest-${itemKey}`);
       if (destEl) destEl.textContent = `${MEDIA_BUCKET} › ${docRef.id}`;
-      _toast(`Uploaded: ${file.name}`);
+      _toast(`✓ Uploaded — pending Founder approval: ${file.name}`);
 
       // Always open the metadata modal after upload so the founder can set title,
       // channel, etc. — except for pure thumbnail uploads (type === 'thumbnail'),
@@ -1877,6 +1916,126 @@ function _bindLibraryPane() {
   });
 }
 
+/* ═══════════════════════════════════════
+   APPROVAL PANE
+   UPLOAD → PENDING APPROVAL → APPROVE/REJECT → BROADCAST
+═══════════════════════════════════════ */
+let _approvalFilter = 'pending_approval';
+
+function _updateApprovalBadge() {
+  const count = _mediaLib.filter(m => m.status === 'pending_approval').length;
+  const badge = document.getElementById('ax-approval-badge');
+  if (badge) {
+    badge.style.display = count > 0 ? '' : 'none';
+    badge.textContent   = count;
+  }
+}
+
+function _bindApprovalPane() {
+  document.getElementById('ax-approval-filter-bar')?.querySelectorAll('.ax-approval-filter').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.ax-approval-filter').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      _approvalFilter = btn.dataset.status;
+      _renderApproval();
+    });
+  });
+}
+
+function _renderApproval() {
+  const listEl = document.getElementById('ax-approval-list');
+  if (!listEl) return;
+
+  const items = _approvalFilter === 'all'
+    ? _mediaLib
+    : _mediaLib.filter(m => (m.status || 'pending_approval') === _approvalFilter);
+
+  if (!items.length) {
+    const emptyMsg = _approvalFilter === 'pending_approval'
+      ? 'No pending uploads — all clear!'
+      : `No ${_approvalFilter} media.`;
+    listEl.innerHTML = `<div style="color:var(--text-dim);font-size:12px;padding:24px;text-align:center;">${emptyMsg}</div>`;
+    return;
+  }
+
+  const statusColors = { pending_approval:'#f0a500', approved:'var(--green)', rejected:'var(--red)', ready:'var(--green)' };
+
+  listEl.innerHTML = items.map(m => {
+    const st = m.status || 'pending_approval';
+    const stLabel = st === 'pending_approval' ? 'PENDING APPROVAL' : st.toUpperCase();
+    const isPending  = st === 'pending_approval';
+    const isApproved = st === 'approved' || st === 'ready';
+    const isVideo = m.mime_type?.startsWith('video/') || ['video','music_video','show','trailer','archive','broadcast_clip'].includes(m.type);
+    const isAudio = m.mime_type?.startsWith('audio/') || ['audio','music','audio_program','podcast','station_id'].includes(m.type);
+
+    // Build thumbnail preview area
+    const thumbHtml = m.url
+      ? (isVideo
+          ? `<video src="${_esc(m.url)}" style="width:100%;max-height:220px;border-radius:6px;background:#000;display:block;" controls preload="metadata"></video>`
+          : isAudio
+            ? `<audio src="${_esc(m.url)}" style="width:100%;margin:4px 0;" controls preload="metadata"></audio>`
+            : m.thumbnail_url
+              ? `<img src="${_esc(m.thumbnail_url)}" style="width:100%;max-height:140px;object-fit:cover;border-radius:6px;" loading="lazy">`
+              : '')
+      : '';
+
+    return `
+    <div class="ax-sub-card" id="ax-appr-${m.id}" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px;">
+      <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:260px;">
+          <!-- Header row -->
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+            <span style="font-size:18px;">${_typeIcon(m.type)}</span>
+            <div>
+              <div style="font-size:14px;font-weight:700;color:var(--text);">${_esc(m.title || '(untitled)')}</div>
+              ${m.artist ? `<div style="font-size:11px;color:var(--text-dim);">${_esc(m.artist)}</div>` : ''}
+            </div>
+            <span style="font-size:10px;font-weight:700;letter-spacing:1px;padding:2px 8px;border-radius:10px;background:rgba(0,0,0,0.5);color:${statusColors[st] || 'var(--text-dim)'};">${stLabel}</span>
+          </div>
+
+          <!-- Media preview -->
+          ${thumbHtml}
+
+          <!-- Metadata grid -->
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:4px 12px;margin-top:10px;font-size:11px;color:var(--text-dim);">
+            <div><strong style="color:var(--text);">File</strong><br>${_esc(m.title || '—')}</div>
+            <div><strong style="color:var(--text);">Type</strong><br>${_esc(m.type || '—')}</div>
+            <div><strong style="color:var(--text);">MIME</strong><br>${_esc(m.mime_type || '—')}</div>
+            <div><strong style="color:var(--text);">Size</strong><br>${m.size_bytes ? _fmtSize(m.size_bytes) : '—'}</div>
+            <div><strong style="color:var(--text);">Duration</strong><br>${m.duration_sec ? _fmtTime(m.duration_sec) : '—'}</div>
+            <div><strong style="color:var(--text);">Uploader</strong><br>${_esc(m.creator || m.uploaded_by || '—')}</div>
+            <div><strong style="color:var(--text);">Uploaded</strong><br>${m.uploaded_at ? _relDate(m.uploaded_at) : '—'}</div>
+            <div><strong style="color:var(--text);">Category</strong><br>${_esc(m.category || '—')}</div>
+          </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div style="display:flex;flex-direction:column;gap:8px;flex-shrink:0;min-width:140px;">
+          ${isPending ? `
+            <button class="ax-btn-sm" style="background:var(--green);color:#000;font-weight:900;letter-spacing:0.5px;padding:8px 16px;"
+                    onclick="window._AXC.approveMedia('${m.id}')">✓ APPROVE</button>
+            <button class="ax-btn-sm ax-btn-danger" style="font-weight:700;padding:8px 16px;"
+                    onclick="window._AXC.rejectMedia('${m.id}')">✕ REJECT</button>
+            <button class="ax-btn-sm" style="font-weight:700;padding:8px 16px;"
+                    onclick="window._AXC.requestChanges('${m.id}')">↻ REQUEST CHANGES</button>
+          ` : isApproved ? `
+            <div style="font-size:11px;font-weight:700;color:var(--green);text-align:center;margin-bottom:4px;">✓ APPROVED</div>
+            <button class="ax-btn-sm" onclick="window._AXC.openBroadcast('${m.id}')">📡 Add to Broadcast</button>
+            <button class="ax-btn-sm" onclick="window._AXC.addToSched('${m.id}')">📅 Schedule</button>
+            <button class="ax-btn-sm ax-btn-danger" style="font-size:10px;"
+                    onclick="window._AXC.rejectMedia('${m.id}')">✕ Revoke Approval</button>
+          ` : `
+            <div style="font-size:11px;font-weight:700;color:var(--red);text-align:center;">✕ REJECTED</div>
+            <button class="ax-btn-sm" style="font-weight:700;padding:8px 16px;"
+                    onclick="window._AXC.approveMedia('${m.id}')">✓ APPROVE ANYWAY</button>
+          `}
+          <button class="ax-btn-sm" onclick="window._AXC.openMeta('${m.id}')" style="margin-top:4px;">✏ Edit Metadata</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 function _getFilteredLib(filter, search) {
   let items = _mediaLib;
   if (filter && filter !== 'all') {
@@ -1934,7 +2093,12 @@ function _renderMediaGrid(grid, items, showActions) {
       </div>`;
     return;
   }
-  grid.innerHTML = items.map(m => `
+  const statusColors = { pending_approval:'#f0a500', approved:'var(--green)', rejected:'var(--red)', ready:'var(--green)' };
+  grid.innerHTML = items.map(m => {
+    const st = m.status || 'pending_approval';
+    const isApproved = st === 'approved' || st === 'ready';
+    const stLabel = st === 'pending_approval' ? 'PENDING APPROVAL' : st.toUpperCase();
+    return `
     <div class="ax-media-card" data-id="${m.id}">
       <div class="ax-media-card-thumb">
         ${m.thumbnail_url
@@ -1943,6 +2107,7 @@ function _renderMediaGrid(grid, items, showActions) {
         <span class="ax-media-card-type">${m.type || 'media'}</span>
         ${m.duration_sec ? `<span class="ax-media-card-dur">${_fmtTime(m.duration_sec)}</span>` : ''}
         ${m.channel ? `<span class="ax-media-card-ch" style="position:absolute;bottom:4px;left:4px;font-size:9px;background:rgba(0,0,0,0.7);color:#4d7aff;padding:1px 4px;border-radius:3px;">${m.channel}</span>` : ''}
+        <span style="position:absolute;top:4px;right:4px;font-size:9px;font-weight:700;letter-spacing:0.5px;padding:2px 5px;border-radius:3px;background:rgba(0,0,0,0.75);color:${statusColors[st] || 'var(--text-dim)'};">${stLabel}</span>
       </div>
       <div class="ax-media-card-body">
         <div class="ax-media-card-title" title="${_esc(m.title)}">${_esc(m.title)}</div>
@@ -1952,12 +2117,16 @@ function _renderMediaGrid(grid, items, showActions) {
       <div class="ax-media-card-actions">
         <button class="ax-btn-sm" onclick="window._AXC.playPreview('${m.id}')" title="Preview">▶</button>
         <button class="ax-btn-sm" onclick="window._AXC.openMeta('${m.id}')" title="Edit">✏</button>
-        <button class="ax-btn-sm ax-btn-playnow" onclick="window._AXC.openBroadcast('${m.id}')" title="Broadcast">📡</button>
-        <button class="ax-btn-sm" onclick="window._AXC.addToSched('${m.id}')" title="Schedule">📅</button>
+        ${isApproved
+          ? `<button class="ax-btn-sm ax-btn-playnow" onclick="window._AXC.openBroadcast('${m.id}')" title="Broadcast">📡</button>
+             <button class="ax-btn-sm" onclick="window._AXC.addToSched('${m.id}')" title="Schedule">📅</button>`
+          : `<button class="ax-btn-sm" style="opacity:0.4;cursor:not-allowed;" disabled title="Approve before broadcasting">📡</button>
+             <button class="ax-btn-sm" style="opacity:0.4;cursor:not-allowed;" disabled title="Approve before scheduling">📅</button>`}
         ${m.url ? `<button class="ax-btn-sm" onclick="window._AXC.downloadMedia('${m.id}')" title="Download">⬇</button>` : ''}
         <button class="ax-btn-sm ax-btn-danger" onclick="window._AXC.deleteMedia('${m.id}')" title="Delete">🗑</button>
       </div>` : ''}
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 /* ═══════════════════════════════════════
@@ -1987,7 +2156,13 @@ function _renderMiniLib(search = '') {
     container.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px;">No media in library yet.</div>';
     return;
   }
-  container.innerHTML = items.map(m => `
+  // Only approved media can enter the schedule
+  const approved = items.filter(m => m.status === 'approved');
+  if (!approved.length) {
+    container.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:8px;">${items.length ? 'No approved media yet — approve uploads in the Pending Approval pane.' : 'No media in library yet.'}</div>`;
+    return;
+  }
+  container.innerHTML = approved.map(m => `
     <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;"
          onclick="window._AXC.addToSched('${m.id}')">
       <span style="font-size:14px;">${_typeIcon(m.type)}</span>
@@ -2412,6 +2587,12 @@ window._AXC = {
   async addToSched(mediaId) {
     const item = _mediaLib.find(m => m.id === mediaId);
     if (!item) return;
+    // Approval gate — only approved media can enter a broadcast schedule.
+    const isApproved = item.status === 'approved' || item.status === 'ready';
+    if (!isApproved) {
+      _toast(`"${item.title}" is not approved yet. Go to Pending Approval to approve it first.`, 'err');
+      return;
+    }
     const st    = _channelStates[_schedChannelId];
     const queue = [...(st?.queue || [])];
     if (queue.find(q => q.id === mediaId)) { _toast('Already in schedule.', 'err'); return; }
@@ -2423,6 +2604,12 @@ window._AXC = {
   async addToSchedChannel(mediaId, channelId) {
     const item = _mediaLib.find(m => m.id === mediaId);
     if (!item) return;
+    // Approval gate — only approved media can enter a broadcast schedule.
+    const isApproved = item.status === 'approved' || item.status === 'ready';
+    if (!isApproved) {
+      _toast(`"${item.title}" is not approved yet. Approve it in the Pending Approval pane first.`, 'err');
+      return;
+    }
     const st    = _channelStates[channelId];
     const queue = [...(st?.queue || [])];
     if (queue.find(q => q.id === mediaId)) { _toast('Already in queue.', 'err'); return; }
@@ -2500,6 +2687,52 @@ window._AXC = {
     }
   },
 
+  // ── APPROVAL WORKFLOW: network_media ─────────────────────────────────────
+  // Approve a media item — it can now enter channels, playlists, and schedules.
+  async approveMedia(mediaId) {
+    const item = _mediaLib.find(m => m.id === mediaId);
+    try {
+      await updateDoc(doc(db, 'network_media', mediaId), {
+        status:      'approved',
+        approved_at: serverTimestamp(),
+        approved_by: _user?.email || '',
+      });
+      _toast(`✓ APPROVED — "${item?.title || mediaId}" is ready for broadcast.`);
+    } catch (e) { _toast('Approve failed: ' + e.message, 'err'); }
+  },
+
+  // Reject a media item — it cannot enter channels or schedules.
+  async rejectMedia(mediaId) {
+    const item = _mediaLib.find(m => m.id === mediaId);
+    const note = prompt(`Rejection note (optional):`);
+    if (note === null) return; // cancelled
+    try {
+      await updateDoc(doc(db, 'network_media', mediaId), {
+        status:          'rejected',
+        rejected_at:     serverTimestamp(),
+        rejected_by:     _user?.email || '',
+        rejection_note:  note || '',
+      });
+      _toast(`✕ REJECTED — "${item?.title || mediaId}".`);
+    } catch (e) { _toast('Reject failed: ' + e.message, 'err'); }
+  },
+
+  // Request changes — keeps status as pending_approval with a note.
+  async requestChanges(mediaId) {
+    const item = _mediaLib.find(m => m.id === mediaId);
+    const note = prompt(`What changes are needed?`);
+    if (!note) return;
+    try {
+      await updateDoc(doc(db, 'network_media', mediaId), {
+        status:                   'pending_approval',
+        changes_requested_at:     serverTimestamp(),
+        changes_note:             note,
+      });
+      _toast(`↻ CHANGES REQUESTED — "${item?.title || mediaId}".`);
+    } catch (e) { _toast('Request changes failed: ' + e.message, 'err'); }
+  },
+
+  // ── APPROVAL WORKFLOW: media_submissions (user-submitted URLs) ───────────
   async approveSubmission(submissionId) {
     try {
       await setDoc(doc(db, 'media_submissions', submissionId), { status: 'approved', reviewed_at: serverTimestamp() }, { merge: true });
@@ -2529,7 +2762,9 @@ window._AXC = {
         storage_path: '',
         duration_sec: 0,
         size_bytes:   0,
-        status:       'ready',
+        // Imported user submissions start as pending_approval — Founder must approve
+        // before the media can be added to a channel or broadcast schedule.
+        status:       'pending_approval',
         channel:      '',
         tags:         [],
         year:         new Date().getFullYear(),
@@ -2538,7 +2773,7 @@ window._AXC = {
         source:       'user_submission',
         submission_id: submissionId,
       });
-      _toast('Imported to media library: ' + sub.title);
+      _toast('Imported to library (pending approval): ' + sub.title);
     } catch (e) { _toast('Import failed: ' + e.message, 'err'); }
   },
 };

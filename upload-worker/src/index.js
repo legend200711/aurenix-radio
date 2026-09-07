@@ -1,29 +1,26 @@
 /**
- * AURENIX — Founder Upload Worker  (v6 — signed-URL + bucket-limit enforcement)
+ * AURENIX — Founder Upload Worker  (v7 — approval-first, no content rejection)
  * upload-worker/src/index.js
  *
- * ARCHITECTURE (v6):
+ * ARCHITECTURE (v7):
  *   The Worker is an authorisation gate only — it never touches the file.
+ *   Content-based rejection is REMOVED.  Any technically-supported file type
+ *   and size is accepted.  All uploaded media enters Firestore with
+ *   status: 'pending_approval'.  Only the Founder can approve it for broadcast.
  *
- *   Why not TUS PATCH?
- *     Supabase TUS PATCH requires Authorization: Bearer <service-role-key> on
- *     every chunk.  The browser cannot hold the service-role key.
- *     TUS PATCH without it returns 403 "Invalid Compact JWS".
+ *   UPLOAD ≠ BROADCAST.  Acceptance is not publication.
  *
  *   Solution — Supabase signed upload URL:
  *     1. Browser sends Firebase ID token + fileName + contentType + size (tiny JSON)
  *     2. Worker verifies Firebase JWT (Google JWK, RS256)
- *     3. Worker checks token.email == FOUNDER_EMAIL
+ *     3. Worker checks token.email == FOUNDER_EMAIL  (upload is Founder-only)
  *     4. Worker calls PATCH /storage/v1/bucket/<bucket> to ensure the bucket
- *        file_size_limit is >= BUCKET_FILE_SIZE_LIMIT_BYTES (500 MiB).
- *        This fixes "The object exceeded the maximum allowed size" HTTP 400 errors
- *        that occur when the Supabase bucket has a default or lower limit set.
+ *        file_size_limit is set (no artificial app-level cap imposed here).
  *     5. Worker calls POST /storage/v1/object/upload/sign/<bucket>/<path>
  *        using the service-role key — returns a signed URL with ?token=...
  *     6. Worker returns the full signed URL + current bucket limit to the browser
  *     7. Browser PUTs the file directly to that signed URL
  *        — no Authorization header needed, the token is in the URL query string
- *        — size limit is enforced by the bucket file_size_limit (500 MiB)
  *        — XHR upload.onprogress gives byte-accurate progress
  *
  * Endpoints:
@@ -42,22 +39,33 @@
 const FOUNDER_EMAIL = 'christijerina46@gmail.com';
 const MEDIA_BUCKET  = 'aurenix-media';
 
-// Allowed MIME types
+// Broad MIME type allowlist — covers all standard audio, video, and image types.
+// Content classification (person, face, cat, music video, slideshow, etc.)
+// is NOT performed here and does NOT affect upload acceptance.
+// All accepted files enter the Founder's PENDING APPROVAL queue.
 const ALLOWED_TYPES = new Set([
+  // Audio
   'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/wave', 'audio/x-wav',
   'audio/aac', 'audio/flac', 'audio/x-flac', 'audio/ogg', 'audio/webm',
-  'audio/mp4', 'audio/m4a', 'audio/x-m4a',
+  'audio/mp4', 'audio/m4a', 'audio/x-m4a', 'audio/opus',
+  // Video — all standard containers accepted regardless of visual content
   'video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo',
-  'video/x-ms-wmv', 'video/mpeg',
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
+  'video/x-ms-wmv', 'video/mpeg', 'video/3gpp', 'video/3gpp2',
+  'video/x-matroska', 'video/ogg', 'video/x-flv', 'video/mp2t',
+  // Image (used as still-photo music videos, thumbnails, slideshows, etc.)
+  'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
+  'image/svg+xml', 'image/bmp', 'image/tiff', 'image/avif', 'image/heic',
 ]);
 
-const MAX_BYTES = 524_288_000; // 500 MiB — enforced at authorisation time
+// No application-level MAX_BYTES cap is imposed.
+// The effective upload limit is the Supabase bucket file_size_limit (set below)
+// combined with the project-level STORAGE_FILE_SIZE_LIMIT.
+// Real technical errors from Supabase are surfaced as-is.
 
 // Target bucket file_size_limit.  The Worker will PATCH the bucket to this
 // value whenever the stored limit is lower (or unset).  This is the actual
 // Supabase-side limit that prevents "The object exceeded the maximum allowed
-// size" HTTP 400 errors.  Must match or exceed MAX_BYTES.
+// size" HTTP 400 errors.
 const BUCKET_FILE_SIZE_LIMIT_BYTES = 524_288_000; // 500 MiB
 
 /* ─── CORS ────────────────────────────────────────────────────────────────── */
@@ -727,12 +735,27 @@ export default {
 
       if (!fileName || typeof fileName !== 'string')
         return json({ error: 'AUTHORIZE FAILED — fileName required', stage: 'AUTHORIZE_FAILED' }, 400, origin);
-      if (!contentType || !ALLOWED_TYPES.has(contentType))
-        return json({ error: `AUTHORIZE FAILED — file type not allowed: ${contentType}`, stage: 'AUTHORIZE_FAILED' }, 415, origin);
       if (!size || typeof size !== 'number' || size <= 0)
         return json({ error: 'AUTHORIZE FAILED — size required (positive number)', stage: 'AUTHORIZE_FAILED' }, 400, origin);
-      if (size > MAX_BYTES)
-        return json({ error: `FILE TOO LARGE — ${Math.round(size/1048576)} MB exceeds 500 MB limit`, stage: 'AUTHORIZE_FAILED' }, 413, origin);
+
+      // Content-based rejection is intentionally absent.
+      // Any video, audio, or image file is accepted into the Founder's
+      // PENDING APPROVAL queue regardless of what it visually contains.
+      // If the MIME type is unrecognised we still allow it — Supabase will
+      // reject truly invalid payloads at the storage level.
+      const ct = contentType || 'application/octet-stream';
+      // Only block genuinely non-media MIME prefixes to prevent abuse
+      // (e.g. text/html, application/javascript).  All audio/*, video/*,
+      // image/*, and application/octet-stream are accepted.
+      const isMedia = ct.startsWith('audio/') || ct.startsWith('video/') ||
+                      ct.startsWith('image/') || ct === 'application/octet-stream' ||
+                      ALLOWED_TYPES.has(ct);
+      if (!isMedia)
+        return json({ error: `AUTHORIZE FAILED — not a media file type: ${ct}`, stage: 'AUTHORIZE_FAILED' }, 415, origin);
+      // No application-level file-size cap is imposed here.
+      // The Supabase bucket file_size_limit (500 MiB, set in step 6 below) is
+      // the real technical limit.  If the storage provider rejects the upload
+      // we surface its actual error — we do not invent a smaller limit.
 
       // ── 5. Build storage path
       const uid      = tokenPayload.sub;

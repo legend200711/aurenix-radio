@@ -596,7 +596,9 @@ function _buildHero(channels) {
       <div class="ax-modal-box" style="max-width:520px;">
         <div class="ax-modal-title">🎤 SUBMIT TO AURENIX</div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.6;">
-          Submit your music, video, or other content for consideration. The Founder reviews all submissions before anything goes on air.
+          Upload anything you have the legal right to submit — music, video, funny clips, cat videos, podcasts, music videos, slideshows, and more.
+          The Founder reviews all submissions before they can be broadcast.<br>
+          <strong style="color:var(--text);">Submitting does not publish your content.</strong> Nothing goes on air until the Founder approves it.
         </div>
         <div class="ax-field-group" style="margin-bottom:10px;">
           <label class="ax-field-label">Title *</label>
@@ -629,7 +631,9 @@ function _buildHero(channels) {
         <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:14px;cursor:pointer;">
           <input type="checkbox" id="ax-sub-rights" style="margin-top:3px;accent-color:var(--blue);">
           <span style="font-size:11px;color:var(--text-dim);line-height:1.5;">
-            I confirm that I own the rights to this content, or have explicit permission from the rights holder, to submit it for broadcast on AURENIX.
+            I confirm that I have the legal right to submit this content, or have explicit permission from the rights holder.
+            I understand this submission will be reviewed by the Founder before any broadcast decision is made.
+            AURENIX does not claim ownership of submitted content.
           </span>
         </label>
         <div class="ax-auth-err" id="ax-sub-err"></div>
