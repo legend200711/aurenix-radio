@@ -61,6 +61,9 @@ let _viewerAdvancingId = null;
 // Prevents a concurrent Firestore snapshot from re-entering _playState
 // while a transition is already underway.
 let _transitioning = false;
+// Timestamp of the last time the Worker returned service_account_not_configured.
+// Used to rate-limit retries so we don't spam the Worker every 800ms indefinitely.
+let _saKeyMissingLoggedAt = 0;
 
 /* ════════════════════════════════════
    INIT
@@ -1045,16 +1048,14 @@ function _onActiveChannelUpdate(st) {
   const item   = st.current_item;
   const isComm = !!(st.is_commercial);
 
-  // Log every Firestore snapshot that reaches the active channel update path.
-  // This lets us confirm whether Firestore is delivering state changes to the viewer.
+  // Log every Firestore snapshot that delivers a new item.
   if (_currentMediaId !== item.id) {
     console.log(
-      `[AURENIX AUTO ADVANCE] Firestore state changed → _onActiveChannelUpdate\n` +
-      `  channelId:      ${_activeChannel?.id}\n` +
-      `  prev itemId:    ${_currentMediaId}\n` +
-      `  new  itemId:    ${item.id}\n` +
-      `  title:          ${item.title}\n` +
-      `  duration_sec:   ${item.duration_sec}\n` +
+      `[AURENIX AUTO ADVANCE] firestoreStateChanged: true\n` +
+      `  channel:        ${_activeChannel?.id}\n` +
+      `  prevItem:       ${_currentMediaId}\n` +
+      `  newItem:        ${item.id}  "${item.title}"\n` +
+      `  duration:       ${item.duration_sec}s\n` +
       `  is_commercial:  ${isComm}\n` +
       `  gateOpen:       ${_gateOpen}`
     );
@@ -1121,11 +1122,22 @@ function _playState(st) {
   //    _onActiveChannelUpdate → _playState. Without this guard every
   //    snapshot was unconditionally restarting the video from scratch.
   if (_currentMediaId === item.id && _mediaEl && !_mediaEl.error) {
-    // If the media element has naturally ended, do NOT restart it.
-    // Viewers already fired _viewerRequestAdvance via onended.
-    // _tick will retry via the elapsed >= dur + 1 path if the Worker had a
-    // transient error. For the Founder: _advance is called by onended / _tick.
+    // ── FIX: When the media element has ended and the Firestore state still
+    //    shows the same item, the advance request either hasn't completed yet
+    //    or failed. Do NOT simply return — re-trigger the advance so the
+    //    channel doesn't deadlock when a Firestore snapshot arrives while
+    //    the advance is still in-flight or has silently failed.
     if (_mediaEl.ended) {
+      console.log(
+        `[AURENIX AUTO ADVANCE] _playState: media ended but Firestore still on same item — re-requesting advance\n` +
+        `  channelId=${_activeChannel?.id}  itemId=${item.id}  elapsed=${elapsed.toFixed(1)}s  dur=${dur}s`
+      );
+      if (_isFounder) {
+        if (!_advancing) _advance(st);
+      } else {
+        const channelId = _activeChannel?.id;
+        if (channelId && item.id) _viewerRequestAdvance(channelId, item.id);
+      }
       _updatePlayBtn();
       return;
     }
@@ -1312,24 +1324,25 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
   if (raw && typeof raw.toMillis === 'function')   startedAtMs = raw.toMillis();
   else if (raw && typeof raw === 'number')          startedAtMs = raw < 1e10 ? raw * 1000 : raw;
   else if (raw instanceof Date)                     startedAtMs = raw.getTime();
+  const elapsed = (Date.now() - startedAtMs) / 1000;
 
   console.log(
     `[AURENIX AUTO ADVANCE]\n` +
-    `  channelId:     ${channelId}\n` +
-    `  currentMediaId:${currentItemId}\n` +
-    `  nextMediaId:   (determined by server)\n` +
-    `  currentTime:   ${_mediaEl ? _mediaEl.currentTime.toFixed(2) + 's' : 'no media element'}\n` +
-    `  duration:      ${dur}s\n` +
-    `  startedAt:     ${startedAtMs}\n` +
-    `  userRole:      Viewer`
+    `  channel:        ${channelId}\n` +
+    `  currentItem:    ${currentItemId}\n` +
+    `  duration:       ${dur}s\n` +
+    `  startedAt:      ${startedAtMs}\n` +
+    `  elapsed:        ${elapsed.toFixed(1)}s\n` +
+    `  mediaEnded:     ${!!_mediaEl?.ended}\n` +
+    `  advanceRequested: true\n` +
+    `  userRole:       Viewer`
   );
-  console.log(`[AURENIX AUTO ADVANCE] requesting authoritative advance`);
 
   try {
     const user = auth.currentUser;
     if (!user) {
-      console.warn('[AURENIX AUTO ADVANCE] Viewer advance: not authenticated — cannot call Worker');
-      _viewerAdvancingId = null; // clear so tick can retry when auth is available
+      console.warn('[AURENIX AUTO ADVANCE] Viewer advance: not authenticated — will retry when auth is available');
+      _viewerAdvancingId = null;
       return;
     }
     const idToken = await user.getIdToken(false);
@@ -1342,13 +1355,13 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
       body: JSON.stringify({ channelId, currentItemId }),
     });
     const data = await res.json().catch(() => ({}));
-    console.log(`[AURENIX AUTO ADVANCE] advance response:`, JSON.stringify(data));
+    console.log(`[AURENIX AUTO ADVANCE] advanceResponse:`, JSON.stringify(data));
 
     if (data.advanced) {
-      console.log(`[AURENIX AUTO ADVANCE] Firestore write confirmed — waiting for onSnapshot to deliver new state`);
+      console.log(`[AURENIX AUTO ADVANCE] firestoreStateChanged: pending — waiting for onSnapshot`);
       // Firestore onSnapshot will deliver the new current_item automatically.
-      // Keep _viewerAdvancingId locked on this item until the snapshot arrives
-      // (or 15s timeout as safety valve) so we don't double-request.
+      // Keep _viewerAdvancingId locked until the snapshot arrives
+      // (15s safety valve) so we don't double-request.
       setTimeout(() => {
         if (_viewerAdvancingId === currentItemId) {
           console.warn('[AURENIX AUTO ADVANCE] Firestore snapshot did not arrive within 15s after advance — clearing lock');
@@ -1357,26 +1370,43 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
       }, 15_000);
     } else {
       const reason = data.reason || data.error || 'unknown';
-      console.log(`[AURENIX AUTO ADVANCE] advance skipped by server: ${reason}`);
       if (reason.startsWith('already_advanced')) {
         // Another viewer won the race — Firestore snapshot will arrive with new state.
-        // Keep lock briefly then clear so tick can verify.
+        console.log(`[AURENIX AUTO ADVANCE] advance: already_advanced by another viewer — awaiting onSnapshot`);
         setTimeout(() => {
           if (_viewerAdvancingId === currentItemId) _viewerAdvancingId = null;
         }, 5_000);
       } else if (reason.startsWith('too_early')) {
         // Server says not time yet — clear immediately so _tick retries next cycle.
+        console.log(`[AURENIX AUTO ADVANCE] advance: too_early — ${reason}`);
         _viewerAdvancingId = null;
       } else if (reason === 'service_account_not_configured') {
-        // Admin needs to set FIREBASE_SERVICE_ACCOUNT_KEY in Worker secrets.
-        console.error('[AURENIX AUTO ADVANCE] FIREBASE_SERVICE_ACCOUNT_KEY not configured in Worker — channel will not auto-advance for viewers');
-        // Clear immediately so tick keeps retrying in case the key gets added.
-        _viewerAdvancingId = null;
+        // FIREBASE_SERVICE_ACCOUNT_KEY not set in Worker secrets.
+        // Rate-limit this log to once every 60s so it's visible but not spammy.
+        const now = Date.now();
+        if (now - _saKeyMissingLoggedAt > 60_000) {
+          _saKeyMissingLoggedAt = now;
+          console.error(
+            '[AURENIX AUTO ADVANCE] *** CONFIGURATION REQUIRED ***\n' +
+            '  FIREBASE_SERVICE_ACCOUNT_KEY is not set in the Cloudflare Worker secrets.\n' +
+            '  Without this key, regular viewers cannot advance the channel when the Founder browser is closed.\n' +
+            '  Fix:\n' +
+            '    1. Firebase Console → Project Settings → Service Accounts → Generate new private key\n' +
+            '    2. cd upload-worker && npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_KEY\n' +
+            '       (paste the entire JSON as one line)\n' +
+            '    3. npx wrangler deploy'
+          );
+        }
+        // Retry after 30s (not every 800ms tick) to avoid hammering the Worker.
+        setTimeout(() => {
+          if (_viewerAdvancingId === currentItemId) _viewerAdvancingId = null;
+        }, 30_000);
       } else if (reason === 'channel_not_running' || reason === 'channel_paused') {
-        // Channel stopped — don't retry.
+        console.log(`[AURENIX AUTO ADVANCE] advance: channel not running / paused — not retrying`);
         _viewerAdvancingId = null;
       } else {
-        // Unknown error — clear after 10s to allow retry.
+        // Unknown / transient error — retry after 10s.
+        console.warn(`[AURENIX AUTO ADVANCE] advance: unexpected server reason "${reason}" — will retry in 10s`);
         setTimeout(() => {
           if (_viewerAdvancingId === currentItemId) _viewerAdvancingId = null;
         }, 10_000);
@@ -1495,20 +1525,23 @@ function _tick() {
     if (panelRemain) panelRemain.textContent = _fmtTime(Math.max(0, dur - elapsed)) + ' remaining';
 
     // Founder: advance via local engine on tick (existing behaviour).
-    // Viewer: if media has ended but the Firestore state hasn't changed yet
-    // (e.g. the Worker advance request from onended hasn't completed or the
-    // viewer joined after a track ended), re-request advance from the Worker.
+    // Viewer: request authoritative advance when the track is past its end.
+    // This fires regardless of whether a media element exists (covers the case
+    // where the gate is closed or autoplay was blocked and _gateOpen is false).
     if (elapsed >= dur - 0.5) {
       if (_isFounder) {
         if (!_advancing) _advance(st);
-      } else if (_mediaEl?.ended || elapsed >= dur + 1) {
+      } else {
+        // Trigger as soon as elapsed >= dur - 0.5 (i.e. within the last 0.5s
+        // of the track) OR the media element reports it has ended.
+        // Do NOT gate this on _mediaEl?.ended — the clock check alone is enough
+        // and handles the case where there is no media element at all.
         const channelId = _activeChannel?.id;
         if (channelId && st.current_item?.id) {
-          // Only log when we're about to make a request (not on every tick while locked).
           if (_viewerAdvancingId !== st.current_item.id) {
             console.log(
-              `[AURENIX AUTO ADVANCE] _tick: elapsed ${elapsed.toFixed(1)}s >= ${dur}s — triggering viewer advance request` +
-              ` (mediaEnded=${!!_mediaEl?.ended} channelId=${channelId} itemId=${st.current_item.id})`
+              `[AURENIX AUTO ADVANCE] _tick: elapsed ${elapsed.toFixed(1)}s >= dur ${dur}s — requesting viewer advance\n` +
+              `  channelId=${channelId}  itemId=${st.current_item.id}  mediaEnded=${!!_mediaEl?.ended}  gateOpen=${_gateOpen}`
             );
           }
           _viewerRequestAdvance(channelId, st.current_item.id);
