@@ -58,6 +58,10 @@ let _advancing     = false;
 let _currentMediaId = null;
 // Prevent duplicate advance requests for the same item from the viewer.
 let _viewerAdvancingId = null;
+// Per-channel dedup map for background (non-active) channel advance requests.
+// Separate from _viewerAdvancingId so background advances don't interfere with
+// the active channel's UI-playback flow.
+const _bgAdvancingId = {};   // channelId → currentItemId being advanced
 // True while _playState is in the middle of loading a new media source.
 // Prevents a concurrent Firestore snapshot from re-entering _playState
 // while a transition is already underway.
@@ -363,6 +367,9 @@ function _subscribeChannels() {
       _channels.forEach(ch => _subscribeChannelState(ch.id));
       const first = _channels[0];
       if (first) _setActiveChannel(first.id);
+      // Start the global tick immediately so ALL channels are watched from the
+      // moment the network is ready — even if no channel has content yet.
+      _startTick();
     } else {
       _buildChannelList();
       _buildEPGChannelTabs();
@@ -999,6 +1006,19 @@ function _subscribeChannelState(channelId) {
     const st = snap.exists() ? snap.data() : null;
     _channelStates[channelId] = st;
 
+    // When the state changes for a background channel (new current_item arrived),
+    // clear the background advance lock so the tick doesn't re-request an advance
+    // for the item that was just replaced.
+    if (channelId !== _activeChannel?.id && st?.current_item?.id) {
+      // Only clear if the lock was for a DIFFERENT item (i.e. the advance landed).
+      if (_bgAdvancingId[channelId] && _bgAdvancingId[channelId] !== st.current_item.id) {
+        _bgAdvancingId[channelId] = null;
+      }
+      // Ensure the global tick is running (it may not be if the active channel
+      // had no content when the network first loaded).
+      _startTick();
+    }
+
     // Update live dot
     const dot = document.getElementById(`ax-ch-dot-${channelId}`);
     if (dot) dot.className = `ax-ch-status ${st?.current_item ? 'live' : 'idle'}`;
@@ -1443,6 +1463,53 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
   }
 }
 
+/* ════════════════════════════════════
+   BACKGROUND CHANNEL ADVANCE
+   Same as _viewerRequestAdvance but for channels the viewer is NOT watching.
+   Uses _bgAdvancingId[channelId] as the dedup lock (separate from
+   _viewerAdvancingId so the two don't interfere with each other).
+════════════════════════════════════ */
+async function _bgChannelRequestAdvance(channelId, currentItemId) {
+  try {
+    const user = auth.currentUser;
+    if (!user) { _bgAdvancingId[channelId] = null; return; }
+    const idToken = await user.getIdToken(false);
+    const res = await fetch(ADVANCE_WORKER_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({ channelId, currentItemId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    const reason = data.reason || data.error || 'unknown';
+
+    if (data.advanced) {
+      // onSnapshot will deliver the new state — clear lock after 15s safety valve.
+      setTimeout(() => {
+        if (_bgAdvancingId[channelId] === currentItemId) _bgAdvancingId[channelId] = null;
+      }, 15_000);
+    } else if (reason.startsWith('too_early')) {
+      _bgAdvancingId[channelId] = null; // retry next tick
+    } else if (reason === 'already_advanced') {
+      setTimeout(() => {
+        if (_bgAdvancingId[channelId] === currentItemId) _bgAdvancingId[channelId] = null;
+      }, 5_000);
+    } else if (reason === 'channel_not_running' || reason === 'channel_paused') {
+      _bgAdvancingId[channelId] = null;
+    } else {
+      // Transient / unknown — retry after 10s.
+      setTimeout(() => {
+        if (_bgAdvancingId[channelId] === currentItemId) _bgAdvancingId[channelId] = null;
+      }, 10_000);
+    }
+  } catch (e) {
+    // Network error — clear lock so tick retries.
+    _bgAdvancingId[channelId] = null;
+  }
+}
+
 
 function _stopMedia() {
   if (_mediaEl) {
@@ -1498,17 +1565,95 @@ function _stopTick() {
 }
 
 function _tick() {
-  if (!_activeChannel) { _stopTick(); return; }
-  const st = _channelStates[_activeChannel.id];
-  if (!st?.current_item) { _stopTick(); return; }
+  // ── 1. Update UI for the active channel ─────────────────────────────────────
+  const activeSt = _activeChannel ? _channelStates[_activeChannel.id] : null;
 
-  // Use the actual media element's currentTime for display when available
-  // (more accurate than recalculating from started_at every tick).
-  // Fall back to master-clock calculation so progress still shows for images.
-  let elapsed;
-  if (_mediaEl && !_mediaEl.paused && !_mediaEl.error) {
-    elapsed = _mediaEl.currentTime;
+  const fill     = document.getElementById('ax-progress-fill');
+  const elapsedEl= document.getElementById('ax-time-elapsed');
+  const totalEl  = document.getElementById('ax-time-total');
+  const remainEl = document.getElementById('ax-time-remaining');
+  const panelTime= document.getElementById('ax-np-panel-time');
+  const panelRemain = document.getElementById('ax-np-panel-remain');
+  const fsFill    = document.getElementById('ax-fs-progress-fill');
+  const fsElapsed = document.getElementById('ax-fs-time-elapsed');
+  const fsTotal   = document.getElementById('ax-fs-time-total');
+
+  if (_activeChannel && activeSt?.current_item) {
+    // Use the actual media element's currentTime for display when available
+    // (more accurate than recalculating from started_at every tick).
+    // Fall back to master-clock calculation so progress still shows for images.
+    let elapsed;
+    if (_mediaEl && !_mediaEl.paused && !_mediaEl.error) {
+      elapsed = _mediaEl.currentTime;
+    } else {
+      const raw = activeSt.started_at;
+      let startedAtMs;
+      if (raw && typeof raw.toMillis === 'function') {
+        startedAtMs = raw.toMillis();
+      } else if (raw && typeof raw === 'number') {
+        startedAtMs = raw < 1e10 ? raw * 1000 : raw;
+      } else if (raw instanceof Date) {
+        startedAtMs = raw.getTime();
+      } else {
+        startedAtMs = Date.now();
+      }
+      elapsed = Math.max(0, (Date.now() - startedAtMs) / 1000);
+    }
+
+    const dur = activeSt.current_item.duration_sec || 0;
+
+    if (dur > 0) {
+      const pct = Math.min(100, (elapsed / dur) * 100);
+      if (fill)      fill.style.width     = pct + '%';
+      if (fsFill)    fsFill.style.width   = pct + '%';
+      if (elapsedEl) elapsedEl.textContent = _fmtTime(elapsed);
+      if (fsElapsed) fsElapsed.textContent = _fmtTime(elapsed);
+      if (totalEl)   totalEl.textContent   = _fmtTime(dur);
+      if (fsTotal)   fsTotal.textContent   = _fmtTime(dur);
+      if (remainEl)  remainEl.textContent  = '-' + _fmtTime(Math.max(0, dur - elapsed));
+      if (panelTime) panelTime.textContent = _fmtTime(elapsed) + ' / ' + _fmtTime(dur);
+      if (panelRemain) panelRemain.textContent = _fmtTime(Math.max(0, dur - elapsed)) + ' remaining';
+    } else {
+      if (fill)      fill.style.width     = '0%';
+      if (fsFill)    fsFill.style.width   = '0%';
+      if (elapsedEl) elapsedEl.textContent = _fmtTime(elapsed);
+      if (fsElapsed) fsElapsed.textContent = _fmtTime(elapsed);
+      if (totalEl)   totalEl.textContent   = '—';
+      if (fsTotal)   fsTotal.textContent   = '—';
+      if (remainEl)  remainEl.textContent  = '—';
+      if (panelTime) panelTime.textContent = _fmtTime(elapsed) + ' / —';
+      if (panelRemain) panelRemain.textContent = '';
+    }
   } else {
+    // Active channel has no current item — clear progress display.
+    if (fill)      fill.style.width     = '0%';
+    if (fsFill)    fsFill.style.width   = '0%';
+    if (elapsedEl) elapsedEl.textContent = '0:00';
+    if (fsElapsed) fsElapsed.textContent = '0:00';
+    if (totalEl)   totalEl.textContent   = '—';
+    if (fsTotal)   fsTotal.textContent   = '—';
+    if (remainEl)  remainEl.textContent  = '—';
+    if (panelTime) panelTime.textContent = '0:00 / —';
+    if (panelRemain) panelRemain.textContent = '';
+  }
+  _updatePlayBtn();
+
+  // ── 2. Request server-authoritative advance for ALL channels independently ──
+  // CRITICAL: Channel advancement is NOT gated on which channel the viewer
+  // is currently watching.  Every configured channel that has an elapsed
+  // current_item must have an advance requested — independently of the UI.
+  // This is what keeps ALL channels live even when only one is selected.
+  //
+  // For the active channel we use _viewerAdvancingId as the dedup key
+  // (unchanged — that lock also controls the media-element flow).
+  // For background channels we use the separate _bgAdvancingId map so the
+  // locks don't interfere with each other.
+  _channels.forEach(ch => {
+    const st = _channelStates[ch.id];
+    if (!st?.current_item?.id) return;
+    const dur = st.current_item.duration_sec || 0;
+    if (dur <= 0) return;
+
     const raw = st.started_at;
     let startedAtMs;
     if (raw && typeof raw.toMillis === 'function') {
@@ -1518,64 +1663,36 @@ function _tick() {
     } else if (raw instanceof Date) {
       startedAtMs = raw.getTime();
     } else {
-      startedAtMs = Date.now();
+      return; // started_at unknown — skip to avoid spurious advances
     }
-    elapsed = Math.max(0, (Date.now() - startedAtMs) / 1000);
-  }
 
-  const dur = st.current_item.duration_sec || 0;
+    const elapsed = Math.max(0, (Date.now() - startedAtMs) / 1000);
+    if (elapsed < dur - 0.5) return; // not yet due
 
-  const fill     = document.getElementById('ax-progress-fill');
-  const elapsedEl= document.getElementById('ax-time-elapsed');
-  const totalEl  = document.getElementById('ax-time-total');
-  const remainEl = document.getElementById('ax-time-remaining');
-  const panelTime= document.getElementById('ax-np-panel-time');
-  const panelRemain = document.getElementById('ax-np-panel-remain');
+    const itemId = st.current_item.id;
 
-  const fsFill    = document.getElementById('ax-fs-progress-fill');
-  const fsElapsed = document.getElementById('ax-fs-time-elapsed');
-  const fsTotal   = document.getElementById('ax-fs-time-total');
-
-  if (dur > 0) {
-    const pct = Math.min(100, (elapsed / dur) * 100);
-    if (fill)      fill.style.width     = pct + '%';
-    if (fsFill)    fsFill.style.width   = pct + '%';
-    if (elapsedEl) elapsedEl.textContent = _fmtTime(elapsed);
-    if (fsElapsed) fsElapsed.textContent = _fmtTime(elapsed);
-    if (totalEl)   totalEl.textContent   = _fmtTime(dur);
-    if (fsTotal)   fsTotal.textContent   = _fmtTime(dur);
-    if (remainEl)  remainEl.textContent  = '-' + _fmtTime(Math.max(0, dur - elapsed));
-    if (panelTime) panelTime.textContent = _fmtTime(elapsed) + ' / ' + _fmtTime(dur);
-    if (panelRemain) panelRemain.textContent = _fmtTime(Math.max(0, dur - elapsed)) + ' remaining';
-
-    // ALL roles (Founder and Viewer) request server-authoritative advance via
-    // the Cloudflare Worker for ALL channels including ALTV.
-    // The Founder browser is NOT the broadcast engine — channels must continue
-    // independently of which page (or no page) the Founder has open.
-    if (elapsed >= dur - 0.5) {
-      const channelId = _activeChannel?.id;
-      if (channelId && st.current_item?.id) {
-        if (_viewerAdvancingId !== st.current_item.id) {
-          console.log(
-            `[AURENIX GLOBAL ENGINE] _tick: elapsed ${elapsed.toFixed(1)}s >= dur ${dur}s — requesting server advance\n` +
-            `  channel=${channelId}  currentItem=${st.current_item.id}  startedAt=${(() => { const r = st.started_at; if (r && typeof r.toMillis === 'function') return r.toMillis(); if (typeof r === 'number') return r; return r; })()}  founder=${_isFounder}  viewer=${!_isFounder}  mediaEnded=${!!_mediaEl?.ended}  gateOpen=${_gateOpen}  advanceRequested=true`
-          );
-        }
-        _viewerRequestAdvance(channelId, st.current_item.id);
+    if (ch.id === _activeChannel?.id) {
+      // Active channel: use the existing _viewerAdvancingId lock so the UI
+      // advance flow (onended, _playState, etc.) stays consistent.
+      if (_viewerAdvancingId !== itemId) {
+        console.log(
+          `[AURENIX GLOBAL ENGINE] _tick: elapsed ${elapsed.toFixed(1)}s >= dur ${dur}s — requesting server advance\n` +
+          `  channel=${ch.id}  currentItem=${itemId}  startedAt=${startedAtMs}  founder=${_isFounder}  viewer=${!_isFounder}  mediaEnded=${!!_mediaEl?.ended}  gateOpen=${_gateOpen}  advanceRequested=true`
+        );
+        _viewerRequestAdvance(ch.id, itemId);
+      }
+    } else {
+      // Background channel: use the per-channel _bgAdvancingId lock.
+      if (_bgAdvancingId[ch.id] !== itemId) {
+        _bgAdvancingId[ch.id] = itemId;
+        console.log(
+          `[AURENIX GLOBAL ENGINE] _tick (background): elapsed ${elapsed.toFixed(1)}s >= dur ${dur}s — requesting server advance\n` +
+          `  channel=${ch.id}  currentItem=${itemId}  startedAt=${startedAtMs}  advanceRequested=true`
+        );
+        _bgChannelRequestAdvance(ch.id, itemId);
       }
     }
-  } else {
-    if (fill)      fill.style.width     = '0%';
-    if (fsFill)    fsFill.style.width   = '0%';
-    if (elapsedEl) elapsedEl.textContent = _fmtTime(elapsed);
-    if (fsElapsed) fsElapsed.textContent = _fmtTime(elapsed);
-    if (totalEl)   totalEl.textContent   = '—';
-    if (fsTotal)   fsTotal.textContent   = '—';
-    if (remainEl)  remainEl.textContent  = '—';
-    if (panelTime) panelTime.textContent = _fmtTime(elapsed) + ' / —';
-    if (panelRemain) panelRemain.textContent = '';
-  }
-  _updatePlayBtn();
+  });
 }
 
 /* ════════════════════════════════════
