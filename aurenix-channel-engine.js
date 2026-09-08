@@ -68,8 +68,12 @@ const DEFAULT_CH_CONFIG = {
 /* ═══════════════════════════════════════
    ACTIVE ENGINES MAP
    channelId → engine instance
+   NOTE: The engine is now a configuration & management cache only.
+   Actual channel advancement is handled server-side by the Cloudflare Worker
+   (POST /channel/advance).  The browser-side engine no longer acts as a
+   24/7 broadcast server — channels continue even when no browser is open.
 ═══════════════════════════════════════ */
-const _engines = {};   // channelId → { config, mediaLib, configUnsub, stateUnsub, advancing }
+const _engines = {};   // channelId → { config, mediaLib, configUnsub }
 
 /* ═══════════════════════════════════════
    PUBLIC API
@@ -98,8 +102,8 @@ export async function startChannelEngine(channelId, mediaLib, channelDoc) {
     channelDoc: channelDoc || {},
     config: { ...DEFAULT_CH_CONFIG },
     configUnsub: null,
-    stateUnsub: null,
-    advancing: false,
+    // NOTE: No stateUnsub / advancing — the browser no longer drives advancement.
+    // The Cloudflare Worker handles all atomic channel advancement server-side.
   };
   _engines[channelId] = engine;
 
@@ -123,52 +127,56 @@ export async function startChannelEngine(channelId, mediaLib, channelDoc) {
     engine.config = initConfig;
   }
 
-  // Subscribe to config changes
+  // Subscribe to config changes (local cache for management UI only)
   engine.configUnsub = onSnapshot(configRef, snap => {
     if (snap.exists() && _engines[channelId]) {
       _engines[channelId].config = { ...DEFAULT_CH_CONFIG, ...snap.data() };
     }
   });
 
-  // Mark as running
+  // Mark as running in the config doc so the Worker knows the channel is active
   await setDoc(configRef, { running: true, paused: false, updated_at: serverTimestamp() }, { merge: true });
 
-  // Subscribe to state for advance triggers
-  _subscribeStateForAdvance(channelId);
-
-  // Kick off immediately if no current program
-  const stateRef  = doc(db, 'network_state', channelId);
-  const stateSnap = await getDoc(stateRef);
-  const st = stateSnap.exists() ? stateSnap.data() : null;
-  if (!st?.current_item) {
-    await _scheduleNextProgram(channelId, null);
-  }
+  // DO NOT subscribe to state for advancement — the Worker handles that.
+  // DO NOT call _scheduleNextProgram — the Worker handles the first item too.
+  // If no current program is set, the next viewer/Founder advance request will
+  // kick off the channel via the Worker automatically.
 }
 
+/**
+ * Tears down the local engine cache for a channel.
+ *
+ * CRITICAL: This does NOT erase network_state.  Erasing live broadcast state
+ * must only happen when the Founder explicitly presses the STOP BROADCAST
+ * button (handled in aurenix-control.js stopChannel).  Calling this function
+ * merely destroys the in-memory engine object so Founder Studio can change
+ * which channel it is managing without affecting any channel's live state.
+ */
 export async function stopChannelEngine(channelId) {
   const engine = _engines[channelId];
   if (!engine) return;
-  if (engine.stateUnsub)  { engine.stateUnsub();  engine.stateUnsub  = null; }
   if (engine.configUnsub) { engine.configUnsub(); engine.configUnsub = null; }
   delete _engines[channelId];
 
+  // Mark as not-running in the config doc only.
+  // network_state is intentionally left untouched — the channel broadcast
+  // continues via the server-side Worker until explicitly stopped.
   const configRef = doc(db, CHANNEL_ENGINE_CONFIG_COLLECTION, channelId);
   await setDoc(configRef, { running: false, updated_at: serverTimestamp() }, { merge: true });
-  await setDoc(doc(db, 'network_state', channelId), {
-    current_item: null, started_at: serverTimestamp(), updated_at: serverTimestamp(),
-  }, { merge: true });
 }
 
 export async function pauseChannelEngine(channelId) {
   const configRef = doc(db, CHANNEL_ENGINE_CONFIG_COLLECTION, channelId);
+  // Pause flag tells the Worker to reject advance requests for this channel.
+  // network_state is left untouched so the currently-playing item stays visible.
   await setDoc(configRef, { paused: true, updated_at: serverTimestamp() }, { merge: true });
-  await setDoc(doc(db, 'network_state', channelId), { current_item: null, started_at: serverTimestamp() }, { merge: true });
 }
 
 export async function resumeChannelEngine(channelId) {
   const configRef = doc(db, CHANNEL_ENGINE_CONFIG_COLLECTION, channelId);
+  // Un-pausing allows the Worker to accept advance requests again.
+  // The next viewer tick will call the Worker which will continue the channel.
   await setDoc(configRef, { paused: false, updated_at: serverTimestamp() }, { merge: true });
-  await _scheduleNextProgram(channelId, null);
 }
 
 export async function skipChannelProgram(channelId) {
@@ -178,7 +186,7 @@ export async function skipChannelProgram(channelId) {
   const mode = _engines[channelId]?.config?.programming_mode || 'random';
 
   if (mode === 'ordered' || mode === 'shuffle') {
-    // Queue-based: advance to next in queue
+    // Queue-based: advance to next in queue directly (Founder action — admin writes allowed)
     const queue  = st?.queue || [];
     const curIdx = queue.findIndex(q => q.id === st?.current_item?.id);
     let nextIdx = curIdx + 1;
@@ -187,8 +195,17 @@ export async function skipChannelProgram(channelId) {
       await setDoc(stateRef, { ...st, current_item: queue[nextIdx], started_at: serverTimestamp() }, { merge: true });
     }
   } else {
-    // Random mode: trigger re-schedule
-    await _scheduleNextProgram(channelId, st?.current_item?.id || null);
+    // Random mode: force-advance by clearing current_item with a sentinel that
+    // makes elapsed >= duration immediately, causing the next tick from any
+    // viewer to call the Worker.  The simplest safe approach is to set
+    // started_at far in the past so the Worker's time-guard passes instantly.
+    if (st?.current_item) {
+      const oneSecAgo = new Date(Date.now() - ((st.current_item.duration_sec || 1) + 10) * 1000);
+      await setDoc(stateRef, {
+        started_at: oneSecAgo,
+        updated_at: serverTimestamp(),
+      }, { merge: true });
+    }
   }
 }
 
@@ -218,8 +235,11 @@ export function updateAllChannelsMediaLib(mediaLib) {
 }
 
 /**
- * Called by broadcast.js when a non-ALTV channel's current item ends.
- * Handles commercial queue drain or triggers next program.
+ * Called by aurenix-control.js for ordered/shuffle queue manipulation only.
+ * Random-mode advancement now goes through the Cloudflare Worker exclusively.
+ *
+ * NOTE: This function is only called by the Founder (admin writes allowed).
+ * Regular viewers call the Worker endpoint directly.
  */
 export async function channelAdvance(channelId, currentItemId) {
   const stateRef  = doc(db, 'network_state', channelId);
@@ -243,24 +263,8 @@ export async function channelAdvance(channelId, currentItemId) {
     return;
   }
 
-  const engine = _engines[channelId];
-  if (!engine) {
-    // Engine not active — fall back to queue-based advance
-    await _queueAdvance(channelId, st, currentItemId);
-    return;
-  }
-
-  const mode = engine.config.programming_mode || 'random';
-  if (mode === 'ordered' || mode === 'shuffle') {
-    await _queueAdvance(channelId, st, currentItemId);
-  } else {
-    // Random mode — signal needs_next
-    await setDoc(stateRef, {
-      needs_next:   true,
-      last_item_id: currentItemId || null,
-      updated_at:   serverTimestamp(),
-    }, { merge: true });
-  }
+  // Queue-based advance for ordered/shuffle modes
+  await _queueAdvance(channelId, st, currentItemId);
 }
 
 /* ═══════════════════════════════════════
@@ -321,62 +325,6 @@ async function _queueAdvance(channelId, st, currentItemId) {
   if (engine) await _updateProgramHistory(channelId, engine, nextItem.id || '');
 }
 
-/* ═══════════════════════════════════════
-   INTERNAL — STATE WATCHER (random mode)
-═══════════════════════════════════════ */
-function _subscribeStateForAdvance(channelId) {
-  const engine = _engines[channelId];
-  if (!engine) return;
-  if (engine.stateUnsub) engine.stateUnsub();
-  const stateRef = doc(db, 'network_state', channelId);
-  engine.stateUnsub = onSnapshot(stateRef, async snap => {
-    const eng = _engines[channelId];
-    if (!eng) return;
-    if (!snap.exists()) return;
-    const st = snap.data();
-    if (st.needs_next === true && !eng.advancing) {
-      await _scheduleNextProgram(channelId, st.last_item_id || null);
-    }
-  });
-}
-
-/* ═══════════════════════════════════════
-   INTERNAL — RANDOM PROGRAM SELECTION
-═══════════════════════════════════════ */
-async function _scheduleNextProgram(channelId, justPlayedId) {
-  const engine = _engines[channelId];
-  if (!engine || engine.advancing) return;
-  engine.advancing = true;
-
-  try {
-    if (!_engines[channelId]) { engine.advancing = false; return; }
-
-    // Re-read config from Firestore
-    const configRef = doc(db, CHANNEL_ENGINE_CONFIG_COLLECTION, channelId);
-    const configSnap = await getDoc(configRef);
-    if (configSnap.exists()) engine.config = { ...DEFAULT_CH_CONFIG, ...configSnap.data() };
-
-    if (!engine.config.running) { engine.advancing = false; return; }
-    if (engine.config.paused)  { engine.advancing = false; return; }
-
-    // Check if commercial break is due
-    const shouldBreak = engine.config.commercial_enabled && _shouldRunCommercialBreak(engine);
-    if (shouldBreak) {
-      const commercials = _pickCommercials(engine);
-      if (commercials.length > 0) {
-        await _playCommercialSequence(channelId, engine, commercials);
-        await _writeNextProgram(channelId, engine, justPlayedId, true);
-      } else {
-        await _writeNextProgram(channelId, engine, justPlayedId, false);
-      }
-    } else {
-      await _writeNextProgram(channelId, engine, justPlayedId, false);
-    }
-  } catch (e) {
-    console.error(`[AURENIX CH ENGINE ${channelId}] _scheduleNextProgram error:`, e);
-  }
-  if (_engines[channelId]) _engines[channelId].advancing = false;
-}
 
 function _shouldRunCommercialBreak(engine) {
   const freq = CHANNEL_COMMERCIAL_FREQ[engine.config.commercial_freq] || CHANNEL_COMMERCIAL_FREQ.normal;

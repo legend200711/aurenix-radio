@@ -494,7 +494,7 @@ export default {
       return json({
         ok:      !err,
         worker:  'aurenix-upload',
-        version: '2025-09-06-v10-gdrive-cors-proxy',
+        version: '2025-09-06-v11-server-authoritative-channels',
         SUPABASE_URL:        env.SUPABASE_URL         ? '✓ set' : '✗ MISSING',
         SUPABASE_SERVICE_KEY:env.SUPABASE_SERVICE_KEY ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID  ? '✓ set' : '✗ MISSING',
@@ -1380,14 +1380,31 @@ function randInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+/**
+ * Returns true when a media item is eligible for the given channelId.
+ *
+ * Assignment rules (in priority order):
+ *  1. ALTV: must have live_tv_assigned !== false (existing behaviour, unchanged).
+ *  2. Non-ALTV: if the item has an assigned_channels array, it must include
+ *     channelId.  If the array is empty/absent, the item is considered
+ *     globally available (backwards-compat with pre-assignment library items).
+ */
+function _isAssignedToChannel(m, channelId, isAltv) {
+  if (isAltv) return m.live_tv_assigned !== false;
+  const ch = m.assigned_channels;
+  // No assignment recorded → globally available to all non-ALTV channels
+  if (!ch || ch.length === 0) return true;
+  return ch.includes(channelId);
+}
+
 /** Pick next program from media library (random, avoiding recent history). */
-function pickProgram(mediaLib, isAltv, justPlayedId, recentHistory) {
+function pickProgram(mediaLib, isAltv, justPlayedId, recentHistory, channelId) {
   const typeSet = isAltv ? LIVE_TV_PROGRAM_TYPES : PROGRAM_TYPES;
   const pool = mediaLib.filter(m =>
     m.status === 'approved' &&
     typeSet.has(m.type) &&
     m.url &&
-    (!isAltv || m.live_tv_assigned !== false)
+    _isAssignedToChannel(m, channelId || '', isAltv)
   );
   if (!pool.length) return null;
 
@@ -1400,7 +1417,7 @@ function pickProgram(mediaLib, isAltv, justPlayedId, recentHistory) {
 }
 
 /** Pick commercials from media library. */
-function pickCommercials(mediaLib, isAltv, freqKey, maxPerBreak, commercialHistory) {
+function pickCommercials(mediaLib, isAltv, freqKey, maxPerBreak, commercialHistory, channelId) {
   const freq = COMMERCIAL_FREQ_TABLE[freqKey] || COMMERCIAL_FREQ_TABLE.normal;
   if (freq.maxSpot === 0) return [];
 
@@ -1409,7 +1426,7 @@ function pickCommercials(mediaLib, isAltv, freqKey, maxPerBreak, commercialHisto
     m.status === 'approved' &&
     typeSet.has(m.type) &&
     m.url &&
-    (!isAltv || m.live_tv_assigned !== false)
+    _isAssignedToChannel(m, channelId || '', isAltv)
   );
   if (!pool.length) return [];
 
@@ -1587,7 +1604,7 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
         const mediaLib = await fetchApprovedMedia(projectId, writeToken);
         const commercials = pickCommercials(
           mediaLib, false, cfg.commercial_freq,
-          cfg.max_commercials_per_break || 2, cfg.commercial_history
+          cfg.max_commercials_per_break || 2, cfg.commercial_history, channelId
         );
         if (commercials.length > 0) {
           const [firstComm, ...rest] = commercials;
@@ -1637,7 +1654,7 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
       const commercials = pickCommercials(
         mediaLib, isAltv, freqKey,
         cfg.max_commercials_per_break || freq.maxSpot,
-        cfg.commercial_history
+        cfg.commercial_history, channelId
       );
       if (commercials.length > 0) {
         const [firstComm, ...rest] = commercials;
@@ -1652,7 +1669,7 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
         }, 'network_state', channelId);
         await updateCommercialHistory(projectId, writeToken, configCol, channelId, cfg, commercials);
         // Write the next program after the commercial break
-        const nextProg = pickProgram(mediaLib, isAltv, justPlayedId, recentHistory);
+        const nextProg = pickProgram(mediaLib, isAltv, justPlayedId, recentHistory, channelId);
         if (nextProg) {
           // Store post-commercial item for when the commercial drains
           await fsPatch(projectId, writeToken, {
@@ -1665,7 +1682,7 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
   }
 
   // No commercial break — write next program directly
-  const nextProg = pickProgram(mediaLib, isAltv, justPlayedId, recentHistory);
+  const nextProg = pickProgram(mediaLib, isAltv, justPlayedId, recentHistory, channelId);
   if (!nextProg) {
     console.warn(`[aurenix-advance] channel=${channelId} — no_eligible_programs (mediaLib.length=${mediaLib.length})`);
     return { advanced: false, reason: 'no_eligible_programs' };

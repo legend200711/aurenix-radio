@@ -382,6 +382,18 @@ service cloud.firestore {
     }
 
     // ────────────────────────────────────────────────────────────
+    // CHANNEL ENGINE CONFIG — /network_ch_config/{channelId}
+    // Per-channel engine settings (commercial freq, history, mode).
+    // The Cloudflare Worker uses its service-account token to update
+    // program history and commercial counters after each advance.
+    // Viewers read this doc to check running/paused state.
+    // ────────────────────────────────────────────────────────────
+    match /network_ch_config/{channelId} {
+      allow read:  if true;
+      allow write: if isAdmin();
+    }
+
+    // ────────────────────────────────────────────────────────────
     // NETWORK COMMERCIALS — /network_commercials/{commercialId}
     // Founder-created commercials (with image, text, audio).
     // Only approved commercials enter the LIVE TV system.
