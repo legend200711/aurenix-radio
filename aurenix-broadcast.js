@@ -1095,7 +1095,15 @@ function _playState(st) {
   //    _onActiveChannelUpdate → _playState. Without this guard every
   //    snapshot was unconditionally restarting the video from scratch.
   if (_currentMediaId === item.id && _mediaEl && !_mediaEl.error) {
-    // Same item is already in the player — just drift-correct if needed.
+    // If the media element has naturally ended, do NOT restart it.
+    // For viewers: keep waiting for the Firestore snapshot that delivers
+    // the next current_item. For the Founder: _advance is called by onended /
+    // _tick so we don't need to re-trigger it here either.
+    if (_mediaEl.ended) {
+      _updatePlayBtn();
+      return;
+    }
+    // Same item is still playing — just drift-correct if needed.
     const drift = Math.abs(_mediaEl.currentTime - elapsed);
     // Tolerance: only seek if more than 8 seconds out of sync.
     // Normal HTML5 playback advances on its own; we don't need to force it.
@@ -1177,9 +1185,18 @@ function _playState(st) {
         setTimeout(() => _advance(st), 1500);
       };
     } else {
-      // Normal viewers: on end, just stop — the Founder engine will
-      // update network_state and the onSnapshot listener will switch media.
-      _mediaEl.onended = () => { _stopMedia(); };
+      // Normal viewers: when media ends, do NOT call _stopMedia().
+      // Keeping _currentMediaId and _mediaEl intact means the same-item
+      // guard above will recognise the ended state and skip re-loading,
+      // while the Firestore onSnapshot subscription remains the sole
+      // authority for transitioning to the next item. As soon as the
+      // Founder advances and the snapshot delivers a new current_item.id,
+      // _playState will fall through the guard, _stopMedia() will be called,
+      // and the new item will load cleanly.
+      _mediaEl.onended = () => {
+        console.log('[AURENIX] Viewer: media ended — waiting for broadcast to advance');
+        _updatePlayBtn();
+      };
       _mediaEl.onerror = () => {
         console.warn('[AURENIX] Viewer: media load error on item', item.id);
       };
