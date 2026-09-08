@@ -1287,12 +1287,24 @@ async function fsGet(projectId, authToken, ...pathSegments) {
   return fromFsDoc(doc);
 }
 
-/** PATCH a Firestore document (merge). Returns the written doc. */
+/** PATCH a Firestore document (merge). Returns the written doc.
+ *
+ *  IMPORTANT: The Firestore REST API requires updateMask.fieldPaths to be
+ *  supplied as MULTIPLE separate query parameters — one per field name.
+ *  A single comma-joined value is treated as a literal field name that does
+ *  not exist, causing the PATCH to write nothing despite returning HTTP 200.
+ *
+ *  Correct:  ?updateMask.fieldPaths=a&updateMask.fieldPaths=b&updateMask.fieldPaths=c
+ *  WRONG:    ?updateMask.fieldPaths=a%2Cb%2Cc
+ */
 async function fsPatch(projectId, authToken, data, ...pathSegments) {
   const url = fsDocPath(projectId, ...pathSegments);
-  const fieldMask = Object.keys(data).join(',');
+  // Build repeated updateMask.fieldPaths query params — one per field.
+  const maskParams = Object.keys(data)
+    .map(k => `updateMask.fieldPaths=${encodeURIComponent(k)}`)
+    .join('&');
   const body = { fields: toFsFields(data) };
-  const res = await fetch(`${url}?updateMask.fieldPaths=${encodeURIComponent(fieldMask)}`, {
+  const res = await fetch(`${url}?${maskParams}`, {
     method: 'PATCH',
     headers: {
       'Authorization': `Bearer ${authToken}`,
@@ -1456,8 +1468,12 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
   }
 
   /* ── 1. Read current state ──────────────────────────────────────────── */
+  console.log(`[aurenix-advance] channel=${channelId} requestedBy=${currentItemId} — reading Firestore state`);
   const st = await fsGet(projectId, writeToken, 'network_state', channelId);
-  if (!st) return { advanced: false, reason: 'no_state' };
+  if (!st) {
+    console.warn(`[aurenix-advance] channel=${channelId} — no_state (document missing)`);
+    return { advanced: false, reason: 'no_state' };
+  }
 
   // CAS guard: only advance if the currentItemId still matches what's in Firestore.
   const firestoreCurrentId = st.current_item?.id || null;
@@ -1494,7 +1510,6 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
   const commQueue = st.commercial_queue || [];
   if (commQueue.length > 0) {
     const [nextComm, ...remaining] = commQueue;
-    const now = new Date().toISOString();
     await fsPatch(projectId, writeToken, {
       current_item:     nextComm,
       started_at:       { __serverTimestamp: true },
@@ -1504,7 +1519,27 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
       last_item_id:     nextComm.id || '',
       updated_at:       { __serverTimestamp: true },
     }, 'network_state', channelId);
+    console.log(`[aurenix-advance] channel=${channelId} → drained_commercial_queue → ${nextComm.id}`);
     return { advanced: true, reason: 'drained_commercial_queue' };
+  }
+
+  /* ── 2b. If a post-commercial item was stored, play it next ──────────── */
+  //  When the commercial queue is empty and there's a _post_commercial_item,
+  //  that stored item should be played next (it was queued up before the break).
+  const postCommItem = st._post_commercial_item || null;
+  if (postCommItem && st.is_commercial) {
+    await fsPatch(projectId, writeToken, {
+      current_item:          postCommItem,
+      started_at:            { __serverTimestamp: true },
+      is_commercial:         false,
+      commercial_queue:      [],
+      _post_commercial_item: null,
+      needs_next:            false,
+      last_item_id:          postCommItem.id || '',
+      updated_at:            { __serverTimestamp: true },
+    }, 'network_state', channelId);
+    console.log(`[aurenix-advance] channel=${channelId} → post_commercial_item → ${postCommItem.id}`);
+    return { advanced: true, reason: 'post_commercial_item' };
   }
 
   /* ── 3. Determine programming mode and fetch config ─────────────────── */
@@ -1572,11 +1607,14 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
       }
     }
 
+    console.log(`[aurenix-advance] channel=${channelId} → queue_advance → ${nextItem.id} (${nextItem.title})`);
     await fsPatch(projectId, writeToken, {
       current_item:     nextItem,
       started_at:       { __serverTimestamp: true },
       is_commercial:    false,
       commercial_queue: [],
+      needs_next:       false,
+      last_item_id:     nextItem.id || '',
       updated_at:       { __serverTimestamp: true },
     }, 'network_state', channelId);
     await updateProgramHistory(projectId, writeToken, configCol, channelId, cfg, nextItem.id, isAltv);
@@ -1628,8 +1666,12 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
 
   // No commercial break — write next program directly
   const nextProg = pickProgram(mediaLib, isAltv, justPlayedId, recentHistory);
-  if (!nextProg) return { advanced: false, reason: 'no_eligible_programs' };
+  if (!nextProg) {
+    console.warn(`[aurenix-advance] channel=${channelId} — no_eligible_programs (mediaLib.length=${mediaLib.length})`);
+    return { advanced: false, reason: 'no_eligible_programs' };
+  }
 
+  console.log(`[aurenix-advance] channel=${channelId} → random_advance → ${nextProg.id} (${nextProg.title})`);
   await fsPatch(projectId, writeToken, {
     current_item:     mediaItemToState(nextProg),
     started_at:       { __serverTimestamp: true },

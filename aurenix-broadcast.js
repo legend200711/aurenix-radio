@@ -57,6 +57,10 @@ let _advancing     = false;
 let _currentMediaId = null;
 // Prevent duplicate advance requests for the same item from the viewer.
 let _viewerAdvancingId = null;
+// True while _playState is in the middle of loading a new media source.
+// Prevents a concurrent Firestore snapshot from re-entering _playState
+// while a transition is already underway.
+let _transitioning = false;
 
 /* ════════════════════════════════════
    INIT
@@ -1040,6 +1044,22 @@ function _onActiveChannelUpdate(st) {
   }
   const item   = st.current_item;
   const isComm = !!(st.is_commercial);
+
+  // Log every Firestore snapshot that reaches the active channel update path.
+  // This lets us confirm whether Firestore is delivering state changes to the viewer.
+  if (_currentMediaId !== item.id) {
+    console.log(
+      `[AURENIX AUTO ADVANCE] Firestore state changed → _onActiveChannelUpdate\n` +
+      `  channelId:      ${_activeChannel?.id}\n` +
+      `  prev itemId:    ${_currentMediaId}\n` +
+      `  new  itemId:    ${item.id}\n` +
+      `  title:          ${item.title}\n` +
+      `  duration_sec:   ${item.duration_sec}\n` +
+      `  is_commercial:  ${isComm}\n` +
+      `  gateOpen:       ${_gateOpen}`
+    );
+  }
+
   _setNowPlaying(item.title, item.artist || '', item.type || '');
   _updateLiveTVOverlay(item, isComm);
 
@@ -1122,9 +1142,30 @@ function _playState(st) {
     return;
   }
 
+  // ── TRANSITION LOCK: if already loading a new source, do not re-enter.
+  //    This prevents a rapid burst of Firestore snapshots from stacking
+  //    up multiple concurrent media load operations.
+  if (_transitioning) {
+    console.log(`[AURENIX AUTO ADVANCE] _playState: transition already in progress — skipping snapshot for ${item.id}`);
+    return;
+  }
+
+  // ── LOG: new media item arriving from Firestore ──────────────────────────
+  console.log(
+    `[AURENIX AUTO ADVANCE] Firestore state changed → new item\n` +
+    `  channelId:      ${_activeChannel?.id}\n` +
+    `  currentMediaId: ${_currentMediaId}  →  ${item.id}\n` +
+    `  title:          ${item.title}\n` +
+    `  duration_sec:   ${dur}\n` +
+    `  started_at:     ${raw instanceof Object && typeof raw.toMillis === 'function' ? raw.toMillis() : raw}  (startedAtMs=${startedAtMs})\n` +
+    `  elapsed:        ${elapsed.toFixed(2)}s\n` +
+    `  userRole:       ${_isFounder ? 'Founder' : 'Viewer'}`
+  );
+
   // Already past end before the media element is created (e.g. on late join).
   // Founder uses local engine; viewers request authoritative advance from the Worker.
   if (dur > 0 && elapsed >= dur - 0.5) {
+    console.log(`[AURENIX AUTO ADVANCE] Item already past end on join — requesting advance immediately`);
     if (_isFounder) {
       _advance(st);
     } else {
@@ -1151,8 +1192,10 @@ function _playState(st) {
   const thumbEl = document.getElementById('ax-thumbnail');
 
   if (isImage) {
+    _transitioning = true;
     _stopMedia();
     _currentMediaId = item.id;
+    _viewerAdvancingId = null;
     _mediaEl   = null;
     _mediaType = 'image';
     if (thumbEl) {
@@ -1168,13 +1211,18 @@ function _playState(st) {
     if (audioEl) audioEl.style.display = 'none';
     const pipBtn = document.getElementById('ax-pip-btn');
     if (pipBtn) pipBtn.style.display = 'none';
+    _transitioning = false;
+    console.log(`[AURENIX AUTO ADVANCE] loading next media (image) — channelId=${_activeChannel?.id} itemId=${item.id}`);
     _updatePlayBtn();
     return;
   }
 
-  // New media item — stop current playback and load the new source.
+  // New media item — set transition lock, stop current playback, load new source.
+  _transitioning = true;
   _stopMedia();
   _currentMediaId = item.id;
+  // Clear viewer dedup lock for the previous item so the new item gets fresh tracking.
+  _viewerAdvancingId = null;
 
   const el = isVideo ? videoEl : audioEl;
   _mediaEl = el;
@@ -1191,23 +1239,33 @@ function _playState(st) {
     // Viewer: request authoritative advance from the Cloudflare Worker so the
     // channel continues even when Founder Studio is not open.
     if (_isFounder) {
-      _mediaEl.onended = () => _advance(st);
+      _mediaEl.onended = () => {
+        console.log(`[AURENIX AUTO ADVANCE] MEDIA ENDED (Founder)\n  itemId=${item.id}\n  title=${item.title}\n  currentTime=${_mediaEl?.currentTime?.toFixed(2)}s\n  duration=${dur}s`);
+        _advance(st);
+      };
       _mediaEl.onerror = () => {
-        console.warn('[AURENIX] Media load error — skipping to next program');
+        console.warn(`[AURENIX] Media load error — skipping to next program (itemId=${item.id})`);
         setTimeout(() => _advance(st), 1500);
       };
     } else {
       const capturedChannelId = _activeChannel?.id;
       const capturedItemId    = item.id;
       _mediaEl.onended = () => {
-        console.log('[AURENIX] Viewer: media ended — requesting authoritative advance');
+        console.log(
+          `[AURENIX AUTO ADVANCE] MEDIA ENDED (Viewer)\n` +
+          `  channelId=${capturedChannelId}\n` +
+          `  itemId=${capturedItemId}\n` +
+          `  title=${item.title}\n` +
+          `  currentTime=${_mediaEl?.currentTime?.toFixed(2)}s\n` +
+          `  duration=${dur}s`
+        );
         _updatePlayBtn();
         if (capturedChannelId && capturedItemId) {
           _viewerRequestAdvance(capturedChannelId, capturedItemId);
         }
       };
       _mediaEl.onerror = () => {
-        console.warn('[AURENIX] Viewer: media load error on item', item.id, '— requesting advance');
+        console.warn(`[AURENIX AUTO ADVANCE] Viewer: media load error on item ${item.id} — requesting advance`);
         if (capturedChannelId && capturedItemId) {
           setTimeout(() => _viewerRequestAdvance(capturedChannelId, capturedItemId), 1500);
         }
@@ -1227,6 +1285,9 @@ function _playState(st) {
       _gateOpen = false;
     });
   }
+  // Release transition lock — the new source is now fully loaded and playing.
+  _transitioning = false;
+  console.log(`[AURENIX AUTO ADVANCE] loading next media — channelId=${_activeChannel?.id} itemId=${item.id} seekTo=${elapsed.toFixed(2)}s`);
   _updatePlayBtn();
 }
 
@@ -1244,10 +1305,31 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
   if (_viewerAdvancingId === currentItemId) return;
   _viewerAdvancingId = currentItemId;
 
+  const st  = _channelStates[channelId];
+  const dur = st?.current_item?.duration_sec || 0;
+  const raw = st?.started_at;
+  let startedAtMs = Date.now();
+  if (raw && typeof raw.toMillis === 'function')   startedAtMs = raw.toMillis();
+  else if (raw && typeof raw === 'number')          startedAtMs = raw < 1e10 ? raw * 1000 : raw;
+  else if (raw instanceof Date)                     startedAtMs = raw.getTime();
+
+  console.log(
+    `[AURENIX AUTO ADVANCE]\n` +
+    `  channelId:     ${channelId}\n` +
+    `  currentMediaId:${currentItemId}\n` +
+    `  nextMediaId:   (determined by server)\n` +
+    `  currentTime:   ${_mediaEl ? _mediaEl.currentTime.toFixed(2) + 's' : 'no media element'}\n` +
+    `  duration:      ${dur}s\n` +
+    `  startedAt:     ${startedAtMs}\n` +
+    `  userRole:      Viewer`
+  );
+  console.log(`[AURENIX AUTO ADVANCE] requesting authoritative advance`);
+
   try {
     const user = auth.currentUser;
     if (!user) {
-      console.warn('[AURENIX] Viewer advance: not authenticated');
+      console.warn('[AURENIX AUTO ADVANCE] Viewer advance: not authenticated — cannot call Worker');
+      _viewerAdvancingId = null; // clear so tick can retry when auth is available
       return;
     }
     const idToken = await user.getIdToken(false);
@@ -1260,24 +1342,50 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
       body: JSON.stringify({ channelId, currentItemId }),
     });
     const data = await res.json().catch(() => ({}));
+    console.log(`[AURENIX AUTO ADVANCE] advance response:`, JSON.stringify(data));
+
     if (data.advanced) {
-      console.log(`[AURENIX] Viewer advance OK: channel ${channelId} → next item (${data.reason})`);
-      // Firestore onSnapshot delivers the new state automatically.
+      console.log(`[AURENIX AUTO ADVANCE] Firestore write confirmed — waiting for onSnapshot to deliver new state`);
+      // Firestore onSnapshot will deliver the new current_item automatically.
+      // Keep _viewerAdvancingId locked on this item until the snapshot arrives
+      // (or 15s timeout as safety valve) so we don't double-request.
+      setTimeout(() => {
+        if (_viewerAdvancingId === currentItemId) {
+          console.warn('[AURENIX AUTO ADVANCE] Firestore snapshot did not arrive within 15s after advance — clearing lock');
+          _viewerAdvancingId = null;
+        }
+      }, 15_000);
     } else {
       const reason = data.reason || data.error || 'unknown';
-      console.log(`[AURENIX] Viewer advance skipped: ${reason}`);
-      // 'already_advanced' — another viewer won the race, onSnapshot will deliver the update.
-      // 'service_account_not_configured' — feature not yet set up; viewers wait for Founder.
-      // 'too_early' — should not happen via onended but possible via tick; safe to ignore.
+      console.log(`[AURENIX AUTO ADVANCE] advance skipped by server: ${reason}`);
+      if (reason.startsWith('already_advanced')) {
+        // Another viewer won the race — Firestore snapshot will arrive with new state.
+        // Keep lock briefly then clear so tick can verify.
+        setTimeout(() => {
+          if (_viewerAdvancingId === currentItemId) _viewerAdvancingId = null;
+        }, 5_000);
+      } else if (reason.startsWith('too_early')) {
+        // Server says not time yet — clear immediately so _tick retries next cycle.
+        _viewerAdvancingId = null;
+      } else if (reason === 'service_account_not_configured') {
+        // Admin needs to set FIREBASE_SERVICE_ACCOUNT_KEY in Worker secrets.
+        console.error('[AURENIX AUTO ADVANCE] FIREBASE_SERVICE_ACCOUNT_KEY not configured in Worker — channel will not auto-advance for viewers');
+        // Clear immediately so tick keeps retrying in case the key gets added.
+        _viewerAdvancingId = null;
+      } else if (reason === 'channel_not_running' || reason === 'channel_paused') {
+        // Channel stopped — don't retry.
+        _viewerAdvancingId = null;
+      } else {
+        // Unknown error — clear after 10s to allow retry.
+        setTimeout(() => {
+          if (_viewerAdvancingId === currentItemId) _viewerAdvancingId = null;
+        }, 10_000);
+      }
     }
   } catch (e) {
-    console.warn('[AURENIX] Viewer advance request failed:', e.message);
-  } finally {
-    // Clear the dedup lock after 10 s so that a retry is possible if the
-    // Worker had a transient error and the channel genuinely did not advance.
-    setTimeout(() => {
-      if (_viewerAdvancingId === currentItemId) _viewerAdvancingId = null;
-    }, 10_000);
+    console.warn('[AURENIX AUTO ADVANCE] Viewer advance request failed (network error):', e.message);
+    // Clear so tick retries on next cycle.
+    _viewerAdvancingId = null;
   }
 }
 
@@ -1396,6 +1504,13 @@ function _tick() {
       } else if (_mediaEl?.ended || elapsed >= dur + 1) {
         const channelId = _activeChannel?.id;
         if (channelId && st.current_item?.id) {
+          // Only log when we're about to make a request (not on every tick while locked).
+          if (_viewerAdvancingId !== st.current_item.id) {
+            console.log(
+              `[AURENIX AUTO ADVANCE] _tick: elapsed ${elapsed.toFixed(1)}s >= ${dur}s — triggering viewer advance request` +
+              ` (mediaEnded=${!!_mediaEl?.ended} channelId=${channelId} itemId=${st.current_item.id})`
+            );
+          }
           _viewerRequestAdvance(channelId, st.current_item.id);
         }
       }
