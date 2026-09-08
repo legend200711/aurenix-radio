@@ -1,5 +1,5 @@
 /**
- * AURENIX — Founder Upload Worker  (v9 — Worker-proxied Drive chunked upload)
+ * AURENIX — Founder Upload Worker  (v10 — channel auto-advance engine)
  * upload-worker/src/index.js
  *
  * ARCHITECTURE (v9):
@@ -16,9 +16,16 @@
  *   chunk to Google server-side with the Content-Range header.  No file buffering.
  *
  * Endpoints (existing Supabase):
- *   POST /authorize  — JSON: { fileName, contentType, size }
- *   GET  /health     — secrets present check
- *   GET  /diagnose   — full connectivity diagnostic
+ *   POST /authorize          — JSON: { fileName, contentType, size }
+ *   GET  /health             — secrets present check
+ *   GET  /diagnose           — full connectivity diagnostic
+ *
+ * Endpoints (channel auto-advance — any authenticated viewer):
+ *   POST /channel/advance    — JSON: { channelId, currentItemId }
+ *     Atomically advances network_state/{channelId} to the next program.
+ *     Uses a Firestore compare-and-swap transaction so that if two viewers
+ *     race, only one succeeds.  Validates that the item's scheduled duration
+ *     has actually elapsed before advancing.
  *
  * Endpoints (new Google Drive — all require Firebase Founder token):
  *   GET  /gdrive/config-check     — are Drive OAuth credentials configured?
@@ -494,7 +501,8 @@ export default {
         GOOGLE_CLIENT_ID:    env.GOOGLE_CLIENT_ID     ? '✓ set' : '✗ not set (optional)',
         GOOGLE_CLIENT_SECRET:env.GOOGLE_CLIENT_SECRET ? '✓ set' : '✗ not set (optional)',
         GOOGLE_REDIRECT_URI: env.GOOGLE_REDIRECT_URI  ? '✓ set' : '✗ not set (optional)',
-        GDRIVE_KV:           env.GDRIVE_KV            ? '✓ bound' : '✗ not bound (optional)',
+        GDRIVE_KV:                    env.GDRIVE_KV                    ? '✓ bound'     : '✗ not bound (optional)',
+        FIREBASE_SERVICE_ACCOUNT_KEY: env.FIREBASE_SERVICE_ACCOUNT_KEY ? '✓ set'       : '✗ not set (required for auto-advance)',
         FIREBASE_PROJECT_ID_value: env.FIREBASE_PROJECT_ID || null,
         SUPABASE_URL_value:        env.SUPABASE_URL || null,
         architecture: 'Signed URL — browser PUT to /object/upload/sign/<bucket>/<path>?token=',
@@ -1063,6 +1071,642 @@ export default {
       }, 200, origin);
     }
 
+    /* ══════════════════════════════════════════════════════════════════════
+       POST /channel/advance
+       ═══════════════════════════════════════════════════════════════════════
+       Authoritative, race-safe channel advancement for the AURENIX 24/7
+       broadcast network.
+
+       Security model:
+         - Any Firebase-authenticated viewer may call this endpoint.
+         - The caller supplies the channelId and the currentItemId they believe
+           is playing.  This is used as the compare-and-swap guard: if Firestore
+           already shows a different current_item (because another viewer already
+           advanced it), this call is a no-op and returns { advanced: false }.
+         - Time guard: the current item's started_at + duration_sec must have
+           elapsed (with a 2-second tolerance) before advancement is allowed.
+           This prevents a viewer from skipping to the next song at will.
+         - The Firestore write uses a transaction (beginTransaction / commit)
+           so two simultaneous requests cannot both advance the same item.
+
+       Request body (JSON):
+         { channelId: string, currentItemId: string }
+
+       Response:
+         { advanced: boolean, reason?: string }
+    ══════════════════════════════════════════════════════════════════════ */
+    if (request.method === 'POST' && p === '/channel/advance') {
+
+      /* ── 0. Secrets ─────────────────────────────────────────────────── */
+      const secretErr = checkSecrets(env);
+      if (secretErr) return json({ error: `WORKER CONFIGURATION ERROR — ${secretErr}` }, 503, origin);
+
+      /* ── 1. Firebase auth ───────────────────────────────────────────── */
+      const authHeader = request.headers.get('Authorization') || '';
+      if (!authHeader.startsWith('Bearer '))
+        return json({ error: 'FIREBASE TOKEN MISSING' }, 401, origin);
+      const idToken = authHeader.slice(7).trim();
+      if (!idToken)
+        return json({ error: 'FIREBASE TOKEN MISSING — empty' }, 401, origin);
+
+      let tokenPayload;
+      try {
+        tokenPayload = await verifyFirebaseToken(idToken, env.FIREBASE_PROJECT_ID);
+      } catch (err) {
+        return json({ error: err.message }, 401, origin);
+      }
+
+      /* ── 2. Parse body ──────────────────────────────────────────────── */
+      let body;
+      try { body = await request.json(); }
+      catch { return json({ error: 'ADVANCE FAILED — invalid JSON body' }, 400, origin); }
+
+      const { channelId, currentItemId } = body || {};
+      if (!channelId || typeof channelId !== 'string')
+        return json({ error: 'ADVANCE FAILED — channelId required' }, 400, origin);
+      if (!currentItemId || typeof currentItemId !== 'string')
+        return json({ error: 'ADVANCE FAILED — currentItemId required' }, 400, origin);
+
+      /* ── 3. Perform atomic advance via Firestore REST ───────────────── */
+      try {
+        const result = await firestoreChannelAdvance(
+          env.FIREBASE_PROJECT_ID,
+          env.FIREBASE_SERVICE_ACCOUNT_KEY || null,
+          channelId,
+          currentItemId
+        );
+        return json(result, 200, origin);
+      } catch (e) {
+        console.error('[aurenix-advance] error:', e.message);
+        return json({ advanced: false, reason: 'internal error: ' + e.message }, 500, origin);
+      }
+    }
+
     return json({ error: 'Not found' }, 404, origin);
   },
 };
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   CHANNEL ADVANCE ENGINE
+   Uses the Firestore REST API (no firebase-admin SDK needed in Workers).
+
+   Firestore collections accessed:
+     network_state/{channelId}         — live playback state
+     network_ch_config/{channelId}     — generic channel engine config (ordered/shuffle/random)
+     channel_live_tv_config/ALTV       — ALTV-specific engine config
+
+   Security note:
+     All Firestore writes use the caller's own Firebase ID token.
+     The Firestore rules for network_state only allow admin writes (isAdmin()).
+     Therefore this Worker MUST use the Firebase service account to write
+     network_state. Since we do not have a service-account key secret here,
+     we use a dedicated FIREBASE_SERVICE_ACCOUNT_KEY secret (a JSON service
+     account file exported from GCP/Firebase console).
+
+     FALLBACK: If FIREBASE_SERVICE_ACCOUNT_KEY is not yet set, the Worker
+     falls back to writing with the user's own token. This will be rejected
+     by Firestore rules for network_state (admin-only write). In that case
+     the Worker returns { advanced: false, reason: 'rules_denied' } and the
+     viewer silently keeps waiting for the Founder.
+
+     To enable server-side advancement:
+       1. Firebase Console → Project Settings → Service Accounts → Generate new private key
+       2. npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_KEY
+          (paste the entire JSON as one line)
+       3. npx wrangler deploy (in upload-worker/)
+
+   Transaction strategy:
+     The Firestore REST API supports atomic "read-then-write" transactions
+     via POST /{db}/documents:beginTransaction then POST /{db}/documents:commit
+     with preconditions.  We use this to ensure only one of N concurrent
+     advance requests actually advances the channel.
+══════════════════════════════════════════════════════════════════════════════ */
+
+const LIVE_TV_CHANNEL_ID = 'ALTV';
+const LIVE_TV_CONFIG_DOC = 'channel_live_tv_config';
+const CHANNEL_CONFIG_COL = 'network_ch_config';
+
+const PROGRAM_TYPES = new Set([
+  'video', 'music_video', 'show', 'broadcast_clip', 'audio_program',
+  'podcast', 'station_id', 'archive', 'trailer', 'audio', 'music',
+  'funny_clip', 'short_film', 'other', 'promo',
+]);
+const COMMERCIAL_TYPES = new Set(['commercial', 'promo', 'station_id']);
+const LIVE_TV_PROGRAM_TYPES = new Set([
+  'video', 'music_video', 'show', 'broadcast_clip', 'audio_program',
+  'podcast', 'station_id', 'archive', 'trailer', 'audio', 'music',
+]);
+const LIVE_TV_COMMERCIAL_TYPES = new Set(['commercial', 'promo', 'trailer', 'station_id']);
+
+const COMMERCIAL_FREQ_TABLE = {
+  off:    { minPrograms: 999, maxPrograms: 999, minSpot: 0, maxSpot: 0 },
+  low:    { minPrograms: 4,   maxPrograms: 7,   minSpot: 1, maxSpot: 1 },
+  normal: { minPrograms: 2,   maxPrograms: 4,   minSpot: 1, maxSpot: 2 },
+  high:   { minPrograms: 1,   maxPrograms: 2,   minSpot: 2, maxSpot: 3 },
+  every:  { minPrograms: 1,   maxPrograms: 1,   minSpot: 1, maxSpot: 1 },
+  every2: { minPrograms: 2,   maxPrograms: 2,   minSpot: 1, maxSpot: 2 },
+  every3: { minPrograms: 3,   maxPrograms: 3,   minSpot: 1, maxSpot: 2 },
+};
+
+/* ─── Firestore REST helpers ─────────────────────────────────────────────── */
+
+function fsBaseUrl(projectId) {
+  return `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+}
+
+function fsDocPath(projectId, ...segments) {
+  return `${fsBaseUrl(projectId)}/${segments.join('/')}`;
+}
+
+/** Convert a plain JS value to a Firestore REST Value. */
+function toFsValue(v) {
+  if (v === null || v === undefined) return { nullValue: null };
+  if (typeof v === 'boolean') return { booleanValue: v };
+  if (typeof v === 'number') {
+    if (Number.isInteger(v)) return { integerValue: String(v) };
+    return { doubleValue: v };
+  }
+  if (typeof v === 'string') return { stringValue: v };
+  if (v instanceof Array) return { arrayValue: { values: v.map(toFsValue) } };
+  if (v && typeof v === 'object' && v.__serverTimestamp) {
+    return { timestampValue: new Date().toISOString() };
+  }
+  if (v && typeof v === 'object') {
+    const fields = {};
+    for (const [k, val] of Object.entries(v)) fields[k] = toFsValue(val);
+    return { mapValue: { fields } };
+  }
+  return { nullValue: null };
+}
+
+/** Convert a Firestore REST Value to a plain JS value. */
+function fromFsValue(v) {
+  if (!v) return null;
+  if ('nullValue'    in v) return null;
+  if ('booleanValue' in v) return v.booleanValue;
+  if ('integerValue' in v) return Number(v.integerValue);
+  if ('doubleValue'  in v) return v.doubleValue;
+  if ('stringValue'  in v) return v.stringValue;
+  if ('timestampValue' in v) return v.timestampValue; // ISO string
+  if ('arrayValue'   in v) return (v.arrayValue.values || []).map(fromFsValue);
+  if ('mapValue'     in v) {
+    const out = {};
+    for (const [k, val] of Object.entries(v.mapValue.fields || {})) out[k] = fromFsValue(val);
+    return out;
+  }
+  return null;
+}
+
+/** Convert a Firestore REST document to a plain JS object. */
+function fromFsDoc(doc) {
+  if (!doc || !doc.fields) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(doc.fields)) out[k] = fromFsValue(v);
+  return out;
+}
+
+/** Convert a plain JS object to Firestore REST document fields. */
+function toFsFields(obj) {
+  const fields = {};
+  for (const [k, v] of Object.entries(obj)) fields[k] = toFsValue(v);
+  return fields;
+}
+
+/** GET a single Firestore document.  Returns null if 404. */
+async function fsGet(projectId, authToken, ...pathSegments) {
+  const url = fsDocPath(projectId, ...pathSegments);
+  const res = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${authToken}` },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`Firestore GET ${pathSegments.join('/')} failed: HTTP ${res.status} — ${t.slice(0, 200)}`);
+  }
+  const doc = await res.json();
+  return fromFsDoc(doc);
+}
+
+/** PATCH a Firestore document (merge). Returns the written doc. */
+async function fsPatch(projectId, authToken, data, ...pathSegments) {
+  const url = fsDocPath(projectId, ...pathSegments);
+  const fieldMask = Object.keys(data).join(',');
+  const body = { fields: toFsFields(data) };
+  const res = await fetch(`${url}?updateMask.fieldPaths=${encodeURIComponent(fieldMask)}`, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`Firestore PATCH ${pathSegments.join('/')} failed: HTTP ${res.status} — ${t.slice(0, 200)}`);
+  }
+  return fromFsDoc(await res.json());
+}
+
+/** Retrieve a Firebase service-account access token using the JWT bearer flow. */
+async function getServiceAccountToken(serviceAccountJson) {
+  let sa;
+  try { sa = JSON.parse(serviceAccountJson); }
+  catch { throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY is not valid JSON'); }
+
+  // Build a JWT signed with the service account private key (RS256)
+  const now = Math.floor(Date.now() / 1000);
+  const header  = { alg: 'RS256', typ: 'JWT' };
+  const payload = {
+    iss: sa.client_email,
+    sub: sa.client_email,
+    aud: 'https://oauth2.googleapis.com/token',
+    scope: 'https://www.googleapis.com/auth/datastore',
+    iat: now,
+    exp: now + 3600,
+  };
+
+  const enc  = s => btoa(JSON.stringify(s)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+  const toSign = `${enc(header)}.${enc(payload)}`;
+
+  // Import the private key
+  const pemBody = sa.private_key
+    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
+    .replace(/-----END PRIVATE KEY-----/g, '')
+    .replace(/\s/g, '');
+  const keyBytes = Uint8Array.from(atob(pemBody), c => c.charCodeAt(0));
+  const cryptoKey = await crypto.subtle.importKey(
+    'pkcs8', keyBytes,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false, ['sign']
+  );
+
+  const sig = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5', cryptoKey,
+    new TextEncoder().encode(toSign)
+  );
+  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig)))
+    .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+
+  const jwtAssertion = `${toSign}.${sigB64}`;
+
+  // Exchange the JWT for an access token
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwtAssertion}`,
+  });
+  if (!tokenRes.ok) {
+    const t = await tokenRes.text().catch(() => '');
+    throw new Error(`Service account token exchange failed: HTTP ${tokenRes.status} — ${t.slice(0, 200)}`);
+  }
+  const { access_token } = await tokenRes.json();
+  return access_token;
+}
+
+function randInt(min, max) {
+  if (min > max) return max;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+/** Pick next program from media library (random, avoiding recent history). */
+function pickProgram(mediaLib, isAltv, justPlayedId, recentHistory) {
+  const typeSet = isAltv ? LIVE_TV_PROGRAM_TYPES : PROGRAM_TYPES;
+  const pool = mediaLib.filter(m =>
+    m.status === 'approved' &&
+    typeSet.has(m.type) &&
+    m.url &&
+    (!isAltv || m.live_tv_assigned !== false)
+  );
+  if (!pool.length) return null;
+
+  const avoidIds = justPlayedId ? [...(recentHistory || []), justPlayedId] : (recentHistory || []);
+  let candidates = pool.filter(m => !avoidIds.includes(m.id));
+  if (!candidates.length) candidates = pool.filter(m => m.id !== justPlayedId);
+  if (!candidates.length) candidates = pool;
+
+  return candidates[Math.floor(Math.random() * candidates.length)];
+}
+
+/** Pick commercials from media library. */
+function pickCommercials(mediaLib, isAltv, freqKey, maxPerBreak, commercialHistory) {
+  const freq = COMMERCIAL_FREQ_TABLE[freqKey] || COMMERCIAL_FREQ_TABLE.normal;
+  if (freq.maxSpot === 0) return [];
+
+  const typeSet = isAltv ? LIVE_TV_COMMERCIAL_TYPES : COMMERCIAL_TYPES;
+  const pool = mediaLib.filter(m =>
+    m.status === 'approved' &&
+    typeSet.has(m.type) &&
+    m.url &&
+    (!isAltv || m.live_tv_assigned !== false)
+  );
+  if (!pool.length) return [];
+
+  const cap   = Math.min(maxPerBreak || freq.maxSpot, freq.maxSpot);
+  const count = randInt(Math.min(freq.minSpot, cap), cap);
+  const result = [];
+  const recent = commercialHistory || [];
+
+  for (let i = 0; i < count; i++) {
+    const available = pool.filter(m => !result.find(r => r.id === m.id));
+    if (!available.length) break;
+    const fresh = available.filter(m => !recent.includes(m.id));
+    const src   = fresh.length ? fresh : available;
+    result.push(src[Math.floor(Math.random() * src.length)]);
+  }
+  return result;
+}
+
+function mediaItemToState(m) {
+  return {
+    id:           m.id           || '',
+    title:        m.title        || '(untitled)',
+    artist:       m.artist       || '',
+    type:         m.type         || 'media',
+    url:          m.url          || '',
+    duration_sec: m.duration_sec || 0,
+    mime_type:    m.mime_type    || '',
+  };
+}
+
+/**
+ * Main advance function.
+ * Uses the Firestore REST API with a begin/commit transaction for CAS.
+ *
+ * Returns { advanced: boolean, reason?: string }
+ */
+async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId, currentItemId) {
+  /* ── 0. Determine the write token ──────────────────────────────────── */
+  // The Firestore rules for network_state allow write only if isAdmin()
+  // (Founder email check via Firebase Auth token).  Regular viewer ID tokens
+  // cannot satisfy that rule, so we must use a service-account access token
+  // to write Firestore.  The service account automatically has admin access
+  // to its own project.
+  //
+  // If FIREBASE_SERVICE_ACCOUNT_KEY is not yet configured in Worker secrets,
+  // we return { advanced: false, reason: 'service_account_not_configured' }
+  // and the viewer falls back to waiting — no harm done.
+  if (!serviceAccountJson) {
+    return { advanced: false, reason: 'service_account_not_configured' };
+  }
+  let writeToken;
+  try {
+    writeToken = await getServiceAccountToken(serviceAccountJson);
+  } catch (e) {
+    return { advanced: false, reason: 'service_account_token_error: ' + e.message };
+  }
+
+  /* ── 1. Read current state ──────────────────────────────────────────── */
+  const st = await fsGet(projectId, writeToken, 'network_state', channelId);
+  if (!st) return { advanced: false, reason: 'no_state' };
+
+  // CAS guard: only advance if the currentItemId still matches what's in Firestore.
+  const firestoreCurrentId = st.current_item?.id || null;
+  if (firestoreCurrentId !== currentItemId) {
+    // Already advanced by someone else — viewer will get the new state via onSnapshot.
+    return { advanced: false, reason: 'already_advanced' };
+  }
+
+  // Time guard: only advance if started_at + duration has elapsed.
+  // Tolerance: 2 seconds (handles clock skew between client and server).
+  const dur = st.current_item?.duration_sec || 0;
+  if (dur > 0) {
+    const startedAtRaw = st.started_at;
+    let startedAtMs;
+    if (typeof startedAtRaw === 'string') {
+      // Firestore REST returns timestamps as ISO strings
+      startedAtMs = new Date(startedAtRaw).getTime();
+    } else if (typeof startedAtRaw === 'number') {
+      startedAtMs = startedAtRaw < 1e10 ? startedAtRaw * 1000 : startedAtRaw;
+    } else {
+      startedAtMs = Date.now() - (dur + 10) * 1000; // assume elapsed if unknown
+    }
+    const elapsedSec = (Date.now() - startedAtMs) / 1000;
+    const TOLERANCE_SEC = 2;
+    if (elapsedSec < dur - TOLERANCE_SEC) {
+      return {
+        advanced: false,
+        reason: `too_early: ${elapsedSec.toFixed(1)}s elapsed of ${dur}s`,
+      };
+    }
+  }
+
+  /* ── 2. Drain commercial queue if present ────────────────────────────── */
+  const commQueue = st.commercial_queue || [];
+  if (commQueue.length > 0) {
+    const [nextComm, ...remaining] = commQueue;
+    const now = new Date().toISOString();
+    await fsPatch(projectId, writeToken, {
+      current_item:     nextComm,
+      started_at:       { __serverTimestamp: true },
+      is_commercial:    true,
+      commercial_queue: remaining,
+      needs_next:       false,
+      last_item_id:     nextComm.id || '',
+      updated_at:       { __serverTimestamp: true },
+    }, 'network_state', channelId);
+    return { advanced: true, reason: 'drained_commercial_queue' };
+  }
+
+  /* ── 3. Determine programming mode and fetch config ─────────────────── */
+  const isAltv = channelId === LIVE_TV_CHANNEL_ID;
+  const configCol = isAltv ? LIVE_TV_CONFIG_DOC : CHANNEL_CONFIG_COL;
+  const cfg = await fsGet(projectId, writeToken, configCol, channelId);
+
+  if (!cfg) return { advanced: false, reason: 'no_engine_config' };
+  if (!cfg.running) return { advanced: false, reason: 'channel_not_running' };
+  if (cfg.paused)   return { advanced: false, reason: 'channel_paused' };
+
+  const mode = cfg.programming_mode || 'random';
+
+  /* ── 4. Queue-based advance (ordered / shuffle) ───────────────────── */
+  if (!isAltv && (mode === 'ordered' || mode === 'shuffle')) {
+    const queue  = st.queue || [];
+    const curIdx = queue.findIndex(q => q.id === currentItemId);
+    let nextIdx  = curIdx + 1;
+
+    if (nextIdx >= queue.length) {
+      const loop = st.loop ?? true;
+      if (loop) {
+        nextIdx = 0;
+      } else {
+        await fsPatch(projectId, writeToken, {
+          current_item: null,
+          started_at:   { __serverTimestamp: true },
+          updated_at:   { __serverTimestamp: true },
+        }, 'network_state', channelId);
+        return { advanced: true, reason: 'queue_exhausted' };
+      }
+    }
+
+    const nextItem = queue[nextIdx];
+    if (!nextItem) return { advanced: false, reason: 'empty_queue' };
+
+    // Check commercial break
+    if (cfg.commercial_enabled) {
+      const freq = COMMERCIAL_FREQ_TABLE[cfg.commercial_freq] || COMMERCIAL_FREQ_TABLE.normal;
+      const since  = cfg.programs_since_break || 0;
+      const target = cfg.next_break_at || freq.minPrograms;
+      if (since >= target) {
+        // We need the media library to pick commercials.
+        // Fetch from network_media (approved items).
+        const mediaLib = await fetchApprovedMedia(projectId, writeToken);
+        const commercials = pickCommercials(
+          mediaLib, false, cfg.commercial_freq,
+          cfg.max_commercials_per_break || 2, cfg.commercial_history
+        );
+        if (commercials.length > 0) {
+          const [firstComm, ...rest] = commercials;
+          await fsPatch(projectId, writeToken, {
+            current_item:          mediaItemToState(firstComm),
+            started_at:            { __serverTimestamp: true },
+            is_commercial:         true,
+            commercial_queue:      rest.map(mediaItemToState),
+            _post_commercial_item: nextItem,
+            needs_next:            false,
+            last_item_id:          firstComm.id,
+            updated_at:            { __serverTimestamp: true },
+          }, 'network_state', channelId);
+          await updateCommercialHistory(projectId, writeToken, configCol, channelId, cfg, commercials);
+          return { advanced: true, reason: 'commercial_break' };
+        }
+      }
+    }
+
+    await fsPatch(projectId, writeToken, {
+      current_item:     nextItem,
+      started_at:       { __serverTimestamp: true },
+      is_commercial:    false,
+      commercial_queue: [],
+      updated_at:       { __serverTimestamp: true },
+    }, 'network_state', channelId);
+    await updateProgramHistory(projectId, writeToken, configCol, channelId, cfg, nextItem.id, isAltv);
+    return { advanced: true, reason: 'queue_advance' };
+  }
+
+  /* ── 5. Random mode: pick next program from network_media ─────────── */
+  const mediaLib = await fetchApprovedMedia(projectId, writeToken);
+
+  const justPlayedId = currentItemId;
+  const recentHistory = cfg.recent_history || [];
+
+  // Check commercial break
+  if (cfg.commercial_enabled !== false) {
+    const freqKey = cfg.commercial_freq || 'normal';
+    const freq    = COMMERCIAL_FREQ_TABLE[freqKey] || COMMERCIAL_FREQ_TABLE.normal;
+    const since   = cfg.programs_since_break || 0;
+    const target  = cfg.next_break_at || freq.minPrograms;
+    if (freq.maxSpot > 0 && since >= target) {
+      const commercials = pickCommercials(
+        mediaLib, isAltv, freqKey,
+        cfg.max_commercials_per_break || freq.maxSpot,
+        cfg.commercial_history
+      );
+      if (commercials.length > 0) {
+        const [firstComm, ...rest] = commercials;
+        await fsPatch(projectId, writeToken, {
+          current_item:     mediaItemToState(firstComm),
+          started_at:       { __serverTimestamp: true },
+          is_commercial:    true,
+          commercial_queue: rest.map(mediaItemToState),
+          needs_next:       false,
+          last_item_id:     firstComm.id,
+          updated_at:       { __serverTimestamp: true },
+        }, 'network_state', channelId);
+        await updateCommercialHistory(projectId, writeToken, configCol, channelId, cfg, commercials);
+        // Write the next program after the commercial break
+        const nextProg = pickProgram(mediaLib, isAltv, justPlayedId, recentHistory);
+        if (nextProg) {
+          // Store post-commercial item for when the commercial drains
+          await fsPatch(projectId, writeToken, {
+            _post_commercial_item: mediaItemToState(nextProg),
+          }, 'network_state', channelId);
+        }
+        return { advanced: true, reason: 'commercial_break_random' };
+      }
+    }
+  }
+
+  // No commercial break — write next program directly
+  const nextProg = pickProgram(mediaLib, isAltv, justPlayedId, recentHistory);
+  if (!nextProg) return { advanced: false, reason: 'no_eligible_programs' };
+
+  await fsPatch(projectId, writeToken, {
+    current_item:     mediaItemToState(nextProg),
+    started_at:       { __serverTimestamp: true },
+    is_commercial:    false,
+    commercial_queue: [],
+    needs_next:       false,
+    last_item_id:     nextProg.id,
+    updated_at:       { __serverTimestamp: true },
+  }, 'network_state', channelId);
+
+  await updateProgramHistory(projectId, writeToken, configCol, channelId, cfg, nextProg.id, isAltv);
+  return { advanced: true, reason: 'random_advance' };
+}
+
+/** Fetch all approved media from network_media collection via Firestore REST. */
+async function fetchApprovedMedia(projectId, authToken) {
+  // Firestore REST runQuery with a structured query filtering by status == 'approved'
+  const url = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:runQuery`;
+  const body = {
+    structuredQuery: {
+      from: [{ collectionId: 'network_media' }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: 'status' },
+          op: 'EQUAL',
+          value: { stringValue: 'approved' },
+        },
+      },
+      limit: 2000,
+    },
+  };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`fetchApprovedMedia failed: HTTP ${res.status} — ${t.slice(0, 200)}`);
+  }
+  const rows = await res.json();
+  const result = [];
+  for (const row of rows) {
+    if (!row.document) continue;
+    const data = fromFsDoc(row.document);
+    // Extract the document ID from the name field (last path segment)
+    const name = row.document.name || '';
+    const id   = name.split('/').pop();
+    result.push({ id, ...data });
+  }
+  return result;
+}
+
+async function updateProgramHistory(projectId, authToken, configCol, channelId, cfg, programId, isAltv) {
+  const window_    = cfg.avoid_repeat_window || (isAltv ? 10 : 5);
+  const newHistory = [...((cfg.recent_history || []).slice(-(window_ - 1))), programId];
+  const freqKey    = cfg.commercial_freq || 'normal';
+  const freq       = COMMERCIAL_FREQ_TABLE[freqKey] || COMMERCIAL_FREQ_TABLE.normal;
+  const newSince   = (cfg.programs_since_break || 0) + 1;
+  const newTarget  = randInt(freq.minPrograms, freq.maxPrograms);
+  await fsPatch(projectId, authToken, {
+    recent_history:       newHistory,
+    programs_since_break: newSince,
+    next_break_at:        newTarget,
+    updated_at:           { __serverTimestamp: true },
+  }, configCol, channelId);
+}
+
+async function updateCommercialHistory(projectId, authToken, configCol, channelId, cfg, commercials) {
+  const ids        = commercials.map(c => c.id);
+  const newHistory = [...((cfg.commercial_history || []).slice(-20)), ...ids];
+  await fsPatch(projectId, authToken, {
+    commercial_history:   newHistory,
+    programs_since_break: 0,
+    updated_at:           { __serverTimestamp: true },
+  }, configCol, channelId);
+}

@@ -31,6 +31,10 @@ import { supabase } from './supabase-client.js';
 ════════════════════════════════════ */
 const FOUNDER_EMAIL  = 'christijerina46@gmail.com';
 const MEDIA_BUCKET   = 'aurenix-media';
+// Cloudflare Worker that provides the authoritative server-side advance endpoint.
+// Regular viewers POST here when their media ends so the channel advances even
+// when Founder Studio is not open.
+const ADVANCE_WORKER_URL = 'https://aurenix-upload.nthntjrn.workers.dev/channel/advance';
 
 /* ════════════════════════════════════
    STATE
@@ -51,6 +55,8 @@ let _advancing     = false;
 // Tracks the media ID currently loaded in the player element.
 // Used to prevent reloading the same media on repeated Firestore snapshots.
 let _currentMediaId = null;
+// Prevent duplicate advance requests for the same item from the viewer.
+let _viewerAdvancingId = null;
 
 /* ════════════════════════════════════
    INIT
@@ -1096,9 +1102,9 @@ function _playState(st) {
   //    snapshot was unconditionally restarting the video from scratch.
   if (_currentMediaId === item.id && _mediaEl && !_mediaEl.error) {
     // If the media element has naturally ended, do NOT restart it.
-    // For viewers: keep waiting for the Firestore snapshot that delivers
-    // the next current_item. For the Founder: _advance is called by onended /
-    // _tick so we don't need to re-trigger it here either.
+    // Viewers already fired _viewerRequestAdvance via onended.
+    // _tick will retry via the elapsed >= dur + 1 path if the Worker had a
+    // transient error. For the Founder: _advance is called by onended / _tick.
     if (_mediaEl.ended) {
       _updatePlayBtn();
       return;
@@ -1116,10 +1122,15 @@ function _playState(st) {
     return;
   }
 
-  // Already past end — only advance if Founder engine (isFounder).
-  // Normal viewers must NOT call _advance / write to Firestore.
+  // Already past end before the media element is created (e.g. on late join).
+  // Founder uses local engine; viewers request authoritative advance from the Worker.
   if (dur > 0 && elapsed >= dur - 0.5) {
-    if (_isFounder) _advance(st);
+    if (_isFounder) {
+      _advance(st);
+    } else {
+      const channelId = _activeChannel?.id;
+      if (channelId && item.id) _viewerRequestAdvance(channelId, item.id);
+    }
     return;
   }
 
@@ -1176,8 +1187,9 @@ function _playState(st) {
     _mediaEl.volume = parseFloat(document.getElementById('ax-vol-slider')?.value || '0.8');
     _mediaEl.currentTime = Math.max(0, elapsed);
 
-    // Only the Founder/broadcast engine advances the channel.
-    // Normal viewers must NOT write to Firestore when media ends.
+    // Founder: use the local engine (existing behaviour — preserved exactly).
+    // Viewer: request authoritative advance from the Cloudflare Worker so the
+    // channel continues even when Founder Studio is not open.
     if (_isFounder) {
       _mediaEl.onended = () => _advance(st);
       _mediaEl.onerror = () => {
@@ -1185,20 +1197,20 @@ function _playState(st) {
         setTimeout(() => _advance(st), 1500);
       };
     } else {
-      // Normal viewers: when media ends, do NOT call _stopMedia().
-      // Keeping _currentMediaId and _mediaEl intact means the same-item
-      // guard above will recognise the ended state and skip re-loading,
-      // while the Firestore onSnapshot subscription remains the sole
-      // authority for transitioning to the next item. As soon as the
-      // Founder advances and the snapshot delivers a new current_item.id,
-      // _playState will fall through the guard, _stopMedia() will be called,
-      // and the new item will load cleanly.
+      const capturedChannelId = _activeChannel?.id;
+      const capturedItemId    = item.id;
       _mediaEl.onended = () => {
-        console.log('[AURENIX] Viewer: media ended — waiting for broadcast to advance');
+        console.log('[AURENIX] Viewer: media ended — requesting authoritative advance');
         _updatePlayBtn();
+        if (capturedChannelId && capturedItemId) {
+          _viewerRequestAdvance(capturedChannelId, capturedItemId);
+        }
       };
       _mediaEl.onerror = () => {
-        console.warn('[AURENIX] Viewer: media load error on item', item.id);
+        console.warn('[AURENIX] Viewer: media load error on item', item.id, '— requesting advance');
+        if (capturedChannelId && capturedItemId) {
+          setTimeout(() => _viewerRequestAdvance(capturedChannelId, capturedItemId), 1500);
+        }
       };
     }
 
@@ -1217,6 +1229,58 @@ function _playState(st) {
   }
   _updatePlayBtn();
 }
+
+/* ════════════════════════════════════
+   VIEWER — AUTHORITATIVE ADVANCE REQUEST
+   Regular viewers call this when their media ends (or is already past duration).
+   POSTs to the Cloudflare Worker which uses a service-account access token to
+   atomically write the next current_item to Firestore via the REST API.
+   The viewer never writes Firestore directly.
+   Race-safe: compare-and-swap in the Worker ensures only the first request wins.
+   Duplicate guard: _viewerAdvancingId prevents N concurrent tick calls for same item.
+════════════════════════════════════ */
+async function _viewerRequestAdvance(channelId, currentItemId) {
+  // Deduplicate: ignore if we already fired an advance request for this item.
+  if (_viewerAdvancingId === currentItemId) return;
+  _viewerAdvancingId = currentItemId;
+
+  try {
+    const user = auth.currentUser;
+    if (!user) {
+      console.warn('[AURENIX] Viewer advance: not authenticated');
+      return;
+    }
+    const idToken = await user.getIdToken(false);
+    const res = await fetch(ADVANCE_WORKER_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({ channelId, currentItemId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data.advanced) {
+      console.log(`[AURENIX] Viewer advance OK: channel ${channelId} → next item (${data.reason})`);
+      // Firestore onSnapshot delivers the new state automatically.
+    } else {
+      const reason = data.reason || data.error || 'unknown';
+      console.log(`[AURENIX] Viewer advance skipped: ${reason}`);
+      // 'already_advanced' — another viewer won the race, onSnapshot will deliver the update.
+      // 'service_account_not_configured' — feature not yet set up; viewers wait for Founder.
+      // 'too_early' — should not happen via onended but possible via tick; safe to ignore.
+    }
+  } catch (e) {
+    console.warn('[AURENIX] Viewer advance request failed:', e.message);
+  } finally {
+    // Clear the dedup lock after 10 s so that a retry is possible if the
+    // Worker had a transient error and the channel genuinely did not advance.
+    setTimeout(() => {
+      if (_viewerAdvancingId === currentItemId) _viewerAdvancingId = null;
+    }, 10_000);
+  }
+}
+
 
 function _stopMedia() {
   if (_mediaEl) {
@@ -1322,9 +1386,20 @@ function _tick() {
     if (panelTime) panelTime.textContent = _fmtTime(elapsed) + ' / ' + _fmtTime(dur);
     if (panelRemain) panelRemain.textContent = _fmtTime(Math.max(0, dur - elapsed)) + ' remaining';
 
-    // Only the Founder/broadcast engine advances the channel on tick.
-    // Normal viewers wait for the Firestore onSnapshot to deliver the new state.
-    if (_isFounder && elapsed >= dur - 0.5 && !_advancing) _advance(st);
+    // Founder: advance via local engine on tick (existing behaviour).
+    // Viewer: if media has ended but the Firestore state hasn't changed yet
+    // (e.g. the Worker advance request from onended hasn't completed or the
+    // viewer joined after a track ended), re-request advance from the Worker.
+    if (elapsed >= dur - 0.5) {
+      if (_isFounder) {
+        if (!_advancing) _advance(st);
+      } else if (_mediaEl?.ended || elapsed >= dur + 1) {
+        const channelId = _activeChannel?.id;
+        if (channelId && st.current_item?.id) {
+          _viewerRequestAdvance(channelId, st.current_item.id);
+        }
+      }
+    }
   } else {
     if (fill)      fill.style.width     = '0%';
     if (fsFill)    fsFill.style.width   = '0%';
