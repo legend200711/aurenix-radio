@@ -1983,7 +1983,19 @@ function _renderLiveCard(channelId) {
   const ch  = _channels().find(c => c.id === channelId);
   const st  = _channelStates[channelId];
   const cur = st?.current_item;
-  const q   = st?.queue || [];
+
+  // Filter queue: only show items that still exist in the media library
+  // with approved status and a URL. Deleted/rejected items must not appear.
+  const rawQ = st?.queue || [];
+  const q = rawQ.filter(qItem => {
+    if (!qItem?.id || !qItem?.url) return false;
+    const live = _mediaLib.find(m => m.id === qItem.id);
+    if (!live) return false;
+    if (live.status !== 'approved') return false;
+    const assigned = live.assigned_channels || [];
+    if (assigned.length > 0 && !assigned.includes(channelId)) return false;
+    return true;
+  });
 
   const statusEl = document.getElementById(`ax-live-status-${channelId}`);
   const titleEl  = document.getElementById(`ax-live-title-${channelId}`);
@@ -3244,13 +3256,20 @@ function _renderMiniLib(search = '') {
     container.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px;">No media in library yet.</div>';
     return;
   }
-  // Only approved media can enter the schedule
-  const approved = items.filter(m => m.status === 'approved');
-  if (!approved.length) {
-    container.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:8px;">${items.length ? 'No approved media yet — approve uploads in the Pending Approval pane.' : 'No media in library yet.'}</div>`;
+  // Only approved media assigned to the current schedule channel can enter the schedule.
+  const eligible = items.filter(m => {
+    if (m.status !== 'approved') return false;
+    const assigned = m.assigned_channels || [];
+    // Items with no assignment are ineligible for any channel's queue.
+    if (assigned.length === 0) return false;
+    return assigned.includes(_schedChannelId);
+  });
+  if (!eligible.length) {
+    const chName = _channels().find(c => c.id === _schedChannelId)?.name || _schedChannelId;
+    container.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:8px;">No eligible media for ${_esc(chName)}.<br>Approve items and assign them to this channel first.</div>`;
     return;
   }
-  container.innerHTML = approved.map(m => `
+  container.innerHTML = eligible.map(m => `
     <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;"
          onclick="window._AXC.addToSched('${m.id}')">
       <span style="font-size:14px;">${_typeIcon(m.type)}</span>
@@ -3272,17 +3291,28 @@ function _renderSchedItems() {
     return;
   }
   const curId = st?.current_item?.id;
-  container.innerHTML = queue.map((item, idx) => `
-    <div class="ax-sched-item ${item.id === curId ? 'is-current' : ''}" data-idx="${idx}">
+  container.innerHTML = queue.map((item, idx) => {
+    // Check whether this queued item is still valid in the media library.
+    const live = _mediaLib.find(m => m.id === item.id);
+    const isDeleted  = !live;
+    const isInvalid  = live && live.status !== 'approved';
+    const assignedCh = live?.assigned_channels || [];
+    const wrongChannel = assignedCh.length > 0 && !assignedCh.includes(_schedChannelId);
+    const hasWarning = isDeleted || isInvalid || wrongChannel;
+    const warningLabel = isDeleted ? '⚠ DELETED' : isInvalid ? '⚠ NOT APPROVED' : wrongChannel ? '⚠ WRONG CHANNEL' : '';
+    return `
+    <div class="ax-sched-item ${item.id === curId ? 'is-current' : ''} ${hasWarning ? 'ax-sched-invalid' : ''}" data-idx="${idx}"
+         style="${hasWarning ? 'opacity:0.55;border-color:rgba(255,80,80,0.4);' : ''}">
       <span class="ax-sched-drag" title="Drag to reorder">⠿</span>
       <span class="ax-sched-pos">${item.id === curId ? '▶' : idx + 1}</span>
       <div class="ax-sched-item-info">
-        <div class="ax-sched-item-title">${_esc(item.title)}</div>
+        <div class="ax-sched-item-title">${_esc(item.title)}${hasWarning ? ` <span style="font-size:9px;font-weight:800;color:#ff5050;letter-spacing:1px;">${warningLabel}</span>` : ''}</div>
         <div class="ax-sched-item-meta">${_esc(item.artist || '')} · ${item.type || 'media'}</div>
       </div>
       <span class="ax-sched-item-dur">${_fmtTime(item.duration_sec)}</span>
       <button class="ax-sched-item-rm" title="Remove" onclick="window._AXC.removeFromSched(${idx})">✕</button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   _bindSchedDnD(container, queue);
 }
 
@@ -3799,6 +3829,13 @@ window._AXC = {
       _toast(`"${item.title}" is not approved yet. Go to Pending Approval to approve it first.`, 'err');
       return;
     }
+    // Channel assignment gate — item must be assigned to the target channel.
+    const assignedChannels = item.assigned_channels || [];
+    if (assignedChannels.length > 0 && !assignedChannels.includes(_schedChannelId)) {
+      const chName = _channels().find(c => c.id === _schedChannelId)?.name || _schedChannelId;
+      _toast(`"${item.title}" is not assigned to ${chName}. Edit channel assignment in Approval first.`, 'err');
+      return;
+    }
     const st    = _channelStates[_schedChannelId];
     const queue = [...(st?.queue || [])];
     if (queue.find(q => q.id === mediaId)) { _toast('Already in schedule.', 'err'); return; }
@@ -3814,6 +3851,13 @@ window._AXC = {
     const isApproved = item.status === 'approved' || item.status === 'ready';
     if (!isApproved) {
       _toast(`"${item.title}" is not approved yet. Approve it in the Pending Approval pane first.`, 'err');
+      return;
+    }
+    // Channel assignment gate — item must be assigned to the target channel.
+    const assignedChannels = item.assigned_channels || [];
+    if (assignedChannels.length > 0 && !assignedChannels.includes(channelId)) {
+      const chName = _channels().find(c => c.id === channelId)?.name || channelId;
+      _toast(`"${item.title}" is not assigned to ${chName}. Edit channel assignment in Approval first.`, 'err');
       return;
     }
     const st    = _channelStates[channelId];
@@ -3858,6 +3902,52 @@ window._AXC = {
       }
       await deleteDoc(doc(db, 'network_media', mediaId));
       _toast('Deleted: ' + item.title);
+
+      // ── Remove the deleted item from every active channel queue / state ──
+      // Queues store snapshots of media items, not live references, so the
+      // deleted item persists in queue arrays until explicitly cleaned.
+      for (const ch of _channels()) {
+        const stRef  = doc(db, 'network_state', ch.id);
+        const stSnap = await getDoc(stRef);
+        if (!stSnap.exists()) continue;
+        const st = stSnap.data();
+        let dirty = false;
+        const updates = {};
+
+        // Clean main queue
+        const queue = st.queue || [];
+        const cleanQueue = queue.filter(q => q.id !== mediaId);
+        if (cleanQueue.length !== queue.length) {
+          updates.queue = cleanQueue;
+          dirty = true;
+        }
+
+        // Clean commercial queue
+        const commQueue = st.commercial_queue || [];
+        const cleanCommQueue = commQueue.filter(q => q.id !== mediaId);
+        if (cleanCommQueue.length !== commQueue.length) {
+          updates.commercial_queue = cleanCommQueue;
+          dirty = true;
+        }
+
+        // Clear current_item if it's the deleted item
+        // (leave it playing safely until the engine advances — the next advance
+        //  will naturally move to an eligible item since the doc is gone).
+        // We do NOT forcibly stop playback per spec: "If currently playing,
+        // do NOT crash the channel. Finish/handle safely, then advance."
+
+        // Clear _post_commercial_item if it's the deleted item
+        if (st._post_commercial_item?.id === mediaId) {
+          updates._post_commercial_item = null;
+          dirty = true;
+        }
+
+        if (dirty) {
+          updates.updated_at = serverTimestamp();
+          await setDoc(stRef, updates, { merge: true });
+          console.log(`[AURENIX] Cleaned deleted media "${mediaId}" from channel ${ch.id} queue.`);
+        }
+      }
     } catch (e) {
       _toast('Delete failed: ' + e.message, 'err');
     }

@@ -272,16 +272,36 @@ export async function channelAdvance(channelId, currentItemId) {
 ═══════════════════════════════════════ */
 async function _queueAdvance(channelId, st, currentItemId) {
   const stateRef = doc(db, 'network_state', channelId);
-  const queue  = st?.queue || [];
+  const engine   = _engines[channelId];
+
+  // Filter queue: only keep items that are still approved, have a URL,
+  // and are explicitly assigned to this channel.
+  const rawQueue = st?.queue || [];
+  const queue = rawQueue.filter(qItem => {
+    if (!qItem?.id) return false;
+    const live = engine?.mediaLib?.find(m => m.id === qItem.id);
+    if (!live) return false;  // deleted from media library
+    if (live.status !== 'approved') return false;
+    if (!live.url) return false;
+    return _isAssignedToChannel(live, channelId);
+  });
+
+  // If items were removed, persist the cleaned queue immediately.
+  if (queue.length !== rawQueue.length) {
+    const removed = rawQueue.length - queue.length;
+    console.warn(`[AURENIX CH ENGINE ${channelId}] queue cleanup: removed ${removed} ineligible item(s)`);
+    await setDoc(stateRef, { queue, updated_at: serverTimestamp() }, { merge: true });
+  }
+
   const curIdx = queue.findIndex(q => q.id === (st?.current_item?.id));
   let nextIdx = curIdx + 1;
 
   if (nextIdx >= queue.length) {
     const loop = st?.loop ?? true;
-    if (loop) {
+    if (loop && queue.length > 0) {
       nextIdx = 0;
     } else {
-      await setDoc(stateRef, { ...st, current_item: null, started_at: serverTimestamp() }, { merge: true });
+      await setDoc(stateRef, { ...st, queue, current_item: null, started_at: serverTimestamp() }, { merge: true });
       return;
     }
   }
@@ -290,7 +310,6 @@ async function _queueAdvance(channelId, st, currentItemId) {
   if (!nextItem) { return; }
 
   // Check commercials for queue-based channels
-  const engine = _engines[channelId];
   if (engine?.config?.commercial_enabled) {
     const shouldBreak = _shouldRunCommercialBreak(engine);
     if (shouldBreak) {
@@ -339,7 +358,8 @@ function _pickCommercials(engine) {
   const pool = engine.mediaLib.filter(m =>
     m.status === 'approved' &&
     COMMERCIAL_TYPES.includes(m.type) &&
-    m.url
+    m.url &&
+    _isAssignedToChannel(m, engine.channelId)
   );
   if (!pool.length) return [];
 
@@ -421,11 +441,23 @@ async function _updateProgramHistory(channelId, engine, programId) {
   }, { merge: true });
 }
 
+/**
+ * Check whether a media item is assigned to a specific channel.
+ * Non-ALTV: item MUST have assigned_channels containing channelId.
+ * Items with no assignment are not eligible for any channel's pool.
+ */
+function _isAssignedToChannel(m, channelId) {
+  const ch = m.assigned_channels;
+  if (!ch || ch.length === 0) return false;
+  return ch.includes(channelId);
+}
+
 function _pickProgram(engine, justPlayedId) {
   const pool = engine.mediaLib.filter(m =>
     m.status === 'approved' &&
     PROGRAM_TYPES.includes(m.type) &&
-    m.url
+    m.url &&
+    _isAssignedToChannel(m, engine.channelId)
   );
   if (!pool.length) return null;
 

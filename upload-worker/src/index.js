@@ -494,7 +494,7 @@ export default {
       return json({
         ok:      !err,
         worker:  'aurenix-upload',
-        version: '2025-09-06-v12-all-channels-worker-authoritative',
+        version: '2025-09-06-v13-strict-channel-eligibility',
         SUPABASE_URL:        env.SUPABASE_URL         ? '✓ set' : '✗ MISSING',
         SUPABASE_SERVICE_KEY:env.SUPABASE_SERVICE_KEY ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID  ? '✓ set' : '✗ MISSING',
@@ -1383,18 +1383,38 @@ function randInt(min, max) {
 /**
  * Returns true when a media item is eligible for the given channelId.
  *
- * Assignment rules (in priority order):
+ * Assignment rules:
  *  1. ALTV: must have live_tv_assigned !== false (existing behaviour, unchanged).
- *  2. Non-ALTV: if the item has an assigned_channels array, it must include
- *     channelId.  If the array is empty/absent, the item is considered
- *     globally available (backwards-compat with pre-assignment library items).
+ *  2. Non-ALTV: the item MUST have assigned_channels that explicitly includes
+ *     channelId.  An empty or absent assigned_channels means the item has NOT
+ *     been assigned to any channel and is therefore ineligible for broadcast.
+ *     This prevents music, radio, or unassigned content from leaking into
+ *     FUNNY, VIDEO, MUSIC or any other specific channel.
  */
 function _isAssignedToChannel(m, channelId, isAltv) {
   if (isAltv) return m.live_tv_assigned !== false;
   const ch = m.assigned_channels;
-  // No assignment recorded → globally available to all non-ALTV channels
-  if (!ch || ch.length === 0) return true;
+  // No assignment recorded → NOT eligible for any channel's random/shuffle pool.
+  // Items must be explicitly assigned by the Founder via the approval workflow.
+  if (!ch || ch.length === 0) return false;
   return ch.includes(channelId);
+}
+
+/**
+ * Returns true when a media item is still valid for playback on a channel.
+ * Used to validate queue items before they are played (catches items that were
+ * deleted, rejected, or re-assigned after being queued).
+ *
+ * @param {Object} m          - media item from Firestore network_media
+ * @param {string} channelId  - channel being validated
+ * @param {boolean} isAltv    - true when channelId === LIVE_TV_CHANNEL_ID
+ */
+function isBroadcastEligible(m, channelId, isAltv) {
+  if (!m) return false;
+  if (!m.id) return false;
+  if (m.status !== 'approved') return false;
+  if (!m.url) return false;
+  return _isAssignedToChannel(m, channelId, isAltv);
 }
 
 /** Pick next program from media library (random, avoiding recent history). */
@@ -1526,37 +1546,73 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
   /* ── 2. Drain commercial queue if present ────────────────────────────── */
   const commQueue = st.commercial_queue || [];
   if (commQueue.length > 0) {
-    const [nextComm, ...remaining] = commQueue;
+    // Skip any commercial queue items whose backing document has been deleted.
+    // We do a lightweight spot-check: try to fetch the next commercial's doc.
+    let nextComm = null;
+    let remaining = [];
+    for (let i = 0; i < commQueue.length; i++) {
+      const candidate = commQueue[i];
+      if (!candidate?.id) continue;
+      const liveDoc = await fsGet(projectId, writeToken, 'network_media', candidate.id);
+      if (liveDoc && liveDoc.status === 'approved' && liveDoc.url) {
+        nextComm  = candidate;
+        remaining = commQueue.slice(i + 1);
+        break;
+      }
+      console.log(`[aurenix-advance] channel=${channelId} — skipping deleted/invalid commercial_queue item: ${candidate.id}`);
+    }
+    if (nextComm) {
+      await fsPatch(projectId, writeToken, {
+        current_item:     nextComm,
+        started_at:       { __serverTimestamp: true },
+        is_commercial:    true,
+        commercial_queue: remaining,
+        needs_next:       false,
+        last_item_id:     nextComm.id || '',
+        updated_at:       { __serverTimestamp: true },
+      }, 'network_state', channelId);
+      console.log(`[aurenix-advance] channel=${channelId} → drained_commercial_queue → ${nextComm.id}`);
+      return { advanced: true, reason: 'drained_commercial_queue' };
+    }
+    // All commercial queue items were invalid — clear the queue and fall through.
+    console.log(`[aurenix-advance] channel=${channelId} — commercial_queue fully invalid, clearing`);
     await fsPatch(projectId, writeToken, {
-      current_item:     nextComm,
-      started_at:       { __serverTimestamp: true },
-      is_commercial:    true,
-      commercial_queue: remaining,
-      needs_next:       false,
-      last_item_id:     nextComm.id || '',
+      commercial_queue: [],
+      is_commercial:    false,
       updated_at:       { __serverTimestamp: true },
     }, 'network_state', channelId);
-    console.log(`[aurenix-advance] channel=${channelId} → drained_commercial_queue → ${nextComm.id}`);
-    return { advanced: true, reason: 'drained_commercial_queue' };
   }
 
   /* ── 2b. If a post-commercial item was stored, play it next ──────────── */
   //  When the commercial queue is empty and there's a _post_commercial_item,
   //  that stored item should be played next (it was queued up before the break).
+  //  Validate it first — it may have been deleted since it was stored.
   const postCommItem = st._post_commercial_item || null;
   if (postCommItem && st.is_commercial) {
+    const postLive = postCommItem.id
+      ? await fsGet(projectId, writeToken, 'network_media', postCommItem.id)
+      : null;
+    if (postLive && postLive.status === 'approved' && postLive.url) {
+      await fsPatch(projectId, writeToken, {
+        current_item:          postCommItem,
+        started_at:            { __serverTimestamp: true },
+        is_commercial:         false,
+        commercial_queue:      [],
+        _post_commercial_item: null,
+        needs_next:            false,
+        last_item_id:          postCommItem.id || '',
+        updated_at:            { __serverTimestamp: true },
+      }, 'network_state', channelId);
+      console.log(`[aurenix-advance] channel=${channelId} → post_commercial_item → ${postCommItem.id}`);
+      return { advanced: true, reason: 'post_commercial_item' };
+    }
+    // post_commercial_item was deleted — clear it and fall through to pick a fresh program.
+    console.log(`[aurenix-advance] channel=${channelId} — post_commercial_item deleted/invalid, clearing`);
     await fsPatch(projectId, writeToken, {
-      current_item:          postCommItem,
-      started_at:            { __serverTimestamp: true },
-      is_commercial:         false,
-      commercial_queue:      [],
       _post_commercial_item: null,
-      needs_next:            false,
-      last_item_id:          postCommItem.id || '',
+      is_commercial:         false,
       updated_at:            { __serverTimestamp: true },
     }, 'network_state', channelId);
-    console.log(`[aurenix-advance] channel=${channelId} → post_commercial_item → ${postCommItem.id}`);
-    return { advanced: true, reason: 'post_commercial_item' };
   }
 
   /* ── 3. Determine programming mode and fetch config ─────────────────── */
@@ -1602,13 +1658,36 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
 
   /* ── 4. Queue-based advance (ordered / shuffle) ───────────────────── */
   if (!isAltv && (mode === 'ordered' || mode === 'shuffle')) {
-    const queue  = st.queue || [];
-    const curIdx = queue.findIndex(q => q.id === currentItemId);
+    // Fetch the current media library so we can validate queue items.
+    // Items may have been deleted or re-assigned since they were queued.
+    const mediaLibForQueue = await fetchApprovedMedia(projectId, writeToken);
+    const mediaLibIndex = new Map(mediaLibForQueue.map(m => [m.id, m]));
+
+    const rawQueue = st.queue || [];
+
+    // Filter the stored queue: remove any items that are no longer eligible
+    // (deleted from Firestore, rejected, or no longer assigned to this channel).
+    const eligibleQueue = rawQueue.filter(qItem => {
+      const live = mediaLibIndex.get(qItem.id);
+      return isBroadcastEligible(live, channelId, false);
+    });
+
+    // If the cleaned queue differs from the stored queue, persist the cleanup.
+    if (eligibleQueue.length !== rawQueue.length) {
+      const skipped = rawQueue.length - eligibleQueue.length;
+      console.log(`[aurenix-advance] channel=${channelId} — queue cleanup: removed ${skipped} ineligible item(s)`);
+      await fsPatch(projectId, writeToken, {
+        queue:      eligibleQueue,
+        updated_at: { __serverTimestamp: true },
+      }, 'network_state', channelId);
+    }
+
+    const curIdx = eligibleQueue.findIndex(q => q.id === currentItemId);
     let nextIdx  = curIdx + 1;
 
-    if (nextIdx >= queue.length) {
+    if (nextIdx >= eligibleQueue.length) {
       const loop = st.loop ?? true;
-      if (loop) {
+      if (loop && eligibleQueue.length > 0) {
         nextIdx = 0;
       } else {
         await fsPatch(projectId, writeToken, {
@@ -1616,11 +1695,11 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
           started_at:   { __serverTimestamp: true },
           updated_at:   { __serverTimestamp: true },
         }, 'network_state', channelId);
-        return { advanced: true, reason: 'queue_exhausted' };
+        return { advanced: true, reason: eligibleQueue.length === 0 ? 'queue_empty_after_cleanup' : 'queue_exhausted' };
       }
     }
 
-    const nextItem = queue[nextIdx];
+    const nextItem = eligibleQueue[nextIdx];
     if (!nextItem) return { advanced: false, reason: 'empty_queue' };
 
     // Check commercial break
@@ -1629,11 +1708,8 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
       const since  = cfg.programs_since_break || 0;
       const target = cfg.next_break_at || freq.minPrograms;
       if (since >= target) {
-        // We need the media library to pick commercials.
-        // Fetch from network_media (approved items).
-        const mediaLib = await fetchApprovedMedia(projectId, writeToken);
         const commercials = pickCommercials(
-          mediaLib, false, cfg.commercial_freq,
+          mediaLibForQueue, false, cfg.commercial_freq,
           cfg.max_commercials_per_break || 2, cfg.commercial_history, channelId
         );
         if (commercials.length > 0) {

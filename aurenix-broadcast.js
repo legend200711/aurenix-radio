@@ -785,9 +785,10 @@ function _renderEPG(channelId) {
   const dur       = cur.duration_sec || 0;
   const remain    = dur > 0 ? Math.max(0, dur - elapsed) : null;
 
-  // Build upcoming queue for EPG
-  const curIdx   = queue.findIndex(q => q.id === cur.id);
-  const upcoming = curIdx >= 0 ? queue.slice(curIdx + 1, curIdx + 6) : queue.slice(0, 5);
+  // Build upcoming queue for EPG — filter out deleted/invalid items (no URL)
+  const eligibleQueue = queue.filter(q => q?.id && q?.url);
+  const curIdx   = eligibleQueue.findIndex(q => q.id === cur.id);
+  const upcoming = curIdx >= 0 ? eligibleQueue.slice(curIdx + 1, curIdx + 6) : eligibleQueue.slice(0, 5);
 
   const typeIcons = { music:'🎵', audio:'🎵', video:'🎬', funny_clip:'😂', short_film:'🎥',
     podcast:'🎙', music_video:'🎞', commercial:'📢', promo:'📢', station_id:'📻',
@@ -1083,13 +1084,15 @@ function _onActiveChannelUpdate(st) {
   _setNowPlaying(item.title, item.artist || '', item.type || '');
   _updateLiveTVOverlay(item, isComm);
 
-  // Up Next
+  // Up Next — only show items that have a usable URL (deleted items in stale
+  // queue snapshots will still be in the array but have empty/missing URLs).
   if (_activeChannel?.id === LIVE_TV_CHANNEL_ID) {
     const commQ = st.commercial_queue || [];
-    if (isComm && commQ.length > 0) { _renderUpNext([commQ[0]]); }
-    else { _renderUpNext([]); }
+    if (isComm && commQ.length > 0) {
+      _renderUpNext(commQ.filter(q => q?.id && q?.url).slice(0, 1));
+    } else { _renderUpNext([]); }
   } else {
-    const queue  = st.queue || [];
+    const queue  = (st.queue || []).filter(q => q?.id && q?.url);
     const curIdx = queue.findIndex(q => q.id === item.id);
     _renderUpNext(queue.slice(curIdx + 1, curIdx + 6));
   }
