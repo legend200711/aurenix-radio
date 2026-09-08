@@ -108,13 +108,16 @@ export async function startLiveTvEngine(mediaLib) {
 
   _subscribeStateForAdvance();
 
-  // Kick off immediately if nothing playing
+  // Kick off immediately ONLY if nothing is currently playing.
+  // Do NOT overwrite an already-playing item just because the engine was restarted.
   const stateRef  = doc(db, 'network_state', LIVE_TV_CHANNEL_ID);
   const stateSnap = await getDoc(stateRef);
   const st = stateSnap.exists() ? stateSnap.data() : null;
-  if (!st?.current_item || _config.running) {
+  if (!st?.current_item) {
     await _scheduleNextProgram(null);
   }
+  // If an item IS playing, the Worker (or this engine's state subscription) will
+  // handle advancement when it ends. No need to interfere with live state.
 }
 
 export async function stopLiveTvEngine() {

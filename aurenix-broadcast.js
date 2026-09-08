@@ -22,8 +22,9 @@ import {
   query, orderBy, where, upsertUserProfile, addDoc,
 } from './firebase-client.js';
 
-import { liveTvChannelAdvance, LIVE_TV_CHANNEL_ID } from './aurenix-live-tv-engine.js';
-// channelAdvance import removed — non-ALTV advancement goes through the Worker
+import { LIVE_TV_CHANNEL_ID } from './aurenix-live-tv-engine.js';
+// All channel advancement (including ALTV) goes through the Cloudflare Worker.
+// liveTvChannelAdvance is no longer called from the broadcast player.
 import { supabase } from './supabase-client.js';
 
 /* ════════════════════════════════════
@@ -422,6 +423,12 @@ function _updateNavAuth() {
     document.getElementById('ax-ctrl-btn')?.addEventListener('click', _openControl);
     document.getElementById('ax-submit-btn')?.addEventListener('click', _openSubmitModal);
     document.getElementById('ax-signout-btn')?.addEventListener('click', () => {
+      if (_isFounder) {
+        console.log(
+          `[AURENIX GLOBAL ENGINE] FOUNDER ENGINE STOP (Founder signed out)\n` +
+          `  NOTE: Sign-out stops this browser session only. Channels continue independently via Worker.`
+        );
+      }
       _gateOpen = false; _stopMedia(); _networkReady = false; _channels = [];
       if (_channelsUnsub) { _channelsUnsub(); _channelsUnsub = null; }
       Object.values(_channelUnsubs).forEach(u => u && u());
@@ -1007,6 +1014,13 @@ function _setActiveChannel(channelId) {
   const ch = _channels.find(c => c.id === channelId);
   if (!ch) return;
   _activeChannel = ch;
+  if (_isFounder) {
+    console.log(
+      `[AURENIX GLOBAL ENGINE] FOUNDER CHANNEL SELECTED\n` +
+      `  channel=${channelId}  founder=${_isFounder}\n` +
+      `  NOTE: Selecting a channel in the viewer UI does NOT stop other channels.`
+    );
+  }
 
   // Update channel badge
   const badgeNum  = document.getElementById('ax-badge-num');
@@ -1050,14 +1064,19 @@ function _onActiveChannelUpdate(st) {
 
   // Log every Firestore snapshot that delivers a new item.
   if (_currentMediaId !== item.id) {
+    const raw = st.started_at;
+    const startMs = raw && typeof raw.toMillis === 'function' ? raw.toMillis()
+                  : typeof raw === 'number' ? (raw < 1e10 ? raw * 1000 : raw)
+                  : raw instanceof Date ? raw.getTime() : Date.now();
     console.log(
-      `[AURENIX AUTO ADVANCE] firestoreStateChanged: true\n` +
-      `  channel:        ${_activeChannel?.id}\n` +
-      `  prevItem:       ${_currentMediaId}\n` +
-      `  newItem:        ${item.id}  "${item.title}"\n` +
-      `  duration:       ${item.duration_sec}s\n` +
-      `  is_commercial:  ${isComm}\n` +
-      `  gateOpen:       ${_gateOpen}`
+      `[AURENIX GLOBAL ENGINE] AUTHORITATIVE STATE CHANGE\n` +
+      `  channel=${_activeChannel?.id}\n` +
+      `  currentItem=${item.id}  "${item.title}"\n` +
+      `  startedAt=${startMs}\n` +
+      `  duration=${item.duration_sec}s\n` +
+      `  is_commercial=${isComm}\n` +
+      `  founder=${_isFounder}  viewer=${!_isFounder}\n` +
+      `  gateOpen=${_gateOpen}`
     );
   }
 
@@ -1129,13 +1148,14 @@ function _playState(st) {
     //    the advance is still in-flight or has silently failed.
     if (_mediaEl.ended) {
       console.log(
-        `[AURENIX AUTO ADVANCE] _playState: media ended but Firestore still on same item — re-requesting advance\n` +
-        `  channelId=${_activeChannel?.id}  itemId=${item.id}  elapsed=${elapsed.toFixed(1)}s  dur=${dur}s`
+        `[AURENIX GLOBAL ENGINE] _playState: media ended but Firestore still on same item — re-requesting advance\n` +
+        `  channel=${_activeChannel?.id}  currentItem=${item.id}  elapsed=${elapsed.toFixed(1)}s  duration=${dur}s  viewer=${!_isFounder}  founder=${_isFounder}  mediaEnded=true  advanceRequested=true`
       );
       const _readvChId = _activeChannel?.id;
-      if (_readvChId === LIVE_TV_CHANNEL_ID && _isFounder) {
-        if (!_advancing) _advance(st);
-      } else if (_readvChId && item.id) {
+      // ALL roles use the authoritative Worker for ALL channels (including ALTV).
+      // The _advance(st)/liveTvChannelAdvance path is removed — the Worker handles
+      // ALTV just like every other channel, independently of the Founder browser.
+      if (_readvChId && item.id) {
         _viewerRequestAdvance(_readvChId, item.id);
       }
       _updatePlayBtn();
@@ -1146,7 +1166,7 @@ function _playState(st) {
     // Tolerance: only seek if more than 8 seconds out of sync.
     // Normal HTML5 playback advances on its own; we don't need to force it.
     if (drift > 8) {
-      console.log(`[AURENIX] Drift correction: ${drift.toFixed(1)}s — seeking to ${elapsed.toFixed(1)}s`);
+      console.log(`[AURENIX GLOBAL ENGINE] drift correction: ${drift.toFixed(1)}s — seeking to ${elapsed.toFixed(1)}s  channel=${_activeChannel?.id}  currentItem=${item.id}`);
       _mediaEl.currentTime = Math.max(0, elapsed);
     }
     if (_mediaEl.paused) _mediaEl.play().catch(() => {});
@@ -1158,30 +1178,31 @@ function _playState(st) {
   //    This prevents a rapid burst of Firestore snapshots from stacking
   //    up multiple concurrent media load operations.
   if (_transitioning) {
-    console.log(`[AURENIX AUTO ADVANCE] _playState: transition already in progress — skipping snapshot for ${item.id}`);
+    console.log(`[AURENIX GLOBAL ENGINE] _playState: transition already in progress — skipping snapshot for ${item.id}`);
     return;
   }
 
   // ── LOG: new media item arriving from Firestore ──────────────────────────
   console.log(
-    `[AURENIX AUTO ADVANCE] Firestore state changed → new item\n` +
-    `  channelId:      ${_activeChannel?.id}\n` +
-    `  currentMediaId: ${_currentMediaId}  →  ${item.id}\n` +
-    `  title:          ${item.title}\n` +
-    `  duration_sec:   ${dur}\n` +
-    `  started_at:     ${raw instanceof Object && typeof raw.toMillis === 'function' ? raw.toMillis() : raw}  (startedAtMs=${startedAtMs})\n` +
-    `  elapsed:        ${elapsed.toFixed(2)}s\n` +
-    `  userRole:       ${_isFounder ? 'Founder' : 'Viewer'}`
+    `[AURENIX GLOBAL ENGINE] Firestore state → new item\n` +
+    `  channel=${_activeChannel?.id}\n` +
+    `  prevItem=${_currentMediaId}  →  newCurrentItem=${item.id}\n` +
+    `  title=${item.title}\n` +
+    `  duration=${dur}s\n` +
+    `  startedAt=${raw instanceof Object && typeof raw.toMillis === 'function' ? raw.toMillis() : raw}  (startedAtMs=${startedAtMs})\n` +
+    `  elapsed=${elapsed.toFixed(2)}s\n` +
+    `  founder=${_isFounder}  viewer=${!_isFounder}`
   );
 
   // Already past end before the media element is created (e.g. on late join).
-  // All roles request authoritative advance from the Worker (except ALTV+Founder).
+  // ALL roles (Founder and Viewer) use _viewerRequestAdvance for ALL channels.
   if (dur > 0 && elapsed >= dur - 0.5) {
-    console.log(`[AURENIX AUTO ADVANCE] Item already past end on join — requesting advance immediately`);
+    console.log(
+      `[AURENIX GLOBAL ENGINE] late join — item already past end — requesting advance immediately\n` +
+      `  channel=${_activeChannel?.id}  currentItem=${item.id}  elapsed=${elapsed.toFixed(2)}s  duration=${dur}s  startedAt=${startedAtMs}  viewer=${!_isFounder}  founder=${_isFounder}`
+    );
     const _joinChId = _activeChannel?.id;
-    if (_joinChId === LIVE_TV_CHANNEL_ID && _isFounder) {
-      _advance(st);
-    } else if (_joinChId && item.id) {
+    if (_joinChId && item.id) {
       _viewerRequestAdvance(_joinChId, item.id);
     }
     return;
@@ -1224,7 +1245,7 @@ function _playState(st) {
     const pipBtn = document.getElementById('ax-pip-btn');
     if (pipBtn) pipBtn.style.display = 'none';
     _transitioning = false;
-    console.log(`[AURENIX AUTO ADVANCE] loading next media (image) — channelId=${_activeChannel?.id} itemId=${item.id}`);
+    console.log(`[AURENIX GLOBAL ENGINE] loading next media (image) — channel=${_activeChannel?.id}  currentItem=${item.id}`);
     _updatePlayBtn();
     return;
   }
@@ -1248,35 +1269,35 @@ function _playState(st) {
     _mediaEl.currentTime = Math.max(0, elapsed);
 
     // ALL roles request authoritative advance from the Cloudflare Worker.
-    // LIVE TV (ALTV) with Founder still uses the local live-tv engine.
-    // Every other channel routes through the Worker so channels continue
-    // independently of who (or no one) has Founder Studio open.
+    // This includes ALTV (Live TV). The Worker handles all channels independently
+    // of the Founder browser — channels continue 24/7 even when no Founder tab is open.
     const capturedChannelId = _activeChannel?.id;
     const capturedItemId    = item.id;
-    const capturedIsAltv    = capturedChannelId === LIVE_TV_CHANNEL_ID;
 
     _mediaEl.onended = () => {
       console.log(
-        `[AURENIX AUTO ADVANCE] MEDIA ENDED\n` +
-        `  channelId=${capturedChannelId}\n` +
-        `  itemId=${capturedItemId}\n` +
+        `[AURENIX GLOBAL ENGINE] MEDIA ENDED\n` +
+        `  channel=${capturedChannelId}\n` +
+        `  currentItem=${capturedItemId}\n` +
         `  title=${item.title}\n` +
         `  currentTime=${_mediaEl?.currentTime?.toFixed(2)}s\n` +
         `  duration=${dur}s\n` +
-        `  role=${_isFounder ? 'Founder' : 'Viewer'}`
+        `  mediaEnded=true\n` +
+        `  founder=${_isFounder}  viewer=${!_isFounder}\n` +
+        `  advanceRequested=true`
       );
       _updatePlayBtn();
-      if (capturedIsAltv && _isFounder) {
-        _advance(st);
-      } else if (capturedChannelId && capturedItemId) {
+      // ALL channels — ALL roles — use the authoritative Worker.
+      if (capturedChannelId && capturedItemId) {
         _viewerRequestAdvance(capturedChannelId, capturedItemId);
       }
     };
     _mediaEl.onerror = () => {
-      console.warn(`[AURENIX AUTO ADVANCE] Media load error on item ${capturedItemId} — requesting advance`);
-      if (capturedIsAltv && _isFounder) {
-        setTimeout(() => _advance(st), 1500);
-      } else if (capturedChannelId && capturedItemId) {
+      console.warn(
+        `[AURENIX GLOBAL ENGINE] Media load error\n` +
+        `  channel=${capturedChannelId}  currentItem=${capturedItemId}  advanceRequested=true (1.5s delay)`
+      );
+      if (capturedChannelId && capturedItemId) {
         setTimeout(() => _viewerRequestAdvance(capturedChannelId, capturedItemId), 1500);
       }
     };
@@ -1296,7 +1317,7 @@ function _playState(st) {
   }
   // Release transition lock — the new source is now fully loaded and playing.
   _transitioning = false;
-  console.log(`[AURENIX AUTO ADVANCE] loading next media — channelId=${_activeChannel?.id} itemId=${item.id} seekTo=${elapsed.toFixed(2)}s`);
+  console.log(`[AURENIX GLOBAL ENGINE] loading next media — channel=${_activeChannel?.id}  currentItem=${item.id}  seekTo=${elapsed.toFixed(2)}s  founder=${_isFounder}  viewer=${!_isFounder}`);
   _updatePlayBtn();
 }
 
@@ -1324,21 +1345,21 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
   const elapsed = (Date.now() - startedAtMs) / 1000;
 
   console.log(
-    `[AURENIX AUTO ADVANCE]\n` +
-    `  channel:        ${channelId}\n` +
-    `  currentItem:    ${currentItemId}\n` +
-    `  duration:       ${dur}s\n` +
-    `  startedAt:      ${startedAtMs}\n` +
-    `  elapsed:        ${elapsed.toFixed(1)}s\n` +
-    `  mediaEnded:     ${!!_mediaEl?.ended}\n` +
-    `  advanceRequested: true\n` +
-    `  userRole:       Viewer`
+    `[AURENIX GLOBAL ENGINE] viewerRequestAdvance\n` +
+    `  channel=${channelId}\n` +
+    `  currentItem=${currentItemId}\n` +
+    `  duration=${dur}s\n` +
+    `  startedAt=${startedAtMs}\n` +
+    `  elapsed=${elapsed.toFixed(1)}s\n` +
+    `  mediaEnded=${!!_mediaEl?.ended}\n` +
+    `  founder=${_isFounder}  viewer=${!_isFounder}\n` +
+    `  advanceRequested=true`
   );
 
   try {
     const user = auth.currentUser;
     if (!user) {
-      console.warn('[AURENIX AUTO ADVANCE] Viewer advance: not authenticated — will retry when auth is available');
+      console.warn('[AURENIX GLOBAL ENGINE] advance: not authenticated — will retry when auth is available');
       _viewerAdvancingId = null;
       return;
     }
@@ -1352,16 +1373,19 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
       body: JSON.stringify({ channelId, currentItemId }),
     });
     const data = await res.json().catch(() => ({}));
-    console.log(`[AURENIX AUTO ADVANCE] advanceResponse:`, JSON.stringify(data));
+    console.log(
+      `[AURENIX GLOBAL ENGINE] advanceResponse  channel=${channelId}  currentItem=${currentItemId}\n` +
+      `  advanced=${data.advanced}  reason=${data.reason || data.error || '—'}`
+    );
 
     if (data.advanced) {
-      console.log(`[AURENIX AUTO ADVANCE] firestoreStateChanged: pending — waiting for onSnapshot`);
+      console.log(`[AURENIX GLOBAL ENGINE] advanceAccepted=true  channel=${channelId}  newCurrentItem=pending_snapshot`);
       // Firestore onSnapshot will deliver the new current_item automatically.
       // Keep _viewerAdvancingId locked until the snapshot arrives
       // (15s safety valve) so we don't double-request.
       setTimeout(() => {
         if (_viewerAdvancingId === currentItemId) {
-          console.warn('[AURENIX AUTO ADVANCE] Firestore snapshot did not arrive within 15s after advance — clearing lock');
+          console.warn('[AURENIX GLOBAL ENGINE] Firestore snapshot did not arrive within 15s after advance — clearing lock');
           _viewerAdvancingId = null;
         }
       }, 15_000);
@@ -1369,13 +1393,13 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
       const reason = data.reason || data.error || 'unknown';
       if (reason.startsWith('already_advanced')) {
         // Another viewer won the race — Firestore snapshot will arrive with new state.
-        console.log(`[AURENIX AUTO ADVANCE] advance: already_advanced by another viewer — awaiting onSnapshot`);
+        console.log(`[AURENIX GLOBAL ENGINE] advanceRejected=already_advanced  channel=${channelId}  currentItem=${currentItemId} — awaiting onSnapshot`);
         setTimeout(() => {
           if (_viewerAdvancingId === currentItemId) _viewerAdvancingId = null;
         }, 5_000);
       } else if (reason.startsWith('too_early')) {
         // Server says not time yet — clear immediately so _tick retries next cycle.
-        console.log(`[AURENIX AUTO ADVANCE] advance: too_early — ${reason}`);
+        console.log(`[AURENIX GLOBAL ENGINE] advanceRejected=too_early  channel=${channelId}  currentItem=${currentItemId}  reason=${reason}`);
         _viewerAdvancingId = null;
       } else if (reason === 'service_account_not_configured') {
         // FIREBASE_SERVICE_ACCOUNT_KEY not set in Worker secrets.
@@ -1384,7 +1408,7 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
         if (now - _saKeyMissingLoggedAt > 60_000) {
           _saKeyMissingLoggedAt = now;
           console.error(
-            '[AURENIX AUTO ADVANCE] *** CONFIGURATION REQUIRED ***\n' +
+            '[AURENIX GLOBAL ENGINE] *** CONFIGURATION REQUIRED ***\n' +
             '  FIREBASE_SERVICE_ACCOUNT_KEY is not set in the Cloudflare Worker secrets.\n' +
             '  Without this key, regular viewers cannot advance the channel when the Founder browser is closed.\n' +
             '  Fix:\n' +
@@ -1399,18 +1423,18 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
           if (_viewerAdvancingId === currentItemId) _viewerAdvancingId = null;
         }, 30_000);
       } else if (reason === 'channel_not_running' || reason === 'channel_paused') {
-        console.log(`[AURENIX AUTO ADVANCE] advance: channel not running / paused — not retrying`);
+        console.log(`[AURENIX GLOBAL ENGINE] advanceRejected=${reason}  channel=${channelId}  currentItem=${currentItemId} — not retrying`);
         _viewerAdvancingId = null;
       } else {
         // Unknown / transient error — retry after 10s.
-        console.warn(`[AURENIX AUTO ADVANCE] advance: unexpected server reason "${reason}" — will retry in 10s`);
+        console.warn(`[AURENIX GLOBAL ENGINE] advanceRejected=unknown  channel=${channelId}  currentItem=${currentItemId}  reason="${reason}" — will retry in 10s`);
         setTimeout(() => {
           if (_viewerAdvancingId === currentItemId) _viewerAdvancingId = null;
         }, 10_000);
       }
     }
   } catch (e) {
-    console.warn('[AURENIX AUTO ADVANCE] Viewer advance request failed (network error):', e.message);
+    console.warn(`[AURENIX GLOBAL ENGINE] advance network error  channel=${channelId}  currentItem=${currentItemId}  err=${e.message} — will retry`);
     // Clear so tick retries on next cycle.
     _viewerAdvancingId = null;
   }
@@ -1522,25 +1546,19 @@ function _tick() {
     if (panelRemain) panelRemain.textContent = _fmtTime(Math.max(0, dur - elapsed)) + ' remaining';
 
     // ALL roles (Founder and Viewer) request server-authoritative advance via
-    // the Cloudflare Worker.  The Founder browser is NOT the broadcast engine —
-    // channels must continue independently of which page the Founder has open.
+    // the Cloudflare Worker for ALL channels including ALTV.
+    // The Founder browser is NOT the broadcast engine — channels must continue
+    // independently of which page (or no page) the Founder has open.
     if (elapsed >= dur - 0.5) {
       const channelId = _activeChannel?.id;
       if (channelId && st.current_item?.id) {
-        if (_isFounder && channelId === LIVE_TV_CHANNEL_ID) {
-          // LIVE TV retains its own local advance path (ALTV has its own engine).
-          if (!_advancing) _advance(st);
-        } else {
-          // Non-ALTV channels — advance through the Worker for both Founder and Viewer.
-          // This keeps channels alive regardless of who (or no one) has the page open.
-          if (_viewerAdvancingId !== st.current_item.id) {
-            console.log(
-              `[AURENIX AUTO ADVANCE] _tick: elapsed ${elapsed.toFixed(1)}s >= dur ${dur}s — requesting server advance\n` +
-              `  channelId=${channelId}  itemId=${st.current_item.id}  role=${_isFounder ? 'Founder' : 'Viewer'}  mediaEnded=${!!_mediaEl?.ended}  gateOpen=${_gateOpen}`
-            );
-          }
-          _viewerRequestAdvance(channelId, st.current_item.id);
+        if (_viewerAdvancingId !== st.current_item.id) {
+          console.log(
+            `[AURENIX GLOBAL ENGINE] _tick: elapsed ${elapsed.toFixed(1)}s >= dur ${dur}s — requesting server advance\n` +
+            `  channel=${channelId}  currentItem=${st.current_item.id}  startedAt=${(() => { const r = st.started_at; if (r && typeof r.toMillis === 'function') return r.toMillis(); if (typeof r === 'number') return r; return r; })()}  founder=${_isFounder}  viewer=${!_isFounder}  mediaEnded=${!!_mediaEl?.ended}  gateOpen=${_gateOpen}  advanceRequested=true`
+          );
         }
+        _viewerRequestAdvance(channelId, st.current_item.id);
       }
     }
   } else {
@@ -1558,20 +1576,16 @@ function _tick() {
 }
 
 /* ════════════════════════════════════
-   ADVANCE — LIVE TV (ALTV) ONLY
-   All other channels advance through the Cloudflare Worker
-   via _viewerRequestAdvance().  This function is only called
-   when _isFounder && channelId === LIVE_TV_CHANNEL_ID.
+   _advance — LEGACY / UNUSED
+   Previously used for ALTV Founder-browser advancement.
+   All channels now advance through _viewerRequestAdvance()
+   which calls the Cloudflare Worker. This function is kept
+   as a no-op stub so any remaining call sites fail gracefully.
 ════════════════════════════════════ */
-async function _advance(st) {
-  if (_advancing) return;
-  _advancing = true;
-  try {
-    await liveTvChannelAdvance(st?.current_item?.id || null);
-  } catch (e) {
-    console.warn('[AURENIX] ALTV Advance error', e);
-  }
-  _advancing = false;
+function _advance(_st) {
+  // No-op: the Worker now handles ALL channel advancement including ALTV.
+  // Channels continue independently of the Founder browser.
+  console.warn('[AURENIX GLOBAL ENGINE] _advance() called — this is a no-op. All channels use _viewerRequestAdvance via Worker.');
 }
 
 /* ════════════════════════════════════
@@ -1851,6 +1865,10 @@ function _openSubmitModal() {
 ════════════════════════════════════ */
 function _openControl() {
   if (!_isFounder || !_user) return;
+  console.log(
+    `[AURENIX GLOBAL ENGINE] FOUNDER ENGINE START (Founder Studio opened)\n` +
+    `  founder=${_isFounder}  NOTE: Opening Studio does NOT start or stop any channel. Channels run independently via Worker.`
+  );
   let ctrl = document.getElementById('ax-control');
   if (!ctrl) { ctrl = document.createElement('div'); ctrl.id = 'ax-control'; document.body.appendChild(ctrl); }
 

@@ -494,7 +494,7 @@ export default {
       return json({
         ok:      !err,
         worker:  'aurenix-upload',
-        version: '2025-09-06-v11-server-authoritative-channels',
+        version: '2025-09-06-v12-all-channels-worker-authoritative',
         SUPABASE_URL:        env.SUPABASE_URL         ? '✓ set' : '✗ MISSING',
         SUPABASE_SERVICE_KEY:env.SUPABASE_SERVICE_KEY ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID  ? '✓ set' : '✗ MISSING',
@@ -1562,9 +1562,39 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
   /* ── 3. Determine programming mode and fetch config ─────────────────── */
   const isAltv = channelId === LIVE_TV_CHANNEL_ID;
   const configCol = isAltv ? LIVE_TV_CONFIG_DOC : CHANNEL_CONFIG_COL;
-  const cfg = await fsGet(projectId, writeToken, configCol, channelId);
+  let cfg = await fsGet(projectId, writeToken, configCol, channelId);
 
-  if (!cfg) return { advanced: false, reason: 'no_engine_config' };
+  if (!cfg) {
+    if (isAltv) {
+      // ALTV config missing → auto-bootstrap so it doesn't permanently block.
+      // The Founder can still explicitly stop via the Studio "Stop" button.
+      console.log(`[aurenix-advance] channel=ALTV — config missing, auto-bootstrapping with running=true`);
+      cfg = {
+        running: true, paused: false, programming_mode: 'random',
+        commercial_freq: 'normal', commercial_enabled: false,
+        programs_since_break: 0, next_break_at: 3,
+        recent_history: [], commercial_history: [],
+        avoid_repeat_window: 10,
+      };
+      // Write it so next requests don't re-bootstrap.
+      await fsPatch(projectId, writeToken, { ...cfg }, configCol, channelId);
+    } else {
+      // Non-ALTV config missing → auto-bootstrap with running=true and random mode.
+      console.log(`[aurenix-advance] channel=${channelId} — config missing, auto-bootstrapping with running=true`);
+      cfg = {
+        running: true, paused: false, programming_mode: 'random',
+        commercial_freq: 'normal', commercial_enabled: false,
+        programs_since_break: 0, next_break_at: 3,
+        recent_history: [], commercial_history: [],
+        avoid_repeat_window: 5,
+      };
+      await fsPatch(projectId, writeToken, { ...cfg }, configCol, channelId);
+    }
+  }
+
+  // For ALTV: if config exists but running=false (Founder stopped it in Studio),
+  // honour the stop — do not override intentional stops.
+  // For non-ALTV: same behaviour.
   if (!cfg.running) return { advanced: false, reason: 'channel_not_running' };
   if (cfg.paused)   return { advanced: false, reason: 'channel_paused' };
 
