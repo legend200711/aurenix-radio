@@ -23,7 +23,8 @@ import { getFirestore, doc, getDoc, setDoc,
          collection, query, where, orderBy,
          limit, getDocs, onSnapshot, addDoc,
          updateDoc, deleteDoc, serverTimestamp, increment,
-         runTransaction, Timestamp }            from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
+         runTransaction, Timestamp,
+         initializeFirestore, memoryLocalCache } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 
 /* ══════════════════════════════════════════════════════════════
    FIREBASE CONFIGURATION
@@ -47,7 +48,16 @@ const firebaseConfig = {
 const _app  = initializeApp(firebaseConfig);
 
 export const auth = getAuth(_app);
-export const db   = getFirestore(_app);
+
+// Disable Firestore offline persistence for the channel-state listener.
+// The default IndexedDB persistence causes onSnapshot to deliver a stale
+// cached snapshot first, which made normal viewers appear to lag ~2 minutes
+// behind the live broadcast (the stale started_at caused wrong elapsed
+// calculations and triggered an advance-retry storm before fresh data arrived).
+// Live channel state must always come from the network, not a local cache.
+export const db = initializeFirestore(_app, {
+  localCache: memoryLocalCache(),
+});
 
 /* ══════════════════════════════════════════════════════════════
    RE-EXPORT FIRESTORE HELPERS

@@ -48,6 +48,9 @@ let _mediaType     = null;
 let _gateOpen      = false;
 let _tickTimer     = null;
 let _advancing     = false;
+// Tracks the media ID currently loaded in the player element.
+// Used to prevent reloading the same media on repeated Firestore snapshots.
+let _currentMediaId = null;
 
 /* ════════════════════════════════════
    INIT
@@ -1045,6 +1048,8 @@ function _onActiveChannelUpdate(st) {
     _renderUpNext(queue.slice(curIdx + 1, curIdx + 6));
   }
 
+  // Always drive playback through _playState. _playState itself guards
+  // against reloading the media element when the same item is already playing.
   if (_gateOpen) _playState(st);
   _startTick();
 }
@@ -1063,12 +1068,52 @@ function _playState(st) {
   if (!st?.current_item?.url) return;
 
   const item = st.current_item;
-  const startedAt = st.started_at?.toMillis?.() || Date.now();
-  const elapsed = (Date.now() - startedAt) / 1000;
+
+  // Normalize started_at: support Firestore Timestamp, plain millis number, or Date.
+  let startedAtMs;
+  const raw = st.started_at;
+  if (raw && typeof raw.toMillis === 'function') {
+    startedAtMs = raw.toMillis();
+  } else if (raw && typeof raw === 'number') {
+    // Guard against accidentally storing seconds instead of milliseconds.
+    // A Unix-seconds value will be < 1e10 (year 2286 in seconds is ~1e10).
+    startedAtMs = raw < 1e10 ? raw * 1000 : raw;
+  } else if (raw instanceof Date) {
+    startedAtMs = raw.getTime();
+  } else {
+    startedAtMs = Date.now();
+  }
+
+  const elapsed = Math.max(0, (Date.now() - startedAtMs) / 1000);
   const dur = item.duration_sec || 0;
 
-  // Already past end — advance immediately
-  if (dur > 0 && elapsed >= dur - 0.5) { _advance(st); return; }
+  // ── GUARD: If the same media item is already loaded and playing, do NOT
+  //    reload the element. Only update drift correction if needed.
+  //    This is the primary fix for the 5-second restart loop:
+  //    Firestore onSnapshot fires every time the Founder's engine updates
+  //    updated_at / config counters, which all route here via
+  //    _onActiveChannelUpdate → _playState. Without this guard every
+  //    snapshot was unconditionally restarting the video from scratch.
+  if (_currentMediaId === item.id && _mediaEl && !_mediaEl.error) {
+    // Same item is already in the player — just drift-correct if needed.
+    const drift = Math.abs(_mediaEl.currentTime - elapsed);
+    // Tolerance: only seek if more than 8 seconds out of sync.
+    // Normal HTML5 playback advances on its own; we don't need to force it.
+    if (drift > 8) {
+      console.log(`[AURENIX] Drift correction: ${drift.toFixed(1)}s — seeking to ${elapsed.toFixed(1)}s`);
+      _mediaEl.currentTime = Math.max(0, elapsed);
+    }
+    if (_mediaEl.paused) _mediaEl.play().catch(() => {});
+    _updatePlayBtn();
+    return;
+  }
+
+  // Already past end — only advance if Founder engine (isFounder).
+  // Normal viewers must NOT call _advance / write to Firestore.
+  if (dur > 0 && elapsed >= dur - 0.5) {
+    if (_isFounder) _advance(st);
+    return;
+  }
 
   const isImage = (
     item.type === 'thumbnail' ||
@@ -1088,6 +1133,7 @@ function _playState(st) {
 
   if (isImage) {
     _stopMedia();
+    _currentMediaId = item.id;
     _mediaEl   = null;
     _mediaType = 'image';
     if (thumbEl) {
@@ -1107,43 +1153,50 @@ function _playState(st) {
     return;
   }
 
-  const el = isVideo ? videoEl : audioEl;
-  if (_mediaEl !== el || _mediaEl?.src !== item.url) {
-    _stopMedia();
-    _mediaEl = el;
-    _mediaType = isVideo ? 'video' : 'audio';
-    if (_mediaEl) {
-      _mediaEl.src = item.url;
-      _mediaEl.style.display = isVideo ? 'block' : 'none';
-      if (isVideo) { if (thumbEl) thumbEl.style.display = 'none'; }
-      else          { if (thumbEl) thumbEl.style.display = 'flex'; }
-      _mediaEl.volume = parseFloat(document.getElementById('ax-vol-slider')?.value || '0.8');
-      _mediaEl.currentTime = Math.max(0, elapsed);
+  // New media item — stop current playback and load the new source.
+  _stopMedia();
+  _currentMediaId = item.id;
 
+  const el = isVideo ? videoEl : audioEl;
+  _mediaEl = el;
+  _mediaType = isVideo ? 'video' : 'audio';
+  if (_mediaEl) {
+    _mediaEl.src = item.url;
+    _mediaEl.style.display = isVideo ? 'block' : 'none';
+    if (isVideo) { if (thumbEl) thumbEl.style.display = 'none'; }
+    else          { if (thumbEl) thumbEl.style.display = 'flex'; }
+    _mediaEl.volume = parseFloat(document.getElementById('ax-vol-slider')?.value || '0.8');
+    _mediaEl.currentTime = Math.max(0, elapsed);
+
+    // Only the Founder/broadcast engine advances the channel.
+    // Normal viewers must NOT write to Firestore when media ends.
+    if (_isFounder) {
       _mediaEl.onended = () => _advance(st);
       _mediaEl.onerror = () => {
-        // Failed media recovery: log, skip to next
         console.warn('[AURENIX] Media load error — skipping to next program');
         setTimeout(() => _advance(st), 1500);
       };
-
-      const pipBtn = document.getElementById('ax-pip-btn');
-      if (pipBtn) pipBtn.style.display = isVideo && document.pictureInPictureEnabled ? '' : 'none';
-
-      _mediaEl.play().catch(() => {
-        const gate = document.getElementById('ax-gate');
-        if (gate) {
-          gate.style.display = 'flex';
-          const sub = gate.querySelector('.ax-gate-sub');
-          if (sub) sub.textContent = 'Tap to unmute the broadcast';
-        }
-        _gateOpen = false;
-      });
+    } else {
+      // Normal viewers: on end, just stop — the Founder engine will
+      // update network_state and the onSnapshot listener will switch media.
+      _mediaEl.onended = () => { _stopMedia(); };
+      _mediaEl.onerror = () => {
+        console.warn('[AURENIX] Viewer: media load error on item', item.id);
+      };
     }
-  } else {
-    const drift = Math.abs(_mediaEl.currentTime - elapsed);
-    if (drift > 3) _mediaEl.currentTime = elapsed;
-    if (_mediaEl.paused) _mediaEl.play().catch(() => {});
+
+    const pipBtn = document.getElementById('ax-pip-btn');
+    if (pipBtn) pipBtn.style.display = isVideo && document.pictureInPictureEnabled ? '' : 'none';
+
+    _mediaEl.play().catch(() => {
+      const gate = document.getElementById('ax-gate');
+      if (gate) {
+        gate.style.display = 'flex';
+        const sub = gate.querySelector('.ax-gate-sub');
+        if (sub) sub.textContent = 'Tap to unmute the broadcast';
+      }
+      _gateOpen = false;
+    });
   }
   _updatePlayBtn();
 }
@@ -1154,8 +1207,9 @@ function _stopMedia() {
     _mediaEl.style.display = 'none';
     _mediaEl.onended = null; _mediaEl.onerror = null;
   }
-  _mediaEl   = null;
-  _mediaType = null;
+  _mediaEl    = null;
+  _mediaType  = null;
+  _currentMediaId = null;
   const thumbEl = document.getElementById('ax-thumbnail');
   if (thumbEl) {
     thumbEl.style.display             = 'flex';
@@ -1205,9 +1259,28 @@ function _tick() {
   const st = _channelStates[_activeChannel.id];
   if (!st?.current_item) { _stopTick(); return; }
 
-  const startedAt = st.started_at?.toMillis?.() || Date.now();
-  const elapsed   = (Date.now() - startedAt) / 1000;
-  const dur       = st.current_item.duration_sec || 0;
+  // Use the actual media element's currentTime for display when available
+  // (more accurate than recalculating from started_at every tick).
+  // Fall back to master-clock calculation so progress still shows for images.
+  let elapsed;
+  if (_mediaEl && !_mediaEl.paused && !_mediaEl.error) {
+    elapsed = _mediaEl.currentTime;
+  } else {
+    const raw = st.started_at;
+    let startedAtMs;
+    if (raw && typeof raw.toMillis === 'function') {
+      startedAtMs = raw.toMillis();
+    } else if (raw && typeof raw === 'number') {
+      startedAtMs = raw < 1e10 ? raw * 1000 : raw;
+    } else if (raw instanceof Date) {
+      startedAtMs = raw.getTime();
+    } else {
+      startedAtMs = Date.now();
+    }
+    elapsed = Math.max(0, (Date.now() - startedAtMs) / 1000);
+  }
+
+  const dur = st.current_item.duration_sec || 0;
 
   const fill     = document.getElementById('ax-progress-fill');
   const elapsedEl= document.getElementById('ax-time-elapsed');
@@ -1232,7 +1305,9 @@ function _tick() {
     if (panelTime) panelTime.textContent = _fmtTime(elapsed) + ' / ' + _fmtTime(dur);
     if (panelRemain) panelRemain.textContent = _fmtTime(Math.max(0, dur - elapsed)) + ' remaining';
 
-    if (elapsed >= dur - 0.5 && !_advancing) _advance(st);
+    // Only the Founder/broadcast engine advances the channel on tick.
+    // Normal viewers wait for the Firestore onSnapshot to deliver the new state.
+    if (_isFounder && elapsed >= dur - 0.5 && !_advancing) _advance(st);
   } else {
     if (fill)      fill.style.width     = '0%';
     if (fsFill)    fsFill.style.width   = '0%';
