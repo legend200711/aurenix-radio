@@ -1702,17 +1702,24 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
 
     const rawQueue = st.queue || [];
 
-    // Filter the stored queue: remove any items that are no longer eligible
-    // (deleted from Firestore, rejected, or no longer assigned to this channel).
+    // Filter the stored queue: remove items that no longer exist or are no longer
+    // approved (deleted / rejected).  Do NOT filter by assigned_channels — queue
+    // items are explicit Founder instructions and must be honoured regardless of
+    // channel assignment.  Filtering by assigned_channels here is what caused the
+    // "UP NEXT shows Song B but player goes to STANDBY" bug: songs added to the
+    // queue without that channel in assigned_channels were silently dropped,
+    // eligibleQueue became empty, and the Worker fell through to random pick which
+    // also returned null (same assignment check), writing current_item=null → STANDBY.
     const eligibleQueue = rawQueue.filter(qItem => {
       const live = mediaLibIndex.get(qItem.id);
-      return isBroadcastEligible(live, channelId, false);
+      // Only require: item exists in media library, is approved, and has a playable URL.
+      return live && live.status === 'approved' && live.url;
     });
 
     // If the cleaned queue differs from the stored queue, persist the cleanup.
     if (eligibleQueue.length !== rawQueue.length) {
       const skipped = rawQueue.length - eligibleQueue.length;
-      console.log(`[aurenix-advance] channel=${channelId} — queue cleanup: removed ${skipped} ineligible item(s)`);
+      console.log(`[aurenix-advance] channel=${channelId} — queue cleanup: removed ${skipped} deleted/rejected item(s) (assigned_channels NOT checked for queue items)`);
       await fsPatch(projectId, writeToken, {
         queue:      eligibleQueue,
         updated_at: { __serverTimestamp: true },
