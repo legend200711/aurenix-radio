@@ -72,6 +72,8 @@ let _saKeyMissingLoggedAt = 0;
 // Per-channel bootstrap debounce: tracks when we last sent a bootstrap request
 // for a channel with no current_item. Prevents hammering the Worker every 800ms.
 const _bootstrapRequestedAt = {};  // channelId → Date.now() of last bootstrap request
+// Reconnect recovery: prevent concurrent same-item reload attempts.
+let _viewerReloadingId = null;
 
 /* ════════════════════════════════════
    INIT
@@ -85,6 +87,25 @@ export function initBroadcast() {
     _isFounder = !!(user && user.email?.trim().toLowerCase() === FOUNDER_EMAIL.toLowerCase());
     if (user) { _enterNetwork(); }
     else      { _showLoginScreen(); }
+  });
+
+  // ── BFCACHE / PAGE VISIBILITY RECOVERY ──────────────────────────────────────
+  // Handles browser back/forward cache restores and tab-switch returns.
+  // When the page comes back from bfcache the media element is stale; we must
+  // revalidate the current authoritative state and reload media if needed.
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) {
+      // Page was restored from bfcache — media element is in an unknown state.
+      console.log('[AURENIX RECONNECT] pageshow (bfcache restore) — revalidating player state');
+      _viewerReconnect('bfcache');
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      // Tab returned to foreground — check if the player stalled or went dead.
+      _viewerReconnect('visibilitychange');
+    }
   });
 }
 
@@ -1031,6 +1052,22 @@ function _subscribeChannelState(channelId) {
     if (activeEPGTab?.dataset.chid === channelId) _renderEPG(channelId);
 
     if (_activeChannel?.id === channelId) _onActiveChannelUpdate(st);
+  }, (err) => {
+    // Firestore listener error (permission change, network reset, etc.).
+    // Re-subscribe after a short delay so the viewer isn't permanently black.
+    // Do NOT modify channel state — just reestablish the listener.
+    console.warn(`[AURENIX RECONNECT] Firestore listener error for channel=${channelId} — resubscribing in 3s`, err?.message);
+    delete _channelUnsubs[channelId];
+    setTimeout(() => {
+      if (!_channelUnsubs[channelId]) {
+        _subscribeChannelState(channelId);
+        // If this is the active channel, trigger a reconnect check once the new
+        // snapshot arrives (handled by _onActiveChannelUpdate → _playState).
+        if (channelId === _activeChannel?.id) {
+          _viewerReconnect('firestore-error');
+        }
+      }
+    }, 3000);
   });
 }
 
@@ -1186,37 +1223,53 @@ function _playState(st) {
   //    _onActiveChannelUpdate → _playState. Without this guard every
   //    snapshot was unconditionally restarting the video from scratch.
   if (_currentMediaId === item.id && _mediaEl && !_mediaEl.error) {
-    // ── FIX: When the media element has ended and the Firestore state still
-    //    shows the same item, the advance request either hasn't completed yet
-    //    or failed. Do NOT simply return — re-trigger the advance so the
-    //    channel doesn't deadlock when a Firestore snapshot arrives while
-    //    the advance is still in-flight or has silently failed.
-    if (_mediaEl.ended) {
-      console.log(
-        `[AURENIX GLOBAL ENGINE] _playState: media ended but Firestore still on same item — re-requesting advance\n` +
-        `  channel=${_activeChannel?.id}  currentItem=${item.id}  elapsed=${elapsed.toFixed(1)}s  duration=${dur}s  viewer=${!_isFounder}  founder=${_isFounder}  mediaEnded=true  advanceRequested=true`
-      );
-      const _readvChId = _activeChannel?.id;
-      // ALL roles use the authoritative Worker for ALL channels (including ALTV).
-      // The _advance(st)/liveTvChannelAdvance path is removed — the Worker handles
-      // ALTV just like every other channel, independently of the Founder browser.
-      if (_readvChId && item.id) {
-        _viewerRequestAdvance(_readvChId, item.id);
+    // ── STALE PLAYER GUARD: same item is known but the media element is in a
+    //    dead state (ended, stalled, or empty src) — this happens after bfcache
+    //    restore, tab return, or a failed autoplay gate interaction.
+    //    Reload the SAME item without advancing the channel.
+    const srcEmpty = !_mediaEl.src || _mediaEl.src === '' || _mediaEl.src === window.location.href;
+    if (_mediaEl.ended || srcEmpty || _mediaEl.readyState === 0 /* HAVE_NOTHING */) {
+      if (!_mediaEl.ended) {
+        // For non-ended stale states only: check if we're past the item's end.
+        // If so, request an advance. If the item is still in-progress, reload it.
+        if (dur > 0 && elapsed >= dur - 0.5) {
+          const _readvChId = _activeChannel?.id;
+          if (_readvChId && item.id) _viewerRequestAdvance(_readvChId, item.id);
+          _updatePlayBtn();
+          return;
+        }
+      } else {
+        // Media ended — re-request advance (channel state hasn't updated yet).
+        console.log(
+          `[AURENIX GLOBAL ENGINE] _playState: media ended but Firestore still on same item — re-requesting advance\n` +
+          `  channel=${_activeChannel?.id}  currentItem=${item.id}  elapsed=${elapsed.toFixed(1)}s  duration=${dur}s  viewer=${!_isFounder}  founder=${_isFounder}  mediaEnded=true  advanceRequested=true`
+        );
+        const _readvChId = _activeChannel?.id;
+        if (_readvChId && item.id) _viewerRequestAdvance(_readvChId, item.id);
+        _updatePlayBtn();
+        return;
       }
+      // Stale/empty player — force a safe reload of the SAME item.
+      // Reset _currentMediaId so the main load path below runs.
+      console.log(
+        `[AURENIX RECONNECT] _playState: same item but player is stale/empty — reloading without advance\n` +
+        `  channel=${_activeChannel?.id}  currentItem=${item.id}  ended=${_mediaEl.ended}  srcEmpty=${srcEmpty}  readyState=${_mediaEl.readyState}`
+      );
+      _currentMediaId = null;
+      // fall through to the full load path below
+    } else {
+      // Same item is still playing — just drift-correct if needed.
+      const drift = Math.abs(_mediaEl.currentTime - elapsed);
+      // Tolerance: only seek if more than 8 seconds out of sync.
+      // Normal HTML5 playback advances on its own; we don't need to force it.
+      if (drift > 8) {
+        console.log(`[AURENIX GLOBAL ENGINE] drift correction: ${drift.toFixed(1)}s — seeking to ${elapsed.toFixed(1)}s  channel=${_activeChannel?.id}  currentItem=${item.id}`);
+        _mediaEl.currentTime = Math.max(0, elapsed);
+      }
+      if (_mediaEl.paused) _mediaEl.play().catch(() => {});
       _updatePlayBtn();
       return;
     }
-    // Same item is still playing — just drift-correct if needed.
-    const drift = Math.abs(_mediaEl.currentTime - elapsed);
-    // Tolerance: only seek if more than 8 seconds out of sync.
-    // Normal HTML5 playback advances on its own; we don't need to force it.
-    if (drift > 8) {
-      console.log(`[AURENIX GLOBAL ENGINE] drift correction: ${drift.toFixed(1)}s — seeking to ${elapsed.toFixed(1)}s  channel=${_activeChannel?.id}  currentItem=${item.id}`);
-      _mediaEl.currentTime = Math.max(0, elapsed);
-    }
-    if (_mediaEl.paused) _mediaEl.play().catch(() => {});
-    _updatePlayBtn();
-    return;
   }
 
   // ── TRANSITION LOCK: if already loading a new source, do not re-enter.
@@ -1299,8 +1352,9 @@ function _playState(st) {
   _transitioning = true;
   _stopMedia();
   _currentMediaId = item.id;
-  // Clear viewer dedup lock for the previous item so the new item gets fresh tracking.
+  // Clear dedup locks so the new item gets fresh tracking.
   _viewerAdvancingId = null;
+  _viewerReloadingId = null;
 
   const el = isVideo ? videoEl : audioEl;
   _mediaEl = el;
@@ -1311,6 +1365,11 @@ function _playState(st) {
     if (isVideo) { if (thumbEl) thumbEl.style.display = 'none'; }
     else          { if (thumbEl) thumbEl.style.display = 'flex'; }
     _mediaEl.volume = parseFloat(document.getElementById('ax-vol-slider')?.value || '0.8');
+
+    // Call load() explicitly so the element resets from any previous ended/error/stale
+    // state before we try to set currentTime or call play(). This is required by the
+    // HTML spec when the same DOM element is reused after src changes.
+    _mediaEl.load();
     _mediaEl.currentTime = Math.max(0, elapsed);
 
     // ALL roles request authoritative advance from the Cloudflare Worker.
@@ -1337,30 +1396,61 @@ function _playState(st) {
         _viewerRequestAdvance(capturedChannelId, capturedItemId);
       }
     };
-    _mediaEl.onerror = () => {
-      console.warn(
-        `[AURENIX GLOBAL ENGINE] Media load error\n` +
-        `  channel=${capturedChannelId}  currentItem=${capturedItemId}  advanceRequested=true (1.5s delay)`
-      );
-      if (capturedChannelId && capturedItemId) {
-        setTimeout(() => _viewerRequestAdvance(capturedChannelId, capturedItemId), 1500);
+
+    // ── onerror: reload the SAME item first; only advance if the item itself is
+    //    permanently unplayable (3 retries exhausted). This prevents a transient
+    //    network hiccup or bfcache-stale source from advancing the channel.
+    let _onerrorRetries = 0;
+    const _onerrorReload = () => {
+      _onerrorRetries++;
+      if (_onerrorRetries <= 3 && _currentMediaId === capturedItemId) {
+        console.warn(
+          `[AURENIX RECONNECT] Media load error — retrying same item (attempt ${_onerrorRetries}/3)\n` +
+          `  channel=${capturedChannelId}  currentItem=${capturedItemId}`
+        );
+        setTimeout(() => {
+          if (_currentMediaId !== capturedItemId) return; // channel already advanced
+          const el2 = document.getElementById(isVideo ? 'ax-video' : 'ax-audio');
+          if (!el2) return;
+          el2.src = capturedItemId === _currentMediaId ? item.url : '';
+          if (el2.src) {
+            el2.load();
+            el2.currentTime = Math.max(0, (Date.now() - startedAtMs) / 1000);
+            el2.play().catch(() => {});
+          }
+        }, _onerrorRetries * 1500);
+      } else {
+        // Permanently unplayable — advance to keep the broadcast moving.
+        console.warn(
+          `[AURENIX RECONNECT] Media load error — ${_onerrorRetries > 3 ? '3 retries exhausted' : 'item changed'}, advancing\n` +
+          `  channel=${capturedChannelId}  currentItem=${capturedItemId}`
+        );
+        if (capturedChannelId && capturedItemId && _currentMediaId === capturedItemId) {
+          setTimeout(() => _viewerRequestAdvance(capturedChannelId, capturedItemId), 500);
+        }
       }
     };
+    _mediaEl.onerror = _onerrorReload;
 
     const pipBtn = document.getElementById('ax-pip-btn');
     if (pipBtn) pipBtn.style.display = isVideo && document.pictureInPictureEnabled ? '' : 'none';
 
     _mediaEl.play().catch(() => {
+      // Autoplay blocked by browser policy — show the tap-to-play gate.
+      // Do NOT set _gateOpen = false here; _gateOpen tracks whether the viewer
+      // has interacted with the gate overlay, not whether autoplay succeeded.
+      // Keeping _gateOpen = true means tapping the gate later calls _enterBroadcast()
+      // which re-drives _playState with the current authoritative state.
       const gate = document.getElementById('ax-gate');
       if (gate) {
         gate.style.display = 'flex';
         const sub = gate.querySelector('.ax-gate-sub');
-        if (sub) sub.textContent = 'Tap to unmute the broadcast';
+        if (sub) sub.textContent = 'Tap to start the broadcast';
       }
-      _gateOpen = false;
+      // Keep _gateOpen as-is (do not set false) — _enterBroadcast will replay state.
     });
   }
-  // Release transition lock — the new source is now fully loaded and playing.
+  // Release transition lock — the new source is now loading.
   _transitioning = false;
   console.log(`[AURENIX GLOBAL ENGINE] loading next media — channel=${_activeChannel?.id}  currentItem=${item.id}  seekTo=${elapsed.toFixed(2)}s  founder=${_isFounder}  viewer=${!_isFounder}`);
   _updatePlayBtn();
@@ -1563,9 +1653,13 @@ async function _bgChannelRequestAdvance(channelId, currentItemId) {
 
 function _stopMedia() {
   if (_mediaEl) {
-    _mediaEl.pause(); _mediaEl.src = '';
-    _mediaEl.style.display = 'none';
+    _mediaEl.pause();
     _mediaEl.onended = null; _mediaEl.onerror = null;
+    _mediaEl.src = '';
+    // Calling load() after clearing src resets the element's internal state machine
+    // (ended/error/stalled flags) so it's clean for the next source assignment.
+    try { _mediaEl.load(); } catch (_) {}
+    _mediaEl.style.display = 'none';
   }
   _mediaEl    = null;
   _mediaType  = null;
@@ -1580,6 +1674,59 @@ function _stopMedia() {
     const ph = thumbEl.querySelector('div');
     if (ph) ph.style.display = '';
   }
+}
+
+/* ════════════════════════════════════
+   VIEWER RECONNECT RECOVERY
+   Called on bfcache restore, tab return, and Firestore reconnect.
+   Checks whether the player is in a dead state for the currently-broadcasting
+   item and reloads it in-place WITHOUT touching channel state.
+════════════════════════════════════ */
+function _viewerReconnect(reason) {
+  // Not authenticated or network not ready yet — nothing to do.
+  if (!_user || !_networkReady || !_gateOpen) return;
+
+  const channelId = _activeChannel?.id;
+  if (!channelId) return;
+
+  const st = _channelStates[channelId];
+  if (!st?.current_item?.url) return;
+
+  const item = st.current_item;
+
+  // Determine if the player is stale / dead for the current authoritative item.
+  const playerHasSameItem = (_currentMediaId === item.id);
+  const playerIsDead = (
+    !_mediaEl ||
+    !_mediaEl.src ||
+    _mediaEl.src === '' ||
+    _mediaEl.src === window.location.href ||
+    _mediaEl.ended ||
+    _mediaEl.readyState === 0 /* HAVE_NOTHING */
+  );
+
+  console.log(
+    `[AURENIX RECONNECT] _viewerReconnect  reason=${reason}\n` +
+    `  channel=${channelId}  authItem=${item.id}  loadedItem=${_currentMediaId}\n` +
+    `  playerHasSameItem=${playerHasSameItem}  playerIsDead=${playerIsDead}\n` +
+    `  ended=${_mediaEl?.ended}  readyState=${_mediaEl?.readyState}  gateOpen=${_gateOpen}`
+  );
+
+  if (!playerIsDead) {
+    // Player is alive — just make sure it's playing.
+    if (_mediaEl && _mediaEl.paused && !_mediaEl.ended) {
+      _mediaEl.play().catch(() => {});
+    }
+    return;
+  }
+
+  // Player is dead. Force _currentMediaId to null so _playState doesn't skip
+  // the load path when it sees the same item ID.
+  _currentMediaId = null;
+  _transitioning  = false; // clear any stuck transition lock
+
+  // Re-drive playback with the current authoritative state.
+  _playState(st);
 }
 
 function _togglePlayPause() {
