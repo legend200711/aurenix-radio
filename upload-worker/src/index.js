@@ -494,7 +494,7 @@ export default {
       return json({
         ok:      !err,
         worker:  'aurenix-upload',
-        version: '2025-09-06-v13-strict-channel-eligibility',
+        version: '2025-09-06-v14-channel-bootstrap',
         SUPABASE_URL:        env.SUPABASE_URL         ? '✓ set' : '✗ MISSING',
         SUPABASE_SERVICE_KEY:env.SUPABASE_SERVICE_KEY ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID  ? '✓ set' : '✗ MISSING',
@@ -1124,8 +1124,9 @@ export default {
       const { channelId, currentItemId } = body || {};
       if (!channelId || typeof channelId !== 'string')
         return json({ error: 'ADVANCE FAILED — channelId required' }, 400, origin);
-      if (!currentItemId || typeof currentItemId !== 'string')
-        return json({ error: 'ADVANCE FAILED — currentItemId required' }, 400, origin);
+      // currentItemId may be null/undefined for the bootstrap case (channel has no current item).
+      // In that case we skip the CAS guard and simply pick the first eligible item.
+      const normalizedItemId = (currentItemId && typeof currentItemId === 'string') ? currentItemId : null;
 
       /* ── 3. Perform atomic advance via Firestore REST ───────────────── */
       try {
@@ -1133,7 +1134,7 @@ export default {
           env.FIREBASE_PROJECT_ID,
           env.FIREBASE_SERVICE_ACCOUNT_KEY || null,
           channelId,
-          currentItemId
+          normalizedItemId
         );
         return json(result, 200, origin);
       } catch (e) {
@@ -1505,41 +1506,59 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
   }
 
   /* ── 1. Read current state ──────────────────────────────────────────── */
-  console.log(`[aurenix-advance] channel=${channelId} requestedBy=${currentItemId} — reading Firestore state`);
-  const st = await fsGet(projectId, writeToken, 'network_state', channelId);
+  const isBootstrap = (currentItemId === null);
+  console.log(`[aurenix-advance] channel=${channelId} ${isBootstrap ? 'BOOTSTRAP' : 'requestedBy=' + currentItemId} — reading Firestore state`);
+  let st = await fsGet(projectId, writeToken, 'network_state', channelId);
+
   if (!st) {
-    console.warn(`[aurenix-advance] channel=${channelId} — no_state (document missing)`);
-    return { advanced: false, reason: 'no_state' };
-  }
-
-  // CAS guard: only advance if the currentItemId still matches what's in Firestore.
-  const firestoreCurrentId = st.current_item?.id || null;
-  if (firestoreCurrentId !== currentItemId) {
-    // Already advanced by someone else — viewer will get the new state via onSnapshot.
-    return { advanced: false, reason: 'already_advanced' };
-  }
-
-  // Time guard: only advance if started_at + duration has elapsed.
-  // Tolerance: 2 seconds (handles clock skew between client and server).
-  const dur = st.current_item?.duration_sec || 0;
-  if (dur > 0) {
-    const startedAtRaw = st.started_at;
-    let startedAtMs;
-    if (typeof startedAtRaw === 'string') {
-      // Firestore REST returns timestamps as ISO strings
-      startedAtMs = new Date(startedAtRaw).getTime();
-    } else if (typeof startedAtRaw === 'number') {
-      startedAtMs = startedAtRaw < 1e10 ? startedAtRaw * 1000 : startedAtRaw;
-    } else {
-      startedAtMs = Date.now() - (dur + 10) * 1000; // assume elapsed if unknown
+    if (!isBootstrap) {
+      // Normal advance but no state doc — this channel was never started.
+      // Treat it as a bootstrap request so it auto-initializes with the first item.
+      console.log(`[aurenix-advance] channel=${channelId} — no_state, promoting to bootstrap`);
     }
-    const elapsedSec = (Date.now() - startedAtMs) / 1000;
-    const TOLERANCE_SEC = 2;
-    if (elapsedSec < dur - TOLERANCE_SEC) {
-      return {
-        advanced: false,
-        reason: `too_early: ${elapsedSec.toFixed(1)}s elapsed of ${dur}s`,
-      };
+    // Bootstrap: state doc is missing — create it empty so the rest of the function
+    // can continue and write the first item.
+    st = { current_item: null, queue: [], commercial_queue: [], loop: true };
+  }
+
+  // CAS guard: only enforce when we have a real currentItemId (not bootstrap).
+  // Bootstrap (currentItemId === null) always proceeds if current_item is also null.
+  const firestoreCurrentId = st.current_item?.id || null;
+  if (!isBootstrap) {
+    if (firestoreCurrentId !== currentItemId) {
+      // Already advanced by someone else — viewer will get the new state via onSnapshot.
+      return { advanced: false, reason: 'already_advanced' };
+    }
+  } else {
+    // Bootstrap: only proceed if the channel genuinely has no current item.
+    // If another viewer already bootstrapped it, bail out gracefully.
+    if (firestoreCurrentId !== null) {
+      return { advanced: false, reason: 'already_bootstrapped' };
+    }
+  }
+
+  // Time guard: only enforce when we have a real currentItemId (not bootstrap).
+  if (!isBootstrap) {
+    const dur = st.current_item?.duration_sec || 0;
+    if (dur > 0) {
+      const startedAtRaw = st.started_at;
+      let startedAtMs;
+      if (typeof startedAtRaw === 'string') {
+        // Firestore REST returns timestamps as ISO strings
+        startedAtMs = new Date(startedAtRaw).getTime();
+      } else if (typeof startedAtRaw === 'number') {
+        startedAtMs = startedAtRaw < 1e10 ? startedAtRaw * 1000 : startedAtRaw;
+      } else {
+        startedAtMs = Date.now() - (dur + 10) * 1000; // assume elapsed if unknown
+      }
+      const elapsedSec = (Date.now() - startedAtMs) / 1000;
+      const TOLERANCE_SEC = 2;
+      if (elapsedSec < dur - TOLERANCE_SEC) {
+        return {
+          advanced: false,
+          reason: `too_early: ${elapsedSec.toFixed(1)}s elapsed of ${dur}s`,
+        };
+      }
     }
   }
 
@@ -1791,6 +1810,16 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
   const nextProg = pickProgram(mediaLib, isAltv, justPlayedId, recentHistory, channelId);
   if (!nextProg) {
     console.warn(`[aurenix-advance] channel=${channelId} — no_eligible_programs (mediaLib.length=${mediaLib.length})`);
+    // Write a null current_item so the state doc exists (prevents repeated no_state bootstraps)
+    // and viewers see "No eligible content" instead of "Loading…" forever.
+    await fsPatch(projectId, writeToken, {
+      current_item:     null,
+      started_at:       { __serverTimestamp: true },
+      is_commercial:    false,
+      commercial_queue: [],
+      needs_next:       false,
+      updated_at:       { __serverTimestamp: true },
+    }, 'network_state', channelId);
     return { advanced: false, reason: 'no_eligible_programs' };
   }
 

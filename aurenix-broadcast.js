@@ -69,6 +69,9 @@ let _transitioning = false;
 // Timestamp of the last time the Worker returned service_account_not_configured.
 // Used to rate-limit retries so we don't spam the Worker every 800ms indefinitely.
 let _saKeyMissingLoggedAt = 0;
+// Per-channel bootstrap debounce: tracks when we last sent a bootstrap request
+// for a channel with no current_item. Prevents hammering the Worker every 800ms.
+const _bootstrapRequestedAt = {};  // channelId → Date.now() of last bootstrap request
 
 /* ════════════════════════════════════
    INIT
@@ -1468,11 +1471,19 @@ async function _viewerRequestAdvance(channelId, currentItemId) {
    Same as _viewerRequestAdvance but for channels the viewer is NOT watching.
    Uses _bgAdvancingId[channelId] as the dedup lock (separate from
    _viewerAdvancingId so the two don't interfere with each other).
+
+   currentItemId === null means "bootstrap" — pick the first eligible item
+   for a channel that currently has no current_item.  The _bootstrapRequestedAt
+   map (not _bgAdvancingId) controls dedup for bootstrap requests.
 ════════════════════════════════════ */
 async function _bgChannelRequestAdvance(channelId, currentItemId) {
+  const isBootstrap = (currentItemId === null);
   try {
     const user = auth.currentUser;
-    if (!user) { _bgAdvancingId[channelId] = null; return; }
+    if (!user) {
+      if (!isBootstrap) _bgAdvancingId[channelId] = null;
+      return;
+    }
     const idToken = await user.getIdToken(false);
     const res = await fetch(ADVANCE_WORKER_URL, {
       method: 'POST',
@@ -1485,6 +1496,26 @@ async function _bgChannelRequestAdvance(channelId, currentItemId) {
     const data = await res.json().catch(() => ({}));
     const reason = data.reason || data.error || 'unknown';
 
+    if (isBootstrap) {
+      // Bootstrap: result is handled via onSnapshot (new state arrives) or
+      // _bootstrapRequestedAt debounce in _tick.
+      // 'already_bootstrapped' = another viewer got there first, state incoming via snapshot.
+      // 'no_eligible_programs' = no content assigned — reset timer quickly so we retry
+      //   when Founder adds content (30s debounce is handled in _tick).
+      // Any other reason: let the 30s debounce in _tick control retry timing.
+      if (reason === 'no_eligible_programs') {
+        // Already wrote null state to Firestore — don't retry aggressively.
+        // The 30s debounce in _tick will handle re-trying after content is added.
+        console.log(`[AURENIX GLOBAL ENGINE] bootstrap: channel=${channelId} has no eligible programs — will retry in 30s`);
+      } else if (data.advanced) {
+        console.log(`[AURENIX GLOBAL ENGINE] bootstrap: channel=${channelId} — first item selected, awaiting snapshot`);
+        // Reset bootstrap timer so we don't immediately re-bootstrap after the snapshot clears current_item.
+        _bootstrapRequestedAt[channelId] = Date.now();
+      }
+      return;
+    }
+
+    // Normal advance dedup logic:
     if (data.advanced) {
       // onSnapshot will deliver the new state — clear lock after 15s safety valve.
       setTimeout(() => {
@@ -1506,7 +1537,7 @@ async function _bgChannelRequestAdvance(channelId, currentItemId) {
     }
   } catch (e) {
     // Network error — clear lock so tick retries.
-    _bgAdvancingId[channelId] = null;
+    if (!isBootstrap) _bgAdvancingId[channelId] = null;
   }
 }
 
@@ -1648,9 +1679,30 @@ function _tick() {
   // (unchanged — that lock also controls the media-element flow).
   // For background channels we use the separate _bgAdvancingId map so the
   // locks don't interfere with each other.
+  //
+  // BOOTSTRAP: Channels with no current_item (null state or missing state doc)
+  // are auto-started by sending a bootstrap request (currentItemId: null).
+  // Bootstrap requests are rate-limited to once every 30 seconds per channel.
+  const BOOTSTRAP_INTERVAL_MS = 30_000;
+
   _channels.forEach(ch => {
     const st = _channelStates[ch.id];
-    if (!st?.current_item?.id) return;
+
+    // ── 2a. Bootstrap: channel has no current item ───────────────────────
+    if (!st?.current_item?.id) {
+      // Only bootstrap if we haven't already tried recently.
+      const lastTry = _bootstrapRequestedAt[ch.id] || 0;
+      if (Date.now() - lastTry >= BOOTSTRAP_INTERVAL_MS) {
+        _bootstrapRequestedAt[ch.id] = Date.now();
+        console.log(
+          `[AURENIX GLOBAL ENGINE] _tick: channel=${ch.id} has no current_item — sending bootstrap request`
+        );
+        _bgChannelRequestAdvance(ch.id, null);
+      }
+      return;
+    }
+
+    // ── 2b. Normal advance: item elapsed ────────────────────────────────
     const dur = st.current_item.duration_sec || 0;
     if (dur <= 0) return;
 

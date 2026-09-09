@@ -6,7 +6,7 @@
  */
 
 // Bump this version any time shell assets change.
-const CACHE = 'aurenix-v7';
+const CACHE = 'aurenix-v8';
 
 // Only truly static, rarely-changing shell assets go here.
 // JavaScript engine files are intentionally excluded so they are always
