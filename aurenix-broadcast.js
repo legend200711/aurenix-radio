@@ -1117,7 +1117,26 @@ function _onActiveChannelUpdate(st) {
   } else {
     const queue  = (st.queue || []).filter(q => q?.id && q?.url);
     const curIdx = queue.findIndex(q => q.id === item.id);
-    _renderUpNext(queue.slice(curIdx + 1, curIdx + 6));
+    // Build Up Next with wrap-around so the loop is visible.
+    // When the last item is playing, Up Next shows items from the front of the
+    // queue (the looped continuation) instead of an empty list.
+    // curIdx === -1 means the currently-playing item is not in the queue
+    // (e.g. bootstrapped randomly before a queue was built) — show from front.
+    const upNext = [];
+    const startOffset = curIdx === -1 ? 0 : curIdx;    // where to start counting from
+    const maxShow     = curIdx === -1
+      ? Math.min(5, queue.length)        // current not in queue → all items are "up next"
+      : Math.min(5, queue.length - 1);   // current IS in queue → exclude it
+    if (maxShow > 0 && queue.length > 0) {
+      for (let i = 1; i <= queue.length; i++) {
+        const idx = (startOffset + i) % queue.length;
+        // Stop once we've looped back to the current item (or shown enough).
+        if (curIdx !== -1 && idx === curIdx) break;
+        upNext.push(queue[idx]);
+        if (upNext.length >= maxShow) break;
+      }
+    }
+    _renderUpNext(upNext);
   }
 
   // Always drive playback through _playState. _playState itself guards

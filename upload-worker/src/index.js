@@ -1697,23 +1697,29 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
   if (!isAltv && (mode === 'ordered' || mode === 'shuffle' || hasQueue)) {
     // Fetch the current media library so we can validate queue items.
     // Items may have been deleted or re-assigned since they were queued.
-    const mediaLibForQueue = await fetchApprovedMedia(projectId, writeToken);
+    // MUSIC QUEUE FIX: use fetchQueueEligibleMedia (approved + ready) instead of
+    // fetchApprovedMedia (approved only).  The Founder can explicitly add 'ready'
+    // songs to the queue via the Schedule/Broadcast pane — those songs must be
+    // honoured by the Worker just like 'approved' songs.  Previously, 'ready'
+    // items were silently dropped from eligibleQueue (because fetchApprovedMedia
+    // only fetches status==='approved'), leaving only one eligible item which
+    // caused the queue to wrap back to index 0 → same song repeated forever.
+    const mediaLibForQueue = await fetchQueueEligibleMedia(projectId, writeToken);
     const mediaLibIndex = new Map(mediaLibForQueue.map(m => [m.id, m]));
 
     const rawQueue = st.queue || [];
 
     // Filter the stored queue: remove items that no longer exist or are no longer
-    // approved (deleted / rejected).  Do NOT filter by assigned_channels — queue
+    // playable (deleted / hard-rejected).  Do NOT filter by assigned_channels — queue
     // items are explicit Founder instructions and must be honoured regardless of
-    // channel assignment.  Filtering by assigned_channels here is what caused the
-    // "UP NEXT shows Song B but player goes to STANDBY" bug: songs added to the
-    // queue without that channel in assigned_channels were silently dropped,
-    // eligibleQueue became empty, and the Worker fell through to random pick which
-    // also returned null (same assignment check), writing current_item=null → STANDBY.
+    // channel assignment.  Accept both 'approved' and 'ready' status — consistent
+    // with the client-side addToSched / addToSchedChannel approval gate.
     const eligibleQueue = rawQueue.filter(qItem => {
       const live = mediaLibIndex.get(qItem.id);
-      // Only require: item exists in media library, is approved, and has a playable URL.
-      return live && live.status === 'approved' && live.url;
+      // Require: item exists in media library, has an approved-or-ready status,
+      // and has a playable URL.  'ready' is accepted because the Founder explicitly
+      // added the item to the queue and it has already been uploaded successfully.
+      return live && (live.status === 'approved' || live.status === 'ready') && live.url;
     });
 
     // If the cleaned queue differs from the stored queue, persist the cleanup.
@@ -1911,6 +1917,62 @@ async function fetchApprovedMedia(projectId, authToken) {
     if (!row.document) continue;
     const data = fromFsDoc(row.document);
     // Extract the document ID from the name field (last path segment)
+    const name = row.document.name || '';
+    const id   = name.split('/').pop();
+    result.push({ id, ...data });
+  }
+  return result;
+}
+
+/**
+ * Fetch media items eligible to appear in a Founder-curated queue.
+ * Returns both 'approved' and 'ready' items (unlike fetchApprovedMedia which
+ * only returns 'approved').  'ready' items can be added to the queue by the
+ * Founder via the Schedule/Broadcast pane and must be honoured during playback.
+ *
+ * Used exclusively by the eligibleQueue validation path in firestoreChannelAdvance.
+ * Random-pick (step 5) continues to use fetchApprovedMedia so the unattended
+ * broadcast pool only contains fully-approved content.
+ */
+async function fetchQueueEligibleMedia(projectId, authToken) {
+  const url = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:runQuery`;
+  const body = {
+    structuredQuery: {
+      from: [{ collectionId: 'network_media' }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: 'status' },
+          op: 'IN',
+          value: {
+            arrayValue: {
+              values: [
+                { stringValue: 'approved' },
+                { stringValue: 'ready' },
+              ],
+            },
+          },
+        },
+      },
+      limit: 2000,
+    },
+  };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`fetchQueueEligibleMedia failed: HTTP ${res.status} — ${t.slice(0, 200)}`);
+  }
+  const rows = await res.json();
+  const result = [];
+  for (const row of rows) {
+    if (!row.document) continue;
+    const data = fromFsDoc(row.document);
     const name = row.document.name || '';
     const id   = name.split('/').pop();
     result.push({ id, ...data });
