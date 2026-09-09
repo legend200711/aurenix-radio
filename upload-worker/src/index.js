@@ -1,54 +1,27 @@
 /**
- * AURENIX — Founder Upload Worker  (v10 — channel auto-advance engine)
+ * AURENIX — Founder Upload Worker  (v11 — Shadow Nexus storage only)
  * upload-worker/src/index.js
  *
- * ARCHITECTURE (v9):
- *   Adds Google Drive OAuth 2.0 storage as an additional upload destination.
- *   Google OAuth client secret and refresh tokens are NEVER sent to the browser.
- *   All Drive token management is handled server-side in this Worker.
- *   See gdrive.js for the full Drive module.
+ * All media is stored in Shadow Nexus (Supabase aurenix-media bucket).
+ * Google Drive has been completely removed.
  *
- *   v9 CHANGE — Worker-proxied chunked upload:
- *   The browser can NOT PUT directly to googleapis.com/upload/ because Google's
- *   resumable upload endpoint has no CORS headers — the browser XHR fires onerror
- *   immediately ("network error").  v9 removes the direct browser→Google path and
- *   routes every chunk through POST /gdrive/upload-chunk.  The Worker streams each
- *   chunk to Google server-side with the Content-Range header.  No file buffering.
- *
- * Endpoints (existing Supabase):
- *   POST /authorize          — JSON: { fileName, contentType, size }
+ * Endpoints:
+ *   POST /authorize          — Founder-only signed URL for direct media upload
+ *   POST /submission/authorize — any authenticated user signed URL upload
+ *   POST /verify             — check object exists in storage
  *   GET  /health             — secrets present check
  *   GET  /diagnose           — full connectivity diagnostic
- *
- * Endpoints (channel auto-advance — any authenticated viewer):
- *   POST /channel/advance    — JSON: { channelId, currentItemId }
- *     Atomically advances network_state/{channelId} to the next program.
- *     Uses a Firestore compare-and-swap transaction so that if two viewers
- *     race, only one succeeds.  Validates that the item's scheduled duration
- *     has actually elapsed before advancing.
- *
- * Endpoints (new Google Drive — all require Firebase Founder token):
- *   GET  /gdrive/config-check     — are Drive OAuth credentials configured?
- *   GET  /gdrive/auth             — get Google OAuth authorization URL
- *   GET  /gdrive/callback         — OAuth callback (exchanges code, stores tokens)
- *   GET  /gdrive/status           — connection status + account info
- *   POST /gdrive/disconnect       — revoke + clear tokens (does NOT delete Drive files)
- *   GET  /gdrive/folders          — list Drive folders
- *   POST /gdrive/folder-set       — set/create AURENIX folder + subfolders
- *   POST /gdrive/upload-init      — initiate resumable session (returns upload_id)
- *   POST /gdrive/upload-chunk     — proxy a chunk to Google (browser→Worker→Google)
- *   POST /gdrive/upload-finalize  — finalize + return Drive file metadata
+ *   GET  /probe-limit        — test effective upload limit
+ *   GET  /probe-signed-url   — diagnostic: show raw Supabase signed URL
+ *   GET  /set-storage-limit  — raise project-level upload limit (needs SUPABASE_MANAGEMENT_TOKEN)
+ *   POST /channel/advance    — atomic channel advancement for 24/7 broadcast
  *
  * Environment secrets (set via `wrangler secret put`):
- *   SUPABASE_URL          — Supabase project URL
- *   SUPABASE_SERVICE_KEY  — Supabase service-role JWT
- *   FIREBASE_PROJECT_ID   — Firebase project ID
- *   GOOGLE_CLIENT_ID      — Google OAuth 2.0 client ID
- *   GOOGLE_CLIENT_SECRET  — Google OAuth 2.0 client secret (NEVER in browser JS)
- *   GOOGLE_REDIRECT_URI   — authorized redirect URI (e.g. .../gdrive/callback)
- *
- * KV binding (wrangler.jsonc):
- *   GDRIVE_KV  — Workers KV namespace for Drive token storage
+ *   SUPABASE_URL                  — Supabase project URL
+ *   SUPABASE_SERVICE_KEY          — Supabase service-role JWT
+ *   FIREBASE_PROJECT_ID           — Firebase project ID
+ *   FIREBASE_SERVICE_ACCOUNT_KEY  — Firebase service account JSON (for auto-advance)
+ *   SUPABASE_MANAGEMENT_TOKEN     — optional, raises project-level upload limit
  */
 
 /* ─── Constants ───────────────────────────────────────────────────────────── */
@@ -422,21 +395,6 @@ function checkSecrets(env) {
 }
 
 /* ─── Worker entry point ──────────────────────────────────────────────────── */
-import {
-  handleGdriveAuth,
-  handleGdriveCallback,
-  handleGdriveStatus,
-  handleGdriveDisconnect,
-  handleGdriveFolders,
-  handleGdriveFolderSet,
-  handleGdriveUploadInit,
-  handleGdriveUploadChunk,
-  handleGdriveUploadFinalize,
-  handleGdriveConfigCheck,
-  handleGdriveDiagnostic,
-  handleSubmissionCopyToDrive,
-} from './gdrive.js';
-
 export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';
@@ -446,47 +404,6 @@ export default {
 
     const url = new URL(request.url);
     const p   = url.pathname;
-
-    /* ── Google Drive OAuth routes ──────────────────────────────────────── */
-    // These are all server-side — no client secrets in browser JS.
-    const gdriveJsonHelper = (body, status) => json(body, status, origin);
-
-    if (request.method === 'GET'  && p === '/gdrive/config-check')
-      return handleGdriveConfigCheck(request, env, gdriveJsonHelper);
-
-    if (request.method === 'GET'  && p === '/gdrive/auth')
-      return handleGdriveAuth(request, env, gdriveJsonHelper);
-
-    if (request.method === 'GET'  && p === '/gdrive/callback')
-      return handleGdriveCallback(request, env);
-
-    if (request.method === 'GET'  && p === '/gdrive/status')
-      return handleGdriveStatus(request, env, gdriveJsonHelper);
-
-    if (request.method === 'POST' && p === '/gdrive/disconnect')
-      return handleGdriveDisconnect(request, env, gdriveJsonHelper);
-
-    if (request.method === 'GET'  && p === '/gdrive/folders')
-      return handleGdriveFolders(request, env, gdriveJsonHelper);
-
-    if (request.method === 'POST' && p === '/gdrive/folder-set')
-      return handleGdriveFolderSet(request, env, gdriveJsonHelper);
-
-    if (request.method === 'POST' && p === '/gdrive/upload-init')
-      return handleGdriveUploadInit(request, env, gdriveJsonHelper);
-
-    if (request.method === 'POST' && p === '/gdrive/upload-chunk')
-      return handleGdriveUploadChunk(request, env, gdriveJsonHelper);
-
-    if (request.method === 'POST' && p === '/gdrive/upload-finalize')
-      return handleGdriveUploadFinalize(request, env, gdriveJsonHelper);
-
-    if (request.method === 'GET'  && p === '/gdrive/diagnostic')
-      return handleGdriveDiagnostic(request, env, gdriveJsonHelper);
-
-    if (request.method === 'POST' && p === '/submission/copy-to-drive')
-      return handleSubmissionCopyToDrive(request, env, gdriveJsonHelper);
-
 
     /* ── GET /health ─────────────────────────────────────────────────────── */
     if (request.method === 'GET' && url.pathname === '/health') {
@@ -498,15 +415,10 @@ export default {
         SUPABASE_URL:        env.SUPABASE_URL         ? '✓ set' : '✗ MISSING',
         SUPABASE_SERVICE_KEY:env.SUPABASE_SERVICE_KEY ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID  ? '✓ set' : '✗ MISSING',
-        GOOGLE_CLIENT_ID:    env.GOOGLE_CLIENT_ID     ? '✓ set' : '✗ not set (optional)',
-        GOOGLE_CLIENT_SECRET:env.GOOGLE_CLIENT_SECRET ? '✓ set' : '✗ not set (optional)',
-        GOOGLE_REDIRECT_URI: env.GOOGLE_REDIRECT_URI  ? '✓ set' : '✗ not set (optional)',
-        GDRIVE_KV:                    env.GDRIVE_KV                    ? '✓ bound'     : '✗ not bound (optional)',
         FIREBASE_SERVICE_ACCOUNT_KEY: env.FIREBASE_SERVICE_ACCOUNT_KEY ? '✓ set'       : '✗ not set (required for auto-advance)',
         FIREBASE_PROJECT_ID_value: env.FIREBASE_PROJECT_ID || null,
         SUPABASE_URL_value:        env.SUPABASE_URL || null,
         architecture: 'Signed URL — browser PUT to /object/upload/sign/<bucket>/<path>?token=',
-        gdrive_architecture: 'OAuth PKCE — browser redirects to Google, server stores tokens in KV',
         error: err || null,
       }, err ? 503 : 200, origin);
     }

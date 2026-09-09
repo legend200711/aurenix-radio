@@ -128,9 +128,6 @@ let _liveTvCurrentFreq   = 'normal';
 // Commercial library
 let _commercialLib       = [];
 let _commLibUnsub        = null;
-// Google Drive state
-let _gdriveStatus        = null;   // { connected, account_email, account_name, folder }
-let _gdriveUploadCategory = 'video';
 
 /* ═══════════════════════════════════════
    ENTRY POINT
@@ -213,8 +210,6 @@ export function mountControl(user, isAdmin) {
     _bindLiveTvPane();
     _bindCommercialStudio();
     _subscribeCommercialLib();
-    _bindStoragePane();
-    _bindGdriveUploadPane();
 
     // Close button
     ctrl.querySelector('#ax-ctrl-close')?.addEventListener('click', _restoreHero);
@@ -228,9 +223,7 @@ export function mountControl(user, isAdmin) {
 
     // Worker health check
     _checkWorkerHealth();
-    _checkDriveDiagnostic();
     ctrl.querySelector('#ax-sec-recheck-btn')?.addEventListener('click', _checkWorkerHealth);
-    ctrl.querySelector('#ax-diag-drive-recheck-btn')?.addEventListener('click', _checkDriveDiagnostic);
 
     // Probe upload limit button
     ctrl.querySelector('#ax-sec-probe-limit-btn')?.addEventListener('click', async () => {
@@ -477,107 +470,28 @@ function _buildFounderHTML() {
     <div class="ax-ctrl-pane" id="ax-pane-upload">
       <div class="ax-section-title">Upload <span>Center</span></div>
 
-      <!-- Upload destination tabs -->
-      <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;" id="ax-upload-dest-tabs">
-        <button class="ax-btn-sm ax-upload-dest-tab active" data-dest="supabase" style="padding:8px 20px;">
-          ☁ Supabase Storage
-        </button>
-        <button class="ax-btn-sm ax-upload-dest-tab" data-dest="gdrive" style="padding:8px 20px;" id="ax-upload-dest-gdrive-btn">
-          🔵 Google Drive
-        </button>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:12px;line-height:1.7;color:var(--text-dim);">
+        <strong style="color:var(--text);">Upload anything you have the legal right to submit.</strong><br>
+        All submissions are reviewed by the Founder before they can be broadcast.<br>
+        Accepted: MP3, WAV, M4A, AAC, MP4, WebM, MOV, JPG, PNG, WebP — any technically-supported file.<br>
+        <strong style="color:var(--orange,#f0a500);">Uploading does not broadcast.</strong> The Founder reviews and approves each file before it enters any channel or playlist.
       </div>
-
-      <!-- ── SUPABASE UPLOAD PANEL ── -->
-      <div id="ax-upload-supabase-panel">
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:12px;line-height:1.7;color:var(--text-dim);">
-          <strong style="color:var(--text);">Upload anything you have the legal right to submit.</strong><br>
-          All submissions are reviewed by the Founder before they can be broadcast.<br>
-          Accepted: moving video, people, faces, music videos, slideshows, cat videos, podcasts, funny clips, large MP4s — any technically-supported file.<br>
-          <strong style="color:var(--orange,#f0a500);">Uploading does not broadcast.</strong> The Founder reviews and approves each file before it enters any channel or playlist.
-        </div>
-        <div class="ax-upload-categories">
-          ${MEDIA_CATEGORIES.map(cat => `
-            <button class="ax-upload-cat-btn ${cat.id === 'music' ? 'active' : ''}" data-cat="${cat.id}" data-accept="${cat.accept}">
-              ${cat.label}
-            </button>`).join('')}
-        </div>
-        <div class="ax-upload-zone" id="ax-upload-zone">
-          <div class="ax-upload-icon">🎬</div>
-          <div class="ax-upload-title">DROP MEDIA HERE</div>
-          <div class="ax-upload-sub">or SELECT FILES — multiple files supported</div>
-          <div class="ax-upload-sub" style="margin-top:6px;font-size:11px;opacity:0.6;">
-            Audio: MP3 WAV AAC OGG FLAC M4A &nbsp;|&nbsp; Video: MP4 WebM MOV AVI MKV &nbsp;|&nbsp; Images: JPG PNG WebP GIF
-          </div>
-          <input type="file" id="ax-file-input" multiple accept="audio/*,video/*,image/*" style="display:none;">
-        </div>
-        <div class="ax-upload-progress-list" id="ax-upload-list"></div>
+      <div class="ax-upload-categories">
+        ${MEDIA_CATEGORIES.map(cat => `
+          <button class="ax-upload-cat-btn ${cat.id === 'music' ? 'active' : ''}" data-cat="${cat.id}" data-accept="${cat.accept}">
+            ${cat.label}
+          </button>`).join('')}
       </div>
-
-      <!-- ── GOOGLE DRIVE UPLOAD PANEL ── -->
-      <div id="ax-upload-gdrive-panel" style="display:none;">
-        <div id="ax-gdrive-upload-not-connected" style="background:rgba(30,80,255,0.07);border:1px solid rgba(30,80,255,0.25);border-radius:8px;padding:18px 20px;margin-bottom:16px;">
-          <div style="font-size:14px;font-weight:700;color:var(--blue-bright);margin-bottom:6px;">🔵 Google Drive Not Connected</div>
-          <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;line-height:1.6;">
-            Connect your Google Drive first to upload directly to Drive.<br>
-            Go to <strong style="color:var(--text);">Founder Studio → Storage → Google Drive</strong>.
-          </div>
-          <button class="ax-btn-sm" onclick="window._AXC.switchToPane('storage')" style="padding:8px 18px;">
-            💾 Go to Storage Settings
-          </button>
+      <div class="ax-upload-zone" id="ax-upload-zone">
+        <div class="ax-upload-icon">🎬</div>
+        <div class="ax-upload-title">DROP MEDIA HERE</div>
+        <div class="ax-upload-sub">or SELECT FILES — multiple files supported</div>
+        <div class="ax-upload-sub" style="margin-top:6px;font-size:11px;opacity:0.6;">
+          Audio: MP3 WAV AAC M4A &nbsp;|&nbsp; Video: MP4 WebM MOV &nbsp;|&nbsp; Images: JPG PNG WebP
         </div>
-        <div id="ax-gdrive-upload-connected" style="display:none;">
-          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:12px;line-height:1.7;color:var(--text-dim);">
-            <strong style="color:var(--text);">Upload large video directly to Google Drive.</strong><br>
-            Uses Google's resumable upload API — the video goes straight from your browser to Drive.<br>
-            The Worker only handles authorization (tiny JSON) — large files never pass through it.<br>
-            <strong style="color:var(--orange,#f0a500);">Uploading does not broadcast.</strong> Founder approval still required.
-          </div>
-
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px 14px;background:rgba(30,80,255,0.07);border-radius:6px;border:1px solid rgba(30,80,255,0.2);">
-            <span style="font-size:11px;color:var(--text-dim);">Upload to subfolder:</span>
-            <select class="ax-field-input" id="ax-gdrive-subfolder" style="flex:1;max-width:200px;padding:4px 8px;font-size:12px;">
-              <option value="">— Root AURENIX folder —</option>
-              <option value="videos">Videos</option>
-              <option value="music">Music</option>
-              <option value="commercials">Commercials</option>
-              <option value="approved">Approved</option>
-              <option value="archive">Archive</option>
-            </select>
-            <div class="ax-upload-categories" style="margin:0;flex-wrap:nowrap;overflow-x:auto;">
-              ${MEDIA_CATEGORIES.map(cat => `
-                <button class="ax-upload-cat-btn ax-gdrive-cat-btn ${cat.id === 'video' ? 'active' : ''}" data-cat="${cat.id}" data-accept="${cat.accept}" style="font-size:10px;padding:4px 10px;white-space:nowrap;">
-                  ${cat.label}
-                </button>`).join('')}
-            </div>
-          </div>
-
-          <div class="ax-upload-zone" id="ax-gdrive-upload-zone" style="cursor:pointer;">
-            <div class="ax-upload-icon">📁</div>
-            <div class="ax-upload-title">DROP VIDEO HERE FOR GOOGLE DRIVE</div>
-            <div class="ax-upload-sub">or SELECT FILE — uses Google's resumable upload</div>
-            <div class="ax-upload-sub" style="margin-top:6px;font-size:11px;opacity:0.6;">
-              Video: MP4 WebM MOV AVI MKV · Audio: MP3 WAV AAC · Images: JPG PNG WebP<br>
-              No artificial size limit — limited only by your Google Drive storage quota.
-            </div>
-            <input type="file" id="ax-gdrive-file-input" accept="audio/*,video/*,image/*" style="display:none;">
-          </div>
-          <div id="ax-gdrive-upload-progress" style="display:none;margin-top:16px;">
-            <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
-              <div style="flex:1;min-width:0;">
-                <div style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" id="ax-gdrive-upload-filename">—</div>
-                <div style="font-size:11px;color:var(--text-dim);" id="ax-gdrive-upload-filesize">—</div>
-              </div>
-              <span id="ax-gdrive-upload-pct" style="font-size:13px;font-weight:700;color:var(--blue-bright);min-width:40px;text-align:right;">0%</span>
-            </div>
-            <div style="height:8px;background:var(--surface-hi);border-radius:4px;overflow:hidden;margin-bottom:6px;">
-              <div id="ax-gdrive-upload-bar" style="height:100%;width:0%;background:var(--blue-bright);transition:width 0.15s;border-radius:4px;"></div>
-            </div>
-            <div style="font-size:12px;color:var(--text-dim);" id="ax-gdrive-upload-status">Preparing…</div>
-            <div style="margin-top:6px;font-size:11px;color:var(--text-dim);" id="ax-gdrive-upload-bytes"></div>
-          </div>
-          <div id="ax-gdrive-upload-result" style="display:none;margin-top:14px;"></div>
-        </div>
+        <input type="file" id="ax-file-input" multiple accept="audio/*,video/*,image/*" style="display:none;">
       </div>
+      <div class="ax-upload-progress-list" id="ax-upload-list"></div>
     </div>
 
     <!-- ══ MEDIA LIBRARY ══ -->
@@ -732,20 +646,6 @@ function _buildFounderHTML() {
           <div id="ax-sec-limit-result" style="margin-top:8px;font-size:11px;color:var(--text-dim);display:none;white-space:pre-wrap;word-break:break-all;max-height:120px;overflow-y:auto;background:var(--surface-hi);border-radius:4px;padding:8px;"></div>
         </div>
 
-        <!-- ══ GOOGLE DRIVE DIAGNOSTIC ══ -->
-        <div class="ax-security-card" style="grid-column:1/-1;">
-          <div class="ax-security-title">🗂 GOOGLE DRIVE DIAGNOSTIC</div>
-          <div class="ax-security-row"><span>Google Drive Account</span><span class="ax-security-val" id="ax-diag-drive-account">—</span></div>
-          <div class="ax-security-row"><span>Drive Status</span><span class="ax-security-val" id="ax-diag-drive-status">—</span></div>
-          <div class="ax-security-row"><span>AURENIX Media Folder</span><span class="ax-security-val" id="ax-diag-drive-folder-name">—</span></div>
-          <div class="ax-security-row"><span>Folder ID</span><span class="ax-security-val" id="ax-diag-drive-folder-id">—</span></div>
-          <div class="ax-security-row"><span>Folder Access</span><span class="ax-security-val" id="ax-diag-drive-folder-access">—</span></div>
-          <div style="margin-top:8px;">
-            <button class="ax-btn-sm" id="ax-diag-drive-recheck-btn">↺ Re-check Drive</button>
-          </div>
-          <div id="ax-diag-drive-result" style="margin-top:8px;font-size:11px;color:var(--text-dim);display:none;white-space:pre-wrap;word-break:break-all;max-height:80px;overflow-y:auto;background:var(--surface-hi);border-radius:4px;padding:8px;"></div>
-        </div>
-
       </div>
     </div>
 
@@ -888,155 +788,30 @@ function _buildFounderHTML() {
       <div class="ax-section-title">💾 AURENIX <span>Storage</span></div>
 
       <!-- Storage overview cards -->
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-bottom:24px;" id="ax-storage-overview">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-bottom:24px;">
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;">
-          <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:var(--blue-bright);margin-bottom:6px;">☁ SUPABASE STORAGE</div>
+          <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:var(--blue-bright);margin-bottom:6px;">☁ SHADOW NEXUS STORAGE</div>
           <div style="font-size:13px;color:var(--text);margin-bottom:4px;">aurenix-media bucket</div>
-          <div style="font-size:11px;color:var(--green);">✓ Active</div>
+          <div style="font-size:11px;color:var(--green);">✓ Active — all media stored here</div>
         </div>
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;">
           <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:var(--gold);margin-bottom:6px;">🔥 FIREBASE</div>
           <div style="font-size:13px;color:var(--text);margin-bottom:4px;">Firestore metadata</div>
           <div style="font-size:11px;color:var(--green);">✓ Active</div>
         </div>
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;" id="ax-storage-gdrive-overview-card">
-          <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:#4285f4;margin-bottom:6px;">🔵 GOOGLE DRIVE</div>
-          <div style="font-size:13px;color:var(--text);margin-bottom:4px)" id="ax-storage-gdrive-status-text">Checking…</div>
-          <div style="font-size:11px;color:var(--text-dim);" id="ax-storage-gdrive-account-line"></div>
-        </div>
       </div>
 
-      <!-- Google Drive Section -->
-      <div style="background:var(--surface);border:1px solid rgba(66,133,244,0.3);border-radius:10px;padding:20px 22px;margin-bottom:20px;">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
-          <div style="font-size:18px;font-weight:900;letter-spacing:0.12em;color:var(--text);">
-            GOOGLE DRIVE
-          </div>
-          <div id="ax-gdrive-status-badge" style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:10px;background:rgba(30,80,255,0.15);color:var(--text-dim);">
-            Checking…
-          </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px 22px;margin-bottom:20px;">
+        <div style="font-size:15px;font-weight:900;letter-spacing:0.1em;color:var(--text);margin-bottom:12px;">SHADOW NEXUS MEDIA STORAGE</div>
+        <div style="font-size:12px;color:var(--text-dim);line-height:1.8;">
+          All media — audio, video, and images — is stored directly in Shadow Nexus.<br>
+          Upload via <strong style="color:var(--text);">Upload Center</strong>. Files are stored in the <code style="background:var(--surface-hi);padding:1px 4px;border-radius:3px;">aurenix-media</code> bucket.<br>
+          Access to media files requires authorization. The service-role key never reaches the browser.<br>
+          <strong style="color:var(--orange,#f0a500);">Supported formats:</strong> MP3, WAV, M4A, AAC, MP4, WebM, MOV, JPG, JPEG, PNG, WebP
         </div>
-
-        <!-- NOT CONNECTED STATE -->
-        <div id="ax-gdrive-not-connected">
-          <div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.7;">
-            Connect your Google Drive to store large videos and media directly in your Drive.<br>
-            AURENIX uses Google's official OAuth 2.0 — you will authenticate directly on Google's page.<br>
-            <strong style="color:var(--text);">AURENIX never asks for or stores your Google password.</strong>
-          </div>
-          <div id="ax-gdrive-connect-err" style="display:none;margin-bottom:10px;padding:10px 14px;background:rgba(255,45,85,0.1);border:1px solid rgba(255,45,85,0.3);border-radius:6px;font-size:12px;color:var(--red);line-height:1.6;"></div>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
-            <button class="ax-btn-primary" id="ax-gdrive-connect-btn" style="font-size:14px;padding:12px 28px;font-weight:900;letter-spacing:1px;">
-              🔵 CONNECT GOOGLE DRIVE
-            </button>
-            <button class="ax-btn-sm" id="ax-gdrive-setup-toggle" style="padding:8px 16px;font-size:11px;">
-              ⚙ SETUP INSTRUCTIONS
-            </button>
-          </div>
-
-          <!-- Setup instructions panel (collapsed by default) -->
-          <div id="ax-gdrive-setup-panel" style="display:none;margin-top:16px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px 18px;font-size:12px;line-height:1.9;color:var(--text-dim);">
-            <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px;letter-spacing:1px;">⚙ GOOGLE CLOUD SETUP GUIDE</div>
-            <div style="margin-bottom:12px;">
-              <strong style="color:var(--text);">1. Create Google Cloud Project</strong><br>
-              Go to <a href="https://console.cloud.google.com/" target="_blank" rel="noopener" style="color:var(--blue-bright);">console.cloud.google.com</a> →
-              Create or select a project.
-            </div>
-            <div style="margin-bottom:12px;">
-              <strong style="color:var(--text);">2. Enable Google Drive API</strong><br>
-              APIs &amp; Services → Library → search "Google Drive API" → Enable.
-            </div>
-            <div style="margin-bottom:12px;">
-              <strong style="color:var(--text);">3. Configure OAuth Consent Screen</strong><br>
-              APIs &amp; Services → OAuth consent screen → External →<br>
-              Add scopes: <code style="background:var(--surface-hi);padding:1px 4px;border-radius:3px;">drive.file</code>,
-              <code style="background:var(--surface-hi);padding:1px 4px;border-radius:3px;">userinfo.email</code>,
-              <code style="background:var(--surface-hi);padding:1px 4px;border-radius:3px;">userinfo.profile</code><br>
-              Add your Google account as a Test User.
-            </div>
-            <div style="margin-bottom:12px;">
-              <strong style="color:var(--text);">4. Create OAuth Credentials</strong><br>
-              APIs &amp; Services → Credentials → Create Credentials → OAuth client ID →<br>
-              Application type: Web application →<br>
-              Authorized redirect URI: <code id="ax-gdrive-setup-redirect-uri" style="background:var(--surface-hi);padding:1px 4px;border-radius:3px;color:var(--blue-bright);">loading…</code>
-            </div>
-            <div style="margin-bottom:12px;">
-              <strong style="color:var(--text);">5. Create KV Namespace</strong><br>
-              <code style="background:var(--surface-hi);padding:2px 6px;border-radius:3px;">cd upload-worker &amp;&amp; npx wrangler kv namespace create GDRIVE_KV</code><br>
-              Copy the ID into <code style="background:var(--surface-hi);padding:1px 4px;border-radius:3px;">upload-worker/wrangler.jsonc</code>.
-            </div>
-            <div style="margin-bottom:12px;">
-              <strong style="color:var(--text);">6. Set Secrets (server-side only — never in JS/HTML)</strong><br>
-              <code style="background:var(--surface-hi);padding:2px 6px;border-radius:3px;display:block;margin:4px 0;">npx wrangler secret put GOOGLE_CLIENT_ID</code>
-              <code style="background:var(--surface-hi);padding:2px 6px;border-radius:3px;display:block;margin:4px 0;">npx wrangler secret put GOOGLE_CLIENT_SECRET</code>
-              <code style="background:var(--surface-hi);padding:2px 6px;border-radius:3px;display:block;margin:4px 0;">npx wrangler secret put GOOGLE_REDIRECT_URI</code>
-              <code style="background:var(--surface-hi);padding:2px 6px;border-radius:3px;display:block;margin:4px 0;">npx wrangler deploy</code>
-            </div>
-            <div style="padding:10px 12px;background:rgba(255,45,85,0.08);border:1px solid rgba(255,45,85,0.2);border-radius:6px;color:var(--text-dim);">
-              ⚠ <strong style="color:var(--red);">Security:</strong> Never put <code>GOOGLE_CLIENT_SECRET</code> in any JavaScript, HTML, CSS, or GitHub file.
-              It must remain in Cloudflare Worker secrets only.
-            </div>
-          </div>
-        </div>
-
-        <!-- CONNECTED STATE -->
-        <div id="ax-gdrive-connected" style="display:none;">
-          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:16px;">
-            <div style="background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px 14px;">
-              <div style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:var(--text-dim);text-transform:uppercase;margin-bottom:4px;">Connected Account</div>
-              <div style="font-size:13px;color:var(--text);font-weight:600;" id="ax-gdrive-account-name">—</div>
-              <div style="font-size:11px;color:var(--text-dim);" id="ax-gdrive-account-email">—</div>
-            </div>
-            <div style="background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px 14px;" id="ax-gdrive-folder-card">
-              <div style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:var(--text-dim);text-transform:uppercase;margin-bottom:4px;">Storage Folder</div>
-              <div style="font-size:13px;color:var(--text);font-weight:600;" id="ax-gdrive-folder-name">Not set</div>
-              <div style="font-size:10px;color:var(--text-dim);">AURENIX/Videos, Music, Commercials, Approved, Archive</div>
-            </div>
-          </div>
-
-          <!-- Folder management -->
-          <div style="margin-bottom:16px;">
-            <div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:var(--text-dim);text-transform:uppercase;margin-bottom:8px;">AURENIX FOLDER</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
-              <div style="flex:1;min-width:220px;">
-                <div id="ax-gdrive-folder-list-wrap" style="display:none;">
-                  <select class="ax-field-input" id="ax-gdrive-folder-select" style="margin-bottom:6px;">
-                    <option value="">— loading Drive folders… —</option>
-                  </select>
-                  <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px;">Or create a new folder named:</div>
-                  <input class="ax-field-input" id="ax-gdrive-new-folder-name" placeholder="AURENIX" value="AURENIX" style="margin-bottom:6px;">
-                  <div style="display:flex;gap:6px;">
-                    <button class="ax-btn-sm" id="ax-gdrive-folder-use-existing" style="flex:1;">Use Selected</button>
-                    <button class="ax-btn-sm" id="ax-gdrive-folder-create-new" style="flex:1;background:rgba(30,80,255,0.2);">Create New</button>
-                  </div>
-                </div>
-              </div>
-              <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;">
-                <button class="ax-btn-sm" id="ax-gdrive-change-folder-btn" style="padding:8px 16px;">
-                  📁 CHANGE FOLDER
-                </button>
-                <a id="ax-gdrive-open-drive-btn" href="#" target="_blank" rel="noopener"
-                   style="display:inline-block;padding:7px 14px;background:var(--surface-hi);border:1px solid var(--border);border-radius:5px;font-size:11px;font-weight:700;letter-spacing:0.5px;color:var(--text-dim);text-decoration:none;text-align:center;cursor:pointer;">
-                  🔗 OPEN GOOGLE DRIVE
-                </a>
-                <button class="ax-btn-sm ax-btn-danger" id="ax-gdrive-disconnect-btn" style="padding:8px 16px;font-size:11px;">
-                  ✕ DISCONNECT GOOGLE DRIVE
-                </button>
-              </div>
-            </div>
-            <div id="ax-gdrive-folder-status" style="margin-top:8px;font-size:12px;color:var(--text-dim);"></div>
-          </div>
-
-          <!-- Subfolder status -->
-          <div style="font-size:11px;font-weight:700;letter-spacing:1.5px;color:var(--text-dim);text-transform:uppercase;margin-bottom:8px;">FOLDER STRUCTURE</div>
-          <div id="ax-gdrive-subfolders" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
-            <div style="font-size:11px;color:var(--text-dim);">Loading subfolder info…</div>
-          </div>
-
-          <!-- Use Drive for uploads -->
-          <div style="padding:10px 14px;background:rgba(30,80,255,0.07);border:1px solid rgba(30,80,255,0.2);border-radius:6px;font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-            💡 To upload to Google Drive: go to <strong style="color:var(--text);">Upload Center → 🔵 Google Drive</strong> tab.
-          </div>
+        <div style="margin-top:14px;padding:10px 14px;background:rgba(30,80,255,0.06);border:1px solid rgba(30,80,255,0.2);border-radius:6px;font-size:12px;color:var(--text-dim);">
+          💡 To upload media: go to <strong style="color:var(--text);">Upload Center</strong>.
+          Files are stored in <code style="background:var(--surface-hi);padding:1px 4px;border-radius:3px;">aurenix-media/media/{uid}/</code> and require Founder authorization.
         </div>
       </div>
 
@@ -1306,22 +1081,6 @@ function _buildFounderHTML() {
     <div style="font-size:11px;color:var(--text-dim);margin-bottom:20px;line-height:1.7;padding:10px 14px;background:rgba(30,80,255,0.06);border:1px solid rgba(30,80,255,0.18);border-radius:6px;">
       <strong style="color:var(--text);">Where do you want this media to go?</strong><br>
       Approval does <strong style="color:var(--orange,#f0a500);">not</strong> automatically broadcast. You control storage and channel assignment separately.
-    </div>
-
-    <!-- STORAGE DESTINATION -->
-    <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:var(--text-dim);text-transform:uppercase;margin-bottom:10px;">STORAGE DESTINATION</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;" id="ax-approve-dest-storage-btns">
-      <button class="ax-approve-dest-storage-btn active" data-storage="supabase"
-              style="flex:1;min-width:160px;padding:12px 16px;background:rgba(30,80,255,0.12);border:2px solid var(--blue-bright);border-radius:8px;color:var(--blue-bright);font-size:12px;font-weight:700;cursor:pointer;text-align:center;line-height:1.5;">
-        ☁ SUPABASE STORAGE<br><span style="font-size:10px;font-weight:400;opacity:0.7;">Keep in current location</span>
-      </button>
-      <button class="ax-approve-dest-storage-btn" data-storage="gdrive"
-              style="flex:1;min-width:160px;padding:12px 16px;background:var(--surface);border:2px solid var(--border);border-radius:8px;color:var(--text-dim);font-size:12px;font-weight:700;cursor:pointer;text-align:center;line-height:1.5;" id="ax-approve-dest-gdrive-btn">
-        🔵 GOOGLE DRIVE<br><span style="font-size:10px;font-weight:400;opacity:0.7;">Copy to Drive (server-side)</span>
-      </button>
-    </div>
-    <div id="ax-approve-dest-gdrive-warn" style="display:none;font-size:11px;color:var(--orange,#f0a500);margin-bottom:10px;padding:8px 12px;background:rgba(240,165,0,0.08);border:1px solid rgba(240,165,0,0.25);border-radius:5px;">
-      ⚠ Google Drive is not connected. Go to <strong>Storage → Google Drive</strong> to connect it first.
     </div>
 
     <!-- STORAGE MODE -->
@@ -2701,7 +2460,6 @@ function _updateApprovalBadge() {
 /* ── APPROVE DESTINATION MODAL ── */
 // State for the modal
 let _approveDestMediaId   = null;
-let _approveDestStorage   = 'supabase';  // 'supabase' | 'gdrive'
 let _approveDestMode      = 'storage_and_channel'; // 'storage_and_channel' | 'storage_only' | 'channel_only'
 let _approveDestChannels  = new Set();   // set of channelIds selected
 let _approveDestProg      = 'ready';     // 'ready' | 'scheduled' | 'hold'
@@ -2715,7 +2473,6 @@ function _openApproveDestModal(mediaId) {
   if (!item) return;
 
   _approveDestMediaId  = mediaId;
-  _approveDestStorage  = 'supabase';
   _approveDestMode     = 'storage_and_channel';
   _approveDestChannels = new Set();
   _approveDestProg     = 'ready';
@@ -2740,8 +2497,6 @@ function _openApproveDestModal(mediaId) {
     b.style.borderColor  = isActive ? 'var(--blue-bright)' : 'var(--border)';
     b.style.color        = isActive ? 'var(--blue-bright)' : 'var(--text-dim)';
   });
-  document.getElementById('ax-approve-dest-gdrive-warn').style.display = 'none';
-
   // Reset mode buttons
   modal.querySelectorAll('.ax-approve-dest-mode-btn').forEach(b => {
     const isActive = b.dataset.mode === 'storage_and_channel';
@@ -2834,31 +2589,6 @@ function _bindApprovalPane() {
   const modal = document.getElementById('ax-approve-dest-modal');
   if (!modal) return;
 
-  // Storage buttons
-  modal.querySelectorAll('.ax-approve-dest-storage-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const storage = btn.dataset.storage;
-      // If Google Drive selected, check it's connected first
-      if (storage === 'gdrive') {
-        const connected = _gdriveStatus?.connected;
-        const warnEl = document.getElementById('ax-approve-dest-gdrive-warn');
-        if (!connected) {
-          if (warnEl) warnEl.style.display = '';
-          return; // Don't allow selection if not connected
-        }
-        if (warnEl) warnEl.style.display = 'none';
-      }
-      _approveDestStorage = storage;
-      modal.querySelectorAll('.ax-approve-dest-storage-btn').forEach(b => {
-        const active = b.dataset.storage === storage;
-        b.classList.toggle('active', active);
-        b.style.background   = active ? 'rgba(30,80,255,0.12)' : 'var(--surface)';
-        b.style.borderColor  = active ? 'var(--blue-bright)'   : 'var(--border)';
-        b.style.color        = active ? 'var(--blue-bright)'   : 'var(--text-dim)';
-      });
-    });
-  });
-
   // Mode buttons
   modal.querySelectorAll('.ax-approve-dest-mode-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -2940,47 +2670,12 @@ async function _executeApproveAndAssign() {
       approved_at:        serverTimestamp(),
       approved_by:        _user?.email || '',
       programming_status: _approveDestProg,
-      storage_backend:    _approveDestStorage,
+      storage_backend:    'shadow_nexus',
       assigned_channels:  includeChannels ? selectedChannels : [],
     };
     await updateDoc(doc(db, 'network_media', mediaId), updateData);
 
-    // ── STEP 2: Google Drive copy (server-side, if selected) ─────────────────
-    if (_approveDestStorage === 'gdrive' && item.storage_path) {
-      setStatus('Copying to Google Drive (server-side)…');
-      try {
-        const idToken  = await auth.currentUser.getIdToken(true);
-        const copyRes  = await fetch(UPLOAD_WORKER_URL + '/submission/copy-to-drive', {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + idToken, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            storagePath: item.storage_path,
-            fileName:    item.title || item.storage_path.split('/').pop() || 'media',
-            mimeType:    item.mime_type || 'application/octet-stream',
-          }),
-        });
-        const copyData = await copyRes.json();
-        if (!copyRes.ok || !copyData.ok) {
-          // Non-fatal: approval is already saved; log the Drive copy failure
-          console.warn('[AURENIX] Drive copy failed:', copyData.error);
-          setStatus(`⚠ Drive copy failed: ${copyData.error || 'Unknown error'}. Media stays in Supabase. Approval saved.`);
-          _toast(`Drive copy failed: ${copyData.error || 'see console'}. Approved in Supabase.`, 'warn');
-        } else {
-          // Update Firestore with Drive file info
-          await updateDoc(doc(db, 'network_media', mediaId), {
-            drive_file_id:  copyData.driveFileId,
-            drive_view_url: copyData.viewUrl || '',
-            storage_backend: 'google_drive',
-          });
-          setStatus('✓ Copied to Google Drive. Firestore updated.');
-        }
-      } catch (driveErr) {
-        console.warn('[AURENIX] Drive copy exception:', driveErr);
-        setStatus(`⚠ Drive copy error: ${driveErr.message}. Approval already saved.`);
-      }
-    }
-
-    // ── STEP 3: Log channel assignments in Firestore ─────────────────────────
+    // ── STEP 2: Log channel assignments in Firestore ─────────────────────────
     if (includeChannels) {
       setStatus('Saving channel assignments…');
       // Record on the media doc which channels it is assigned to
@@ -3000,7 +2695,7 @@ async function _executeApproveAndAssign() {
 
     const summaryParts = [
       `✓ APPROVED — "${item.title || mediaId}"`,
-      `Storage: ${_approveDestStorage === 'gdrive' ? 'Google Drive' : 'Supabase'}`,
+      `Storage: Shadow Nexus`,
       _approveDestMode !== 'storage_only' && selectedChannels.length
         ? `Channels: ${chNames}`
         : _approveDestMode === 'storage_only'
@@ -3100,10 +2795,7 @@ function _renderApproval() {
                     onclick="window._AXC.requestChanges('${m.id}')">↻ REQUEST CHANGES</button>
           ` : isApproved ? `
             <div style="font-size:11px;font-weight:700;color:var(--green);text-align:center;margin-bottom:4px;">✓ APPROVED</div>
-            ${m.storage_backend === 'google_drive'
-              ? `<div style="font-size:10px;color:#4285f4;text-align:center;margin-bottom:4px;">🔵 Google Drive</div>`
-              : `<div style="font-size:10px;color:var(--blue-bright);text-align:center;margin-bottom:4px;">☁ Supabase</div>`
-            }
+            <div style="font-size:10px;color:var(--blue-bright);text-align:center;margin-bottom:4px;">☁ Shadow Nexus</div>
             ${(m.assigned_channels||[]).length ? `<div style="font-size:9px;color:var(--text-dim);text-align:center;margin-bottom:4px;">Channels: ${_esc((m.assigned_channels||[]).join(', '))}</div>` : ''}
             ${m.programming_status ? `<div style="font-size:9px;font-weight:700;letter-spacing:1px;color:var(--text-dim);text-align:center;margin-bottom:6px;">${_esc(m.programming_status.toUpperCase())}</div>` : ''}
             <button class="ax-btn-sm" onclick="window._AXC.openBroadcast('${m.id}')">📡 Add to Broadcast</button>
@@ -3185,15 +2877,13 @@ function _renderMediaGrid(grid, items, showActions) {
     const st = m.status || 'pending_approval';
     const isApproved = st === 'approved' || st === 'ready';
     const stLabel = st === 'pending_approval' ? 'PENDING APPROVAL' : st.toUpperCase();
-    const isDrive = m.storage_backend === 'google_drive' || !!m.drive_file_id;
-    const driveId = m.drive_file_id || '';
     return `
     <div class="ax-media-card" data-id="${m.id}">
       <div class="ax-media-card-thumb">
         ${m.thumbnail_url
           ? `<img src="${_esc(m.thumbnail_url)}" alt="" loading="lazy">`
           : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:28px;opacity:0.5;">${_typeIcon(m.type)}</div>`}
-        <span class="ax-media-card-type">${m.type || 'media'}${isDrive ? ' 🔵' : ''}</span>
+        <span class="ax-media-card-type">${m.type || 'media'}</span>
         ${m.duration_sec ? `<span class="ax-media-card-dur">${_fmtTime(m.duration_sec)}</span>` : ''}
         ${m.channel ? `<span class="ax-media-card-ch" style="position:absolute;bottom:4px;left:4px;font-size:9px;background:rgba(0,0,0,0.7);color:#4d7aff;padding:1px 4px;border-radius:3px;">${m.channel}</span>` : ''}
         <span style="position:absolute;top:4px;right:4px;font-size:9px;font-weight:700;letter-spacing:0.5px;padding:2px 5px;border-radius:3px;background:rgba(0,0,0,0.75);color:${statusColors[st] || 'var(--text-dim)'};">${stLabel}</span>
@@ -3202,9 +2892,7 @@ function _renderMediaGrid(grid, items, showActions) {
         <div class="ax-media-card-title" title="${_esc(m.title)}">${_esc(m.title)}</div>
         <div class="ax-media-card-meta">${_esc(m.artist || m.creator || '')}${m.uploaded_at ? ' · ' + _relDate(m.uploaded_at) : ''}${m.size_bytes ? ' · ' + _fmtSize(m.size_bytes) : ''}</div>
         <div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:3px;">
-          ${isDrive
-            ? `<span style="font-size:9px;color:#4285f4;font-weight:700;background:rgba(66,133,244,0.12);padding:1px 5px;border-radius:3px;">🔵 DRIVE</span>`
-            : `<span style="font-size:9px;color:var(--blue-bright);font-weight:700;background:rgba(30,80,255,0.1);padding:1px 5px;border-radius:3px;">☁ SUPABASE</span>`}
+          <span style="font-size:9px;color:var(--blue-bright);font-weight:700;background:rgba(30,80,255,0.1);padding:1px 5px;border-radius:3px;">☁ Shadow Nexus</span>
           ${(m.assigned_channels||[]).map(chId => {
               const ch = _channels().find(c => c.id === chId);
               return `<span style="font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;background:${(ch?.color||'#1e50ff')}22;color:${ch?.color||'#4d7aff'};">${_esc(ch?.label || chId)}</span>`;
@@ -3221,8 +2909,7 @@ function _renderMediaGrid(grid, items, showActions) {
              <button class="ax-btn-sm" onclick="window._AXC.addToSched('${m.id}')" title="Schedule">📅</button>`
           : `<button class="ax-btn-sm" style="opacity:0.4;cursor:not-allowed;" disabled title="Approve before broadcasting">📡</button>
              <button class="ax-btn-sm" style="opacity:0.4;cursor:not-allowed;" disabled title="Approve before scheduling">📅</button>`}
-        ${isDrive && driveId ? `<a href="https://drive.google.com/file/d/${_esc(driveId)}/view" target="_blank" rel="noopener" class="ax-btn-sm" title="Open in Google Drive" style="text-decoration:none;display:inline-block;">🔵</a>` : ''}
-        ${!isDrive && m.url ? `<button class="ax-btn-sm" onclick="window._AXC.downloadMedia('${m.id}')" title="Download">⬇</button>` : ''}
+        ${m.url ? `<button class="ax-btn-sm" onclick="window._AXC.downloadMedia('${m.id}')" title="Download">⬇</button>` : ''}
         <button class="ax-btn-sm ax-btn-danger" onclick="window._AXC.deleteMedia('${m.id}')" title="Delete">🗑</button>
       </div>` : ''}
     </div>`;
@@ -3470,79 +3157,6 @@ async function _checkWorkerHealth() {
       effEl.style.color = 'var(--text-dim)';
     }
   } catch (_) {}
-}
-
-/* ═══════════════════════════════════════
-   GOOGLE DRIVE DIAGNOSTIC
-═══════════════════════════════════════ */
-/**
- * Calls GET /gdrive/diagnostic and populates the Drive Diagnostic card
- * in the Founder Studio Security pane.
- * Shows: account email, connection status, folder name, masked folder ID,
- * and whether the folder is currently accessible.
- * Never displays OAuth secrets or refresh tokens.
- */
-async function _checkDriveDiagnostic() {
-  const set = (id, text, color) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.textContent = text;
-    if (color) el.style.color = color;
-  };
-
-  set('ax-diag-drive-account',       'checking…', '');
-  set('ax-diag-drive-status',        'checking…', '');
-  set('ax-diag-drive-folder-name',   '—', '');
-  set('ax-diag-drive-folder-id',     '—', '');
-  set('ax-diag-drive-folder-access', '—', '');
-
-  try {
-    if (!auth.currentUser) throw new Error('Not signed in');
-    const idToken = await auth.currentUser.getIdToken(true);
-    const res  = await fetch(UPLOAD_WORKER_URL + '/gdrive/diagnostic', {
-      headers: { 'Authorization': 'Bearer ' + idToken },
-    });
-    const data = await res.json();
-
-    if (!res.ok) {
-      set('ax-diag-drive-status', '✗ Error: ' + (data.error || data.config_error || 'Unknown'), 'var(--red,#ff2d55)');
-      return;
-    }
-
-    if (!data.connected) {
-      set('ax-diag-drive-account', data.account_email || '—', 'var(--text-dim)');
-      set('ax-diag-drive-status',  'NOT CONNECTED',        'var(--text-dim)');
-      set('ax-diag-drive-folder-name',   'N/A', 'var(--text-dim)');
-      set('ax-diag-drive-folder-id',     'N/A', 'var(--text-dim)');
-      set('ax-diag-drive-folder-access', 'N/A', 'var(--text-dim)');
-      return;
-    }
-
-    set('ax-diag-drive-account', data.account_email || '—', 'var(--text)');
-    set('ax-diag-drive-status',  'CONNECTED', 'var(--green)');
-
-    if (data.folder) {
-      set('ax-diag-drive-folder-name', data.folder.name || 'AURENIX', 'var(--text)');
-      set('ax-diag-drive-folder-id',   data.folder.id_masked || '—',  'var(--text-dim)');
-      const accessStatus = data.folder.status === 'VERIFIED'
-        ? 'VERIFIED ✓'
-        : data.folder.status === 'NOT_FOUND'
-          ? 'NOT FOUND ✗ (will auto-recover on next upload)'
-          : data.folder.status === 'ERROR'
-            ? 'ERROR ✗'
-            : data.folder.status;
-      const accessColor = data.folder.status === 'VERIFIED'
-        ? 'var(--green)'
-        : 'var(--orange,#f0a500)';
-      set('ax-diag-drive-folder-access', accessStatus, accessColor);
-    } else {
-      set('ax-diag-drive-folder-name',   'Not set — will auto-create on first upload', 'var(--orange,#f0a500)');
-      set('ax-diag-drive-folder-id',     'N/A', 'var(--text-dim)');
-      set('ax-diag-drive-folder-access', 'N/A', 'var(--text-dim)');
-    }
-  } catch (err) {
-    set('ax-diag-drive-status', '✗ ' + err.message, 'var(--red,#ff2d55)');
-  }
 }
 
 /* ═══════════════════════════════════════
@@ -4939,694 +4553,4 @@ function _showCommercialPreview(comm) {
   previewContent.innerHTML = html;
   previewModal.style.display = 'flex';
 }
-
-/* ═══════════════════════════════════════════════════════════
-   GOOGLE DRIVE — STORAGE PANE
-   ══════════════════════════════════════════════════════════
-   All OAuth is handled server-side by the Cloudflare Worker.
-   The Founder's Google password never passes through AURENIX.
-   Client secret and refresh tokens never reach browser JS.
-═══════════════════════════════════════════════════════════ */
-
-/**
- * Fetch Drive status from the Worker (requires Firebase Founder token).
- * Populates _gdriveStatus and re-renders the Storage pane.
- */
-async function _gdriveLoadStatus() {
-  if (!auth.currentUser) return;
-  try {
-    const idToken = await auth.currentUser.getIdToken(true);
-    const res = await fetch(UPLOAD_WORKER_URL + '/gdrive/status', {
-      headers: { 'Authorization': 'Bearer ' + idToken },
-    });
-    const data = await res.json();
-    _gdriveStatus = data;
-    _renderGdriveStatus();
-    // Also update the Drive upload panel connection state
-    _updateGdriveUploadPanelState();
-  } catch (e) {
-    console.warn('[AURENIX] Drive status check failed:', e.message);
-    _gdriveStatus = { connected: false, error: e.message };
-    _renderGdriveStatus();
-  }
-}
-
-/** Render the storage pane Drive status UI from _gdriveStatus. */
-function _renderGdriveStatus() {
-  const s = _gdriveStatus;
-  if (!s) return;
-
-  // Status badge
-  const badge      = document.getElementById('ax-gdrive-status-badge');
-  const notConn    = document.getElementById('ax-gdrive-not-connected');
-  const connDiv    = document.getElementById('ax-gdrive-connected');
-  const statusText = document.getElementById('ax-storage-gdrive-status-text');
-  const acctLine   = document.getElementById('ax-storage-gdrive-account-line');
-
-  if (s.connected) {
-    if (badge) { badge.textContent = '🟢 CONNECTED'; badge.style.background = 'rgba(0,200,80,0.15)'; badge.style.color = 'var(--green)'; }
-    if (notConn) notConn.style.display = 'none';
-    if (connDiv)  connDiv.style.display = '';
-    if (statusText) { statusText.textContent = '🟢 Connected'; statusText.style.color = 'var(--green)'; }
-    if (acctLine)   acctLine.textContent = s.account_email || '';
-
-    // Account info
-    const nameEl  = document.getElementById('ax-gdrive-account-name');
-    const emailEl = document.getElementById('ax-gdrive-account-email');
-    if (nameEl)  nameEl.textContent  = s.account_name  || s.account_email || '—';
-    if (emailEl) emailEl.textContent = s.account_email || '—';
-
-    // Folder info
-    const folderNameEl = document.getElementById('ax-gdrive-folder-name');
-    const openDriveBtn = document.getElementById('ax-gdrive-open-drive-btn');
-    if (s.folder) {
-      if (folderNameEl) folderNameEl.textContent = s.folder.name || 'AURENIX';
-      if (openDriveBtn && s.folder.webViewLink) openDriveBtn.href = s.folder.webViewLink;
-      // Render subfolders
-      const sfDiv = document.getElementById('ax-gdrive-subfolders');
-      if (sfDiv && s.folder.subFolders) {
-        const subs = Object.values(s.folder.subFolders);
-        sfDiv.innerHTML = subs.length
-          ? subs.map(sf => `
-              <a href="${_esc(sf.webViewLink || '#')}" target="_blank" rel="noopener"
-                 style="display:inline-flex;align-items:center;gap:5px;padding:5px 10px;background:var(--panel);border:1px solid var(--border);border-radius:5px;font-size:11px;font-weight:600;color:var(--text);text-decoration:none;">
-                📁 ${_esc(sf.name)}
-              </a>`).join('')
-          : '<div style="font-size:11px;color:var(--text-dim);">No subfolders yet — click CHANGE FOLDER to create them.</div>';
-      } else if (sfDiv) {
-        sfDiv.innerHTML = '<button class="ax-btn-sm" id="ax-gdrive-create-subfolders-btn" style="font-size:11px;">📁 Create AURENIX Subfolders</button>';
-        document.getElementById('ax-gdrive-create-subfolders-btn')?.addEventListener('click', () => _gdriveSetFolder(null, 'AURENIX'));
-      }
-    } else {
-      if (folderNameEl) folderNameEl.textContent = 'Not set';
-      // Auto-prompt to set up folder
-      const sfDiv = document.getElementById('ax-gdrive-subfolders');
-      if (sfDiv) sfDiv.innerHTML = `
-        <div style="font-size:12px;color:var(--orange,#f0a500);">⚠ No AURENIX folder set yet.</div>
-        <button class="ax-btn-sm" id="ax-gdrive-auto-folder-btn" style="margin-top:6px;font-size:11px;background:rgba(30,80,255,0.2);">
-          📁 CREATE AURENIX FOLDER + SUBFOLDERS
-        </button>`;
-      document.getElementById('ax-gdrive-auto-folder-btn')?.addEventListener('click', () => _gdriveSetFolder(null, 'AURENIX'));
-    }
-  } else {
-    if (badge)      { badge.textContent = 'NOT CONNECTED'; badge.style.background = ''; badge.style.color = 'var(--text-dim)'; }
-    if (notConn)    notConn.style.display = '';
-    if (connDiv)    connDiv.style.display = 'none';
-    if (statusText) { statusText.textContent = 'Not Connected'; statusText.style.color = 'var(--text-dim)'; }
-    if (acctLine)   acctLine.textContent = '';
-
-    // If config is not ready, show setup hint
-    if (!s.config_ready) {
-      const errDiv = document.getElementById('ax-gdrive-connect-err');
-      if (errDiv) {
-        errDiv.style.display = '';
-        errDiv.textContent = '⚙ Worker configuration required. ' + (s.config_error || '') + ' See SETUP INSTRUCTIONS below.';
-      }
-    }
-  }
-}
-
-/** Bind all buttons on the Storage pane. */
-function _bindStoragePane() {
-  // Load status when pane is opened
-  document.querySelector('[data-pane="storage"]')?.addEventListener('click', () => {
-    _gdriveLoadStatus();
-    // Load config check to show redirect URI in setup instructions
-    fetch(UPLOAD_WORKER_URL + '/gdrive/config-check')
-      .then(r => r.json())
-      .then(d => {
-        const uriEl = document.getElementById('ax-gdrive-setup-redirect-uri');
-        if (uriEl && d.redirect_uri) uriEl.textContent = d.redirect_uri;
-        else if (uriEl) uriEl.textContent = UPLOAD_WORKER_URL + '/gdrive/callback';
-      }).catch(() => {});
-  });
-
-  // Setup instructions toggle
-  document.getElementById('ax-gdrive-setup-toggle')?.addEventListener('click', () => {
-    const p = document.getElementById('ax-gdrive-setup-panel');
-    if (p) p.style.display = p.style.display === 'none' ? '' : 'none';
-  });
-
-  // CONNECT GOOGLE DRIVE button — opens OAuth popup
-  document.getElementById('ax-gdrive-connect-btn')?.addEventListener('click', _gdriveStartOAuth);
-
-  // DISCONNECT button
-  document.getElementById('ax-gdrive-disconnect-btn')?.addEventListener('click', async () => {
-    if (!confirm('Disconnect Google Drive?\n\nThis removes AURENIX\'s authorization. No Drive files will be deleted.')) return;
-    await _gdriveDisconnect();
-  });
-
-  // CHANGE FOLDER button
-  document.getElementById('ax-gdrive-change-folder-btn')?.addEventListener('click', async () => {
-    const wrap = document.getElementById('ax-gdrive-folder-list-wrap');
-    if (!wrap) return;
-    wrap.style.display = '';
-    // Load folders from Drive
-    if (!auth.currentUser) return;
-    const idToken = await auth.currentUser.getIdToken(true);
-    const res = await fetch(UPLOAD_WORKER_URL + '/gdrive/folders', {
-      headers: { 'Authorization': 'Bearer ' + idToken },
-    });
-    if (!res.ok) { _toast('Could not list Drive folders.', 'err'); return; }
-    const data = await res.json();
-    const sel = document.getElementById('ax-gdrive-folder-select');
-    if (sel) {
-      const current = data.current_folder;
-      sel.innerHTML = `<option value="">— create a new folder —</option>` +
-        (data.folders || []).map(f =>
-          `<option value="${_esc(f.id)}" ${current?.id === f.id ? 'selected' : ''}>${_esc(f.name)}</option>`
-        ).join('');
-    }
-  });
-
-  // Use existing folder button
-  document.getElementById('ax-gdrive-folder-use-existing')?.addEventListener('click', async () => {
-    const sel = document.getElementById('ax-gdrive-folder-select');
-    const folderId = sel?.value;
-    if (!folderId) { _toast('Select a folder first, or create a new one.', 'err'); return; }
-    await _gdriveSetFolder(folderId, null);
-  });
-
-  // Create new folder button
-  document.getElementById('ax-gdrive-folder-create-new')?.addEventListener('click', async () => {
-    const nameEl = document.getElementById('ax-gdrive-new-folder-name');
-    const name = (nameEl?.value || 'AURENIX').trim() || 'AURENIX';
-    await _gdriveSetFolder(null, name);
-  });
-}
-
-/** Start Google OAuth flow — opens a popup window to Google's auth page. */
-async function _gdriveStartOAuth() {
-  const btn    = document.getElementById('ax-gdrive-connect-btn');
-  const errDiv = document.getElementById('ax-gdrive-connect-err');
-  if (errDiv) errDiv.style.display = 'none';
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Opening Google…'; }
-
-  try {
-    if (!auth.currentUser) throw new Error('Please sign in to AURENIX first.');
-    const idToken = await auth.currentUser.getIdToken(true);
-
-    const res = await fetch(UPLOAD_WORKER_URL + '/gdrive/auth', {
-      headers: { 'Authorization': 'Bearer ' + idToken },
-    });
-    const data = await res.json();
-
-    if (!res.ok || !data.authUrl) {
-      throw new Error(data.error || 'Could not get Google authorization URL. ' + (data.config_error ? 'Config: ' + data.config_error : ''));
-    }
-
-    // Open OAuth popup
-    const popup = window.open(
-      data.authUrl,
-      'aurenix_gdrive_oauth',
-      'width=520,height=680,scrollbars=yes,resizable=yes,toolbar=no,location=yes'
-    );
-
-    if (!popup) {
-      // Popup blocked — fall back to redirect
-      if (errDiv) {
-        errDiv.style.display = '';
-        errDiv.textContent = '⚠ Popup blocked — click the button again or allow popups for this site.';
-      }
-      if (btn) { btn.disabled = false; btn.textContent = '🔵 CONNECT GOOGLE DRIVE'; }
-      return;
-    }
-
-    // Listen for postMessage from the callback page
-    const messageHandler = (e) => {
-      if (e.origin !== window.location.origin) return;
-      if (e.data?.type !== 'gdrive_oauth') return;
-      window.removeEventListener('message', messageHandler);
-      clearInterval(pollTimer);
-
-      if (e.data.ok) {
-        _toast('🟢 Google Drive connected!');
-        _gdriveLoadStatus();
-        _updateGdriveUploadPanelState();
-      } else {
-        const errMsg = _gdriveHumanError(e.data.msg || 'Authorization failed');
-        if (errDiv) { errDiv.style.display = ''; errDiv.innerHTML = '⚠ ' + _esc(errMsg) + '<br><button class="ax-btn-sm" style="margin-top:6px;" onclick="this.closest(\'#ax-gdrive-connect-err\').style.display=\'none\'">Dismiss</button>'; }
-        _toast('Drive connection failed: ' + errMsg, 'err');
-      }
-      if (btn) { btn.disabled = false; btn.textContent = '🔵 CONNECT GOOGLE DRIVE'; }
-    };
-    window.addEventListener('message', messageHandler);
-
-    // Fallback poll in case postMessage doesn't fire (popup closed without OAuth)
-    const pollTimer = setInterval(() => {
-      if (popup.closed) {
-        clearInterval(pollTimer);
-        window.removeEventListener('message', messageHandler);
-        // Check if we connected (popup may have closed after posting the message)
-        _gdriveLoadStatus();
-        if (btn) { btn.disabled = false; btn.textContent = '🔵 CONNECT GOOGLE DRIVE'; }
-      }
-    }, 800);
-
-  } catch (e) {
-    const errMsg = _gdriveHumanError(e.message);
-    if (errDiv) {
-      errDiv.style.display = '';
-      errDiv.textContent = '⚠ ' + errMsg;
-    }
-    _toast('Drive connect failed: ' + errMsg, 'err');
-    if (btn) { btn.disabled = false; btn.textContent = '🔵 CONNECT GOOGLE DRIVE'; }
-  }
-}
-
-/** Disconnect Google Drive — revokes tokens, does NOT delete any Drive files. */
-async function _gdriveDisconnect() {
-  const btn = document.getElementById('ax-gdrive-disconnect-btn');
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Disconnecting…'; }
-  try {
-    const idToken = await auth.currentUser?.getIdToken(true);
-    const res = await fetch(UPLOAD_WORKER_URL + '/gdrive/disconnect', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + idToken },
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Disconnect failed');
-    _gdriveStatus = { connected: false };
-    _renderGdriveStatus();
-    _updateGdriveUploadPanelState();
-    _toast('Google Drive disconnected. Your Drive files are untouched.');
-  } catch (e) {
-    _toast('Disconnect failed: ' + e.message, 'err');
-  }
-  if (btn) { btn.disabled = false; btn.textContent = '✕ DISCONNECT GOOGLE DRIVE'; }
-}
-
-/** Set or create the AURENIX folder in Drive and create standard subfolders. */
-async function _gdriveSetFolder(folderId, folderName) {
-  const statusEl = document.getElementById('ax-gdrive-folder-status');
-  if (statusEl) statusEl.textContent = 'Setting up folder…';
-  try {
-    const idToken = await auth.currentUser?.getIdToken(true);
-    const body = {};
-    if (folderId)   body.folderId   = folderId;
-    if (folderName) body.folderName = folderName;
-    const res = await fetch(UPLOAD_WORKER_URL + '/gdrive/folder-set', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + idToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Folder setup failed');
-    // Hide folder list
-    const wrap = document.getElementById('ax-gdrive-folder-list-wrap');
-    if (wrap) wrap.style.display = 'none';
-    if (statusEl) statusEl.textContent = '✓ AURENIX folder set: ' + (data.folder?.name || 'AURENIX');
-    _gdriveStatus.folder = data.folder;
-    _renderGdriveStatus();
-    _toast('✓ AURENIX Drive folder configured: ' + (data.folder?.name || 'AURENIX'));
-  } catch (e) {
-    if (statusEl) statusEl.textContent = '✗ Folder setup failed: ' + e.message;
-    _toast('Folder setup failed: ' + e.message, 'err');
-  }
-}
-
-/**
- * Map raw Google/Worker error messages to human-friendly descriptions.
- */
-function _gdriveHumanError(raw) {
-  const r = raw || '';
-  if (r.includes('access_denied') || r.includes('cancelled'))
-    return 'Google authorization cancelled by user.';
-  if (r.includes('GDRIVE_CONFIG_MISSING') || r.includes('not set') || r.includes('not bound'))
-    return 'Google Drive API not configured in AURENIX Worker. See SETUP INSTRUCTIONS.';
-  if (r.includes('redirect_uri_mismatch'))
-    return 'OAuth redirect URI mismatch. Check Google Cloud → Credentials → authorized redirect URIs.';
-  if (r.includes('invalid_client') || r.includes('GOOGLE_CLIENT'))
-    return 'Invalid OAuth credentials. Check GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET worker secrets.';
-  if (r.includes('Token refresh failed') || r.includes('token_expired') || r.includes('invalid_grant'))
-    return 'Google authorization expired or revoked. Please reconnect Google Drive.';
-  if (r.includes('Drive API error'))
-    return 'Google Drive API error: ' + r;
-  if (r.includes('FIREBASE TOKEN'))
-    return 'AURENIX session expired. Please refresh the page.';
-  if (r.includes('FOUNDER NOT AUTHORIZED'))
-    return 'Founder access required to manage Google Drive.';
-  if (r.includes('GDRIVE_KV'))
-    return 'KV namespace not configured. Run: npx wrangler kv namespace create GDRIVE_KV';
-  if (r.includes('Google Drive not connected'))
-    return 'Google Drive not connected. Go to Storage → Google Drive to connect.';
-  if (r.includes('insufficient'))
-    return 'Insufficient Google Drive permissions. Reconnect and grant all requested scopes.';
-  if (r.includes('network error') || r.includes('could not connect') || r.includes('temporary connection'))
-    return 'Google Drive upload could not connect. Retrying may resolve a temporary connection problem.';
-  if (r.includes('unavailable') || r.includes('503') || r.includes('502'))
-    return 'Google Drive unavailable. Try again in a moment.';
-  return r;
-}
-
-/* ═══════════════════════════════════════════════════════════
-   GOOGLE DRIVE — UPLOAD CENTER TAB
-   Direct-to-Drive resumable upload (large video files).
-   Files go browser → Google Drive.
-   The Worker handles only the authorization roundtrip.
-═══════════════════════════════════════════════════════════ */
-
-/** Update the Google Drive upload panel's connected/not-connected state. */
-function _updateGdriveUploadPanelState() {
-  const nc = document.getElementById('ax-gdrive-upload-not-connected');
-  const co = document.getElementById('ax-gdrive-upload-connected');
-  const connected = _gdriveStatus?.connected;
-  if (nc) nc.style.display = connected ? 'none' : '';
-  if (co) co.style.display = connected ? '' : 'none';
-}
-
-/** Bind the Upload Center → Google Drive tab. */
-function _bindGdriveUploadPane() {
-  // Upload destination tab switcher
-  document.getElementById('ax-upload-dest-tabs')?.querySelectorAll('.ax-upload-dest-tab').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.ax-upload-dest-tab').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      const dest = btn.dataset.dest;
-      const supPanel  = document.getElementById('ax-upload-supabase-panel');
-      const drivePanel = document.getElementById('ax-upload-gdrive-panel');
-      if (supPanel)   supPanel.style.display   = dest === 'supabase' ? '' : 'none';
-      if (drivePanel) drivePanel.style.display = dest === 'gdrive'   ? '' : 'none';
-      // Check Drive status whenever switching to the Drive tab
-      if (dest === 'gdrive') {
-        _gdriveLoadStatus();
-      }
-    });
-  });
-
-  // Google Drive category buttons
-  document.querySelectorAll('.ax-gdrive-cat-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.ax-gdrive-cat-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      _gdriveUploadCategory = btn.dataset.cat;
-      const fi = document.getElementById('ax-gdrive-file-input');
-      if (fi) fi.accept = btn.dataset.accept;
-    });
-  });
-
-  // Drop zone
-  const zone = document.getElementById('ax-gdrive-upload-zone');
-  const inp  = document.getElementById('ax-gdrive-file-input');
-  if (zone && inp) {
-    zone.addEventListener('click', e => {
-      if (!e.target.closest('.ax-gdrive-cat-btn') && !e.target.closest('select')) inp.click();
-    });
-    zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('drag-over'); });
-    zone.addEventListener('dragleave', ()  => zone.classList.remove('drag-over'));
-    zone.addEventListener('drop', e => {
-      e.preventDefault();
-      zone.classList.remove('drag-over');
-      const f = e.dataTransfer.files[0];
-      if (f) _gdriveUploadFile(f);
-    });
-    inp.addEventListener('change', () => {
-      const f = inp.files[0];
-      if (f) _gdriveUploadFile(f);
-      inp.value = '';
-    });
-  }
-}
-
-/**
- * Upload a file to Google Drive using the resumable upload API.
- *
- * Phase 1 — POST /gdrive/upload-init (tiny JSON — no file body)
- *   Worker verifies Firebase token, checks Founder email,
- *   gets a Drive resumable upload URI, returns it.
- *
- * Phase 2 — PUT directly to Drive upload URI (XHR with progress)
- *   The entire file goes browser → Google Drive.
- *   No proxying through the Worker.
- *
- * Phase 3 — POST /gdrive/upload-finalize { driveFileId }
- *   Worker fetches Drive file metadata and returns it.
- *
- * Phase 4 — Save to Firestore network_media
- *   Status: pending_approval.
- */
-async function _gdriveUploadFile(file) {
-  if (!_gdriveStatus?.connected) {
-    _toast('Connect Google Drive first (Storage → Google Drive).', 'err');
-    return;
-  }
-
-  const isVideo  = file.type.startsWith('video/');
-  const isAudio  = file.type.startsWith('audio/');
-  const cat = MEDIA_CATEGORIES.find(c => c.id === _gdriveUploadCategory) || MEDIA_CATEGORIES.find(c => c.id === 'video');
-  const mediaType = cat?.type || (isVideo ? 'video' : isAudio ? 'audio' : 'thumbnail');
-  const subFolder = document.getElementById('ax-gdrive-subfolder')?.value || '';
-
-  // Show progress area
-  const progressDiv  = document.getElementById('ax-gdrive-upload-progress');
-  const resultDiv    = document.getElementById('ax-gdrive-upload-result');
-  const filenameEl   = document.getElementById('ax-gdrive-upload-filename');
-  const filesizeEl   = document.getElementById('ax-gdrive-upload-filesize');
-  const pctEl        = document.getElementById('ax-gdrive-upload-pct');
-  const barEl        = document.getElementById('ax-gdrive-upload-bar');
-  const statusEl     = document.getElementById('ax-gdrive-upload-status');
-  const bytesEl      = document.getElementById('ax-gdrive-upload-bytes');
-
-  const setStatus = (msg, color = '') => { if (statusEl) { statusEl.textContent = msg; statusEl.style.color = color; } };
-  const setProgress = (loaded, total) => {
-    const rawPct = total > 0 ? Math.round(loaded / total * 100) : 0;
-    const pct = loaded < total ? Math.min(99, rawPct) : rawPct;
-    if (barEl)   barEl.style.width    = pct + '%';
-    if (pctEl)   pctEl.textContent    = pct + '%';
-    if (bytesEl && total > 0) bytesEl.textContent = `${_fmtSize(loaded)} / ${_fmtSize(total)}`;
-  };
-
-  if (progressDiv)  progressDiv.style.display = '';
-  if (resultDiv)    resultDiv.style.display = 'none';
-  if (filenameEl)   filenameEl.textContent = file.name;
-  if (filesizeEl)   filesizeEl.textContent = _fmtSize(file.size);
-  setProgress(0, file.size);
-  setStatus('Authenticating…', 'var(--blue-bright)');
-
-  let driveFileId = null;
-
-  // ARCHITECTURE NOTE (v10):
-  // The browser CANNOT PUT directly to googleapis.com/upload/ — Google's
-  // resumable upload endpoint has no CORS headers, so a direct XHR always
-  // fires onerror ("network error") before any bytes are sent.
-  //
-  // Fix: the Worker owns the Google connection.
-  //   1. Browser → POST /gdrive/upload-init → Worker returns upload_id
-  //   2. Browser reads File in chunks and POST each chunk to
-  //      /gdrive/upload-chunk (Worker proxies chunk→Google with Content-Range)
-  //   3. Final chunk response contains the Drive file metadata (id, name, etc.)
-  //
-  // Chunk size: 5 MiB (Google minimum recommended = 256 KiB, must be multiple
-  // of 256 KiB; 5 MiB balances progress granularity vs. round-trip overhead).
-  // For files ≤ 5 MiB (e.g. the 1.5 MB test file), a single chunk is sent.
-  const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MiB
-
-  try {
-    // ── Pre-flight: get media duration ───────────────────────────────────
-    let duration_sec = 0;
-    if (isAudio || isVideo) {
-      try { duration_sec = await _getMediaDuration(file); } catch (_) {}
-    }
-
-    // ── Phase 1: Initialize resumable session via Worker ─────────────────
-    // Worker creates the Drive resumable session and returns an upload_id.
-    // The raw Google upload URI never leaves the Worker.
-    if (!auth.currentUser) throw new Error('FIREBASE SESSION NOT FOUND — please sign in again');
-    let idToken = await auth.currentUser.getIdToken(true);
-
-    setStatus('Authorizing with Worker…', 'var(--blue-bright)');
-    console.log('[AURENIX gdrive] POST /gdrive/upload-init — fileName:', file.name, 'size:', file.size, 'type:', file.type);
-
-    const initRes = await fetch(UPLOAD_WORKER_URL + '/gdrive/upload-init', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + idToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        fileName:    file.name,
-        contentType: file.type || 'application/octet-stream',
-        size:        file.size,
-        subFolder:   subFolder || undefined,
-      }),
-    });
-    const initData = await initRes.json();
-
-    console.log('[AURENIX gdrive] /gdrive/upload-init HTTP', initRes.status, '— ok:', initData.ok, 'uploadId present:', !!initData.uploadId);
-
-    if (!initRes.ok || !initData.uploadId) {
-      const errMsg = _gdriveHumanError(initData.error || `Worker authorization failed — HTTP ${initRes.status}`);
-      throw new Error(errMsg);
-    }
-
-    const { uploadId } = initData;
-
-    // ── Phase 2: Worker-proxied chunked upload ────────────────────────────
-    // Each chunk is POST-ed to /gdrive/upload-chunk.
-    // The Worker streams it to Google using Content-Range.
-    // No CORS problem — browser only talks to the Worker (our own origin).
-    setStatus('Uploading to Google Drive…', 'var(--blue-bright)');
-    setProgress(0, file.size);
-
-    let bytesUploaded = 0;
-    let finalFileMeta = null;
-
-    while (bytesUploaded < file.size) {
-      const chunkStart = bytesUploaded;
-      const chunkEnd   = Math.min(chunkStart + CHUNK_SIZE, file.size) - 1; // inclusive
-      const chunk      = file.slice(chunkStart, chunkEnd + 1);
-      const contentRange = `bytes ${chunkStart}-${chunkEnd}/${file.size}`;
-
-      console.log('[AURENIX gdrive] POST /gdrive/upload-chunk — range:', contentRange);
-
-      // Refresh token if this is not the first chunk (long uploads may expire the token)
-      if (bytesUploaded > 0) {
-        try { idToken = await auth.currentUser?.getIdToken(false); } catch (_) {}
-      }
-
-      let chunkRes, chunkData;
-      try {
-        chunkRes = await fetch(UPLOAD_WORKER_URL + '/gdrive/upload-chunk', {
-          method: 'POST',
-          headers: {
-            'Authorization':  'Bearer ' + idToken,
-            'Content-Type':   file.type || 'application/octet-stream',
-            'Content-Range':  contentRange,
-            'X-Upload-Id':    uploadId,
-            'X-Total-Size':   String(file.size),
-          },
-          body: chunk,
-        });
-        chunkData = await chunkRes.json();
-      } catch (fetchErr) {
-        console.error('[AURENIX gdrive] chunk fetch error:', fetchErr.message, 'type:', fetchErr.constructor?.name);
-        throw new Error(`Google Drive upload could not connect. Retrying may resolve a temporary connection problem. (${fetchErr.message})`);
-      }
-
-      console.log('[AURENIX gdrive] /gdrive/upload-chunk HTTP', chunkRes.status,
-        '— complete:', chunkData.complete, 'rangeEnd:', chunkData.rangeEnd);
-
-      if (!chunkRes.ok) {
-        const detail  = chunkData.detail  || chunkData.error || '';
-        const retryable = chunkData.retryable === true;
-        const msg = retryable
-          ? `Google Drive upload could not connect. Retrying may resolve a temporary connection problem. (HTTP ${chunkRes.status}${detail ? ': ' + detail.slice(0, 120) : ''})`
-          : _gdriveHumanError(chunkData.error || `Google Drive upload error — HTTP ${chunkRes.status}: ${detail.slice(0, 120)}`);
-        throw new Error(msg);
-      }
-
-      if (chunkData.complete) {
-        // Upload finished — final chunk
-        finalFileMeta = chunkData.file || null;
-        driveFileId   = finalFileMeta?.id || null;
-        bytesUploaded = file.size;
-        setProgress(file.size, file.size);
-        console.log('[AURENIX gdrive] upload complete — driveFileId:', driveFileId);
-      } else {
-        // Chunk accepted — advance cursor.
-        // Use the rangeEnd from Google (authoritative) when available.
-        const confirmedEnd = typeof chunkData.rangeEnd === 'number' && chunkData.rangeEnd >= 0
-          ? chunkData.rangeEnd + 1  // rangeEnd is inclusive
-          : chunkEnd + 1;
-        bytesUploaded = confirmedEnd;
-        setProgress(bytesUploaded, file.size);
-        const pct = Math.round(bytesUploaded / file.size * 100);
-        setStatus(`Uploading to Google Drive… ${pct}%`, 'var(--blue-bright)');
-      }
-    }
-
-    setStatus('Upload complete — confirming…', 'var(--green)');
-    setProgress(file.size, file.size);
-
-    // ── Phase 3: Save to Firestore ────────────────────────────────────────
-    try { await auth.currentUser?.getIdToken(true); } catch (_) {}
-    setStatus('Saving AURENIX media record…', 'var(--blue-bright)');
-
-    const docRef = await addDoc(collection(db, 'network_media'), {
-      title:          file.name.replace(/\.[^.]+$/, ''),
-      artist:         '',
-      creator:        _user?.email || '',
-      description:    '',
-      category:       _gdriveUploadCategory,
-      type:           mediaType,
-      // For Drive files, url is not a direct public URL — playback handled via Drive
-      url:            driveFileId ? `https://drive.google.com/file/d/${driveFileId}/view` : '',
-      storage_path:   '',                          // not applicable for Drive
-      drive_file_id:  driveFileId || '',           // Google Drive file ID
-      drive_web_view_link: driveFileId ? `https://drive.google.com/file/d/${driveFileId}/view` : '',
-      drive_sub_folder: subFolder || '',
-      storage_backend: 'google_drive',
-      duration_sec,
-      size_bytes:     file.size,
-      mime_type:      file.type || 'application/octet-stream',
-      // All uploads start as pending_approval regardless of storage backend.
-      status:         'pending_approval',
-      channel:        '',
-      tags:           [],
-      year:           new Date().getFullYear(),
-      uploaded_by:    _user?.uid || '',
-      uploaded_at:    serverTimestamp(),
-    });
-
-    setStatus('✓ Upload Complete', 'var(--green)');
-
-    // Show result card
-    if (resultDiv) {
-      resultDiv.style.display = '';
-      resultDiv.innerHTML = `
-        <div style="background:rgba(0,200,80,0.08);border:1px solid rgba(0,200,80,0.3);border-radius:8px;padding:14px 16px;font-size:12px;line-height:1.8;">
-          <div style="font-size:13px;font-weight:900;color:var(--green);margin-bottom:8px;letter-spacing:1px;">✓ GOOGLE DRIVE UPLOAD COMPLETE</div>
-          <div style="color:var(--text);">✓ Google Drive file confirmed</div>
-          <div style="color:var(--text);">✓ AURENIX media record created</div>
-          <div style="color:var(--orange,#f0a500);">⏳ Status: Pending Approval</div>
-          ${driveFileId ? `<div style="margin-top:8px;"><a href="https://drive.google.com/file/d/${_esc(driveFileId)}/view" target="_blank" rel="noopener" style="color:var(--blue-bright);font-size:11px;">🔗 Open in Google Drive</a></div>` : ''}
-          <div style="margin-top:10px;display:flex;gap:8px;">
-            <button class="ax-btn-sm" style="font-size:11px;" onclick="window._AXC.switchToPane('approval')">🔍 Go to Pending Approval</button>
-          </div>
-        </div>`;
-    }
-
-    _toast('✓ Uploaded to Google Drive — pending Founder approval: ' + file.name);
-
-    // Open metadata editor after a short delay
-    setTimeout(() => _openMetaModal(docRef.id, file.name.replace(/\.[^.]+$/, '')), 600);
-
-  } catch (uploadErr) {
-    const rawMsg = uploadErr.message || 'Upload failed';
-    // Determine if this is a connectivity/retryable error vs. a configuration error
-    const isConnectErr = rawMsg.toLowerCase().includes('could not connect') ||
-                         rawMsg.toLowerCase().includes('network error') ||
-                         rawMsg.toLowerCase().includes('temporary connection');
-    const errMsg = isConnectErr
-      ? rawMsg  // already has friendly text from above
-      : _gdriveHumanError(rawMsg);
-
-    console.error('[AURENIX gdrive] upload error:', rawMsg);
-    setStatus('✗ ' + errMsg, 'var(--red)');
-    setProgress(0, file.size);
-    if (resultDiv) {
-      resultDiv.style.display = '';
-      resultDiv.innerHTML = `
-        <div style="background:rgba(255,45,85,0.08);border:1px solid rgba(255,45,85,0.3);border-radius:8px;padding:14px 16px;font-size:12px;line-height:1.7;">
-          <div style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:6px;">✗ UPLOAD FAILED</div>
-          <div style="color:var(--text-dim);margin-bottom:10px;">${_esc(isConnectErr
-            ? 'Google Drive upload could not connect.\nRetrying may resolve a temporary connection problem.'
-            : errMsg)}</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="ax-btn-sm" onclick="window._AXC.retryGdriveUpload()" style="margin-right:2px;">↺ Retry</button>
-            <button class="ax-btn-sm" onclick="window._AXC.switchToPane('storage')">🔗 Check Drive Connection</button>
-          </div>
-        </div>`;
-      // Store file for retry
-      window._AXC._pendingGdriveFile = file;
-    }
-    _toast('Google Drive upload failed: ' + errMsg, 'err');
-  }
-}
-
-// Extend _AXC with Drive helpers
-Object.assign(window._AXC, {
-  retryGdriveUpload() {
-    const f = window._AXC._pendingGdriveFile;
-    if (f) _gdriveUploadFile(f);
-    else _toast('No pending file — select a file again.', 'err');
-  },
-});
 
