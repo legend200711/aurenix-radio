@@ -494,7 +494,7 @@ export default {
       return json({
         ok:      !err,
         worker:  'aurenix-upload',
-        version: '2025-09-06-v14-channel-bootstrap',
+        version: '2025-09-06-v15-queue-empty-fallback',
         SUPABASE_URL:        env.SUPABASE_URL         ? '✓ set' : '✗ MISSING',
         SUPABASE_SERVICE_KEY:env.SUPABASE_SERVICE_KEY ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID  ? '✓ set' : '✗ MISSING',
@@ -1701,25 +1701,41 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
       }, 'network_state', channelId);
     }
 
-    const curIdx = eligibleQueue.findIndex(q => q.id === currentItemId);
-    let nextIdx  = curIdx + 1;
+    // EMPTY QUEUE FALLBACK: If the scheduled queue is empty, fall through to
+    // random selection from the full media library rather than going to standby.
+    // This handles:
+    //   - channels that have never had a queue built (bootstrap case)
+    //   - channels whose entire queue was cleaned out due to deleted/reassigned media
+    //   - channels running in ordered/shuffle mode that have looped without a queue
+    // The channel stays live as long as there is ANY eligible media assigned to it.
+    if (eligibleQueue.length === 0) {
+      console.log(`[aurenix-advance] channel=${channelId} — ordered/shuffle queue empty, falling back to random pick`);
+      // Fall through to step 5 (random pick) below.
+    } else {
+      const curIdx = eligibleQueue.findIndex(q => q.id === currentItemId);
+      let nextIdx  = curIdx + 1;
 
-    if (nextIdx >= eligibleQueue.length) {
-      const loop = st.loop ?? true;
-      if (loop && eligibleQueue.length > 0) {
-        nextIdx = 0;
-      } else {
-        await fsPatch(projectId, writeToken, {
-          current_item: null,
-          started_at:   { __serverTimestamp: true },
-          updated_at:   { __serverTimestamp: true },
-        }, 'network_state', channelId);
-        return { advanced: true, reason: eligibleQueue.length === 0 ? 'queue_empty_after_cleanup' : 'queue_exhausted' };
+      if (nextIdx >= eligibleQueue.length) {
+        const loop = st.loop ?? true;
+        if (loop) {
+          nextIdx = 0;
+        } else {
+          // loop=false and end of queue: go standby only if user explicitly turned off looping.
+          await fsPatch(projectId, writeToken, {
+            current_item: null,
+            started_at:   { __serverTimestamp: true },
+            updated_at:   { __serverTimestamp: true },
+          }, 'network_state', channelId);
+          return { advanced: true, reason: 'queue_exhausted_no_loop' };
+        }
       }
-    }
 
-    const nextItem = eligibleQueue[nextIdx];
-    if (!nextItem) return { advanced: false, reason: 'empty_queue' };
+      const nextItem = eligibleQueue[nextIdx];
+      if (!nextItem) {
+        // Defensive: should not reach here after the length check above.
+        console.log(`[aurenix-advance] channel=${channelId} — nextItem null after index check, falling back to random`);
+        // Fall through to step 5.
+      } else {
 
     // Check commercial break
     if (cfg.commercial_enabled) {
@@ -1761,6 +1777,9 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
     }, 'network_state', channelId);
     await updateProgramHistory(projectId, writeToken, configCol, channelId, cfg, nextItem.id, isAltv);
     return { advanced: true, reason: 'queue_advance' };
+      } // end: nextItem !== null
+    } // end: eligibleQueue.length > 0
+    // If we reach here: queue was empty OR nextItem was null — fall through to random pick (step 5).
   }
 
   /* ── 5. Random mode: pick next program from network_media ─────────── */
