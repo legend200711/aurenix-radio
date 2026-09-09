@@ -1,0 +1,72 @@
+{
+  // AURENIX Founder Upload Worker  (v8 — Google Drive OAuth)
+  // Deploy: cd upload-worker && npx wrangler deploy
+  //
+  // ══════════════════════════════════════════════════════════
+  //  REQUIRED SECRETS — Supabase + Firebase (existing)
+  // ══════════════════════════════════════════════════════════
+  //   npx wrangler secret put SUPABASE_URL
+  //     → enter: https://nxsyoreuwmmxtuvmeqbg.supabase.co
+  //
+  //   npx wrangler secret put SUPABASE_SERVICE_KEY
+  //     → enter: <service-role key from Supabase Dashboard → Settings → API>
+  //
+  //   npx wrangler secret put FIREBASE_PROJECT_ID
+  //     → enter: remix-studio-4bf8a
+  //
+  // ══════════════════════════════════════════════════════════
+  //  OPTIONAL SECRETS — Google Drive OAuth (new)
+  //  See DEPLOY.md → Google Drive Setup for full instructions.
+  //  DO NOT put real values here — use `wrangler secret put`.
+  // ══════════════════════════════════════════════════════════
+  //   npx wrangler secret put GOOGLE_CLIENT_ID
+  //     → enter: <client_id from Google Cloud Console OAuth credentials>
+  //
+  //   npx wrangler secret put GOOGLE_CLIENT_SECRET
+  //     → enter: <client_secret from Google Cloud Console>
+  //     ⚠ NEVER put this in any file — it must stay server-side ONLY.
+  //
+  //   npx wrangler secret put GOOGLE_REDIRECT_URI
+  //     → enter: https://aurenix-upload.nthntjrn.workers.dev/gdrive/callback
+  //     ✓ Already configured — subdomain: nthntjrn
+  //     ⚠ This value MUST be registered in Google Cloud → OAuth client → Authorized redirect URIs.
+  //       The downloaded client_secret JSON contained an old URI (upload.nshmjs.workers.dev) —
+  //       that is WRONG.  The Google Cloud Console entry must be:
+  //         https://aurenix-upload.nthntjrn.workers.dev/gdrive/callback
+  //
+  // ══════════════════════════════════════════════════════════
+  //  KV NAMESPACE — Google Drive token storage (new)
+  //  Create with: npx wrangler kv namespace create GDRIVE_KV
+  //  Then copy the generated id into the binding below.
+  // ══════════════════════════════════════════════════════════
+
+  "name": "aurenix-upload",
+  "main": "src/index.js",
+  "compatibility_date": "2025-01-01",
+
+  // Workers Logs — structured observability
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  // KV Namespace for Google Drive token storage.
+  // Create with: npx wrangler kv namespace create GDRIVE_KV
+  // Then replace REPLACE_WITH_YOUR_KV_ID below with the id from the output.
+  // Example output: { binding = "GDRIVE_KV", id = "abc123def456..." }
+  //
+  // If you have not yet created the KV namespace, comment out the
+  // kv_namespaces block below — the Worker will still deploy and serve
+  // Supabase uploads; Drive features will return "GDRIVE_KV not bound" until
+  // you create the namespace and redeploy.
+  "kv_namespaces": [
+    {
+      "binding": "GDRIVE_KV",
+      "id": "2c5a879a99c64aaeaf59bc1ed99db0f8"
+    }
+  ]
+
+  // No R2, D1, or other bindings required.
+  // Supabase is called over fetch() using a secret service-role key.
+  // Google Drive tokens are stored in the GDRIVE_KV namespace above.
+}
