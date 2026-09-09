@@ -494,7 +494,7 @@ export default {
       return json({
         ok:      !err,
         worker:  'aurenix-upload',
-        version: '2025-09-06-v15-queue-empty-fallback',
+        version: '2025-09-06-v16-continuous-24-7-loop',
         SUPABASE_URL:        env.SUPABASE_URL         ? '✓ set' : '✗ MISSING',
         SUPABASE_SERVICE_KEY:env.SUPABASE_SERVICE_KEY ? '✓ set' : '✗ MISSING',
         FIREBASE_PROJECT_ID: env.FIREBASE_PROJECT_ID  ? '✓ set' : '✗ MISSING',
@@ -1667,16 +1667,34 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
     }
   }
 
-  // For ALTV: if config exists but running=false (Founder stopped it in Studio),
+  // For ALTV: if config exists but running=false (Founder explicitly stopped it in Studio),
   // honour the stop — do not override intentional stops.
-  // For non-ALTV: same behaviour.
-  if (!cfg.running) return { advanced: false, reason: 'channel_not_running' };
-  if (cfg.paused)   return { advanced: false, reason: 'channel_paused' };
+  // For non-ALTV: the `running` flag only tracks whether Founder Studio's local browser
+  // engine is open.  It must NEVER permanently block channel advancement — the channel
+  // must continue 24/7 regardless of whether any Founder browser tab is open.
+  // Only `paused` (an explicit manual pause action) should block advances for any channel.
+  if (isAltv && !cfg.running) return { advanced: false, reason: 'channel_not_running' };
+  if (cfg.paused) return { advanced: false, reason: 'channel_paused' };
+
+  // If non-ALTV config exists with running=false (stale flag from an old engine session),
+  // auto-heal it so the channel resumes immediately.
+  if (!isAltv && !cfg.running) {
+    console.log(`[aurenix-advance] channel=${channelId} — running=false (stale), auto-healing to running=true`);
+    cfg.running = true;
+    await fsPatch(projectId, writeToken, { running: true, updated_at: { __serverTimestamp: true } }, configCol, channelId);
+  }
 
   const mode = cfg.programming_mode || 'random';
 
-  /* ── 4. Queue-based advance (ordered / shuffle) ───────────────────── */
-  if (!isAltv && (mode === 'ordered' || mode === 'shuffle')) {
+  /* ── 4. Queue-based advance (ordered / shuffle / queue-present) ───────────── */
+  // CRITICAL: When the network_state document has a non-empty queue, ALWAYS use
+  // queue-based advancement — even if programming_mode is 'random'.  This is the
+  // mode that "Play Now" and manual queue management use: the Founder builds a
+  // queue, we respect it.  Falling through to random pick (step 5) when a queue
+  // exists would silently ignore the queue and could return null if the items are
+  // not in the random pool (wrong channel assignment), causing standby.
+  const hasQueue = !isAltv && (st.queue || []).length > 0;
+  if (!isAltv && (mode === 'ordered' || mode === 'shuffle' || hasQueue)) {
     // Fetch the current media library so we can validate queue items.
     // Items may have been deleted or re-assigned since they were queued.
     const mediaLibForQueue = await fetchApprovedMedia(projectId, writeToken);
@@ -1716,18 +1734,12 @@ async function firestoreChannelAdvance(projectId, serviceAccountJson, channelId,
       let nextIdx  = curIdx + 1;
 
       if (nextIdx >= eligibleQueue.length) {
-        const loop = st.loop ?? true;
-        if (loop) {
-          nextIdx = 0;
-        } else {
-          // loop=false and end of queue: go standby only if user explicitly turned off looping.
-          await fsPatch(projectId, writeToken, {
-            current_item: null,
-            started_at:   { __serverTimestamp: true },
-            updated_at:   { __serverTimestamp: true },
-          }, 'network_state', channelId);
-          return { advanced: true, reason: 'queue_exhausted_no_loop' };
-        }
+        // Always loop back to the start — this is a 24/7 broadcast service.
+        // `st.loop` may be false if a viewer explicitly set it (e.g. via API),
+        // but for 24/7 operation the channel must never go to standby simply
+        // because the queue has been played through.  We loop unconditionally.
+        nextIdx = 0;
+        console.log(`[aurenix-advance] channel=${channelId} — queue exhausted, wrapping to index 0 (24/7 loop)`);
       }
 
       const nextItem = eligibleQueue[nextIdx];

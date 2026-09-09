@@ -3608,9 +3608,9 @@ function _openPlayNowModal(channelId) {
     try {
       const st    = _channelStates[_playNowChannelId];
       const queue = st?.queue || [];
-      const loop  = st?.loop ?? true;
       const ref   = doc(db, 'network_state', _playNowChannelId);
-      // Put selected item at front of queue
+      // Put selected item at front of queue.
+      // Always write loop:true — this is a 24/7 broadcast service.
       const newQueue = [
         { id: item.id, title: item.title, artist: item.artist || '', type: item.type, url: item.url, duration_sec: item.duration_sec || 0, mime_type: item.mime_type || '' },
         ...queue.filter(q => q.id !== item.id),
@@ -3619,7 +3619,7 @@ function _openPlayNowModal(channelId) {
         current_item: newQueue[0],
         started_at:   serverTimestamp(),
         queue:        newQueue,
-        loop,
+        loop:         true,
         updated_at:   serverTimestamp(),
       }, { merge: true });
       _toast(`Now playing: ${item.title}`);
@@ -3791,18 +3791,14 @@ window._AXC = {
     const st = _channelStates[channelId];
     if (!st) return;
     const queue  = st.queue || [];
+    if (!queue.length) { _toast('No queue to skip in.', 'err'); return; }
     const curIdx = queue.findIndex(q => q.id === st.current_item?.id);
     let nextIdx  = curIdx + 1;
-    if (nextIdx >= queue.length) {
-      if (st.loop) nextIdx = 0;
-      else {
-        await setDoc(doc(db, 'network_state', channelId), { ...st, current_item: null, started_at: serverTimestamp() }, { merge: true });
-        _toast(`${channelId} queue exhausted.`);
-        return;
-      }
-    }
+    // Always wrap — this is a 24/7 broadcast service, never go to standby on skip.
+    if (nextIdx >= queue.length) nextIdx = 0;
     const next = queue[nextIdx];
-    await setDoc(doc(db, 'network_state', channelId), { ...st, current_item: next, started_at: serverTimestamp() }, { merge: true });
+    if (!next) return;
+    await setDoc(doc(db, 'network_state', channelId), { ...st, current_item: next, started_at: serverTimestamp(), loop: true }, { merge: true });
     _toast(`${channelId} skipped to: ${next.title}`);
   },
 
@@ -3864,9 +3860,8 @@ window._AXC = {
     const queue = [...(st?.queue || [])];
     if (queue.find(q => q.id === mediaId)) { _toast('Already in queue.', 'err'); return; }
     queue.push({ id: item.id, title: item.title, artist: item.artist || '', type: item.type, url: item.url, duration_sec: item.duration_sec || 0, mime_type: item.mime_type || '' });
-    const loop = st?.loop ?? true;
     const ref  = doc(db, 'network_state', channelId);
-    await setDoc(ref, { ...(st || {}), queue, loop, updated_at: serverTimestamp() }, { merge: true });
+    await setDoc(ref, { ...(st || {}), queue, loop: true, updated_at: serverTimestamp() }, { merge: true });
     _toast(`Added to ${channelId}: ${item.title}`);
   },
 
