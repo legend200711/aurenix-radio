@@ -1369,14 +1369,34 @@ function _playState(st) {
     // Call load() explicitly so the element resets from any previous ended/error/stale
     // state before we try to set currentTime or call play(). This is required by the
     // HTML spec when the same DOM element is reused after src changes.
-    _mediaEl.load();
-    _mediaEl.currentTime = Math.max(0, elapsed);
-
-    // ALL roles request authoritative advance from the Cloudflare Worker.
-    // This includes ALTV (Live TV). The Worker handles all channels independently
-    // of the Founder browser — channels continue 24/7 even when no Founder tab is open.
+    // Capture the authoritative item before installing asynchronous media
+    // callbacks. These IDs are also used by the initial metadata seek below.
     const capturedChannelId = _activeChannel?.id;
     const capturedItemId    = item.id;
+
+    // IMPORTANT: load() is asynchronous.  Setting currentTime immediately while
+    // readyState is HAVE_NOTHING can throw InvalidStateError before the playback
+    // handlers/play() are installed, leaving the viewer with a permanent black
+    // player.  Start loading first, then seek only after metadata is available.
+    const desiredStartTime = Math.max(0, elapsed);
+    _mediaEl.load();
+    if (desiredStartTime > 0) {
+      const seekWhenReady = () => {
+        if (_currentMediaId !== capturedItemId || !_mediaEl) return;
+        try {
+          if (Number.isFinite(_mediaEl.duration) && _mediaEl.duration > 0) {
+            _mediaEl.currentTime = Math.min(desiredStartTime, Math.max(0, _mediaEl.duration - 0.25));
+          }
+        } catch (seekErr) {
+          console.warn('[AURENIX PLAYBACK] Initial seek deferred:', seekErr.message);
+        }
+      };
+      if (_mediaEl.readyState >= 1) seekWhenReady();
+      else _mediaEl.addEventListener('loadedmetadata', seekWhenReady, { once: true });
+    }
+
+    // This includes ALTV (Live TV). The Worker handles all channels independently
+    // of the Founder browser — channels continue 24/7 even when no Founder tab is open.
 
     _mediaEl.onended = () => {
       console.log(
