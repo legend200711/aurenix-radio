@@ -7,11 +7,20 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="AURENIX">
-<meta name="description" content="AURENIX — The Broadcast Never Stops. 24/7 internet network.">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="description" content="AURENIX — The Broadcast Never Stops. 24/7 internet television network.">
+<!-- iOS splash screens -->
+<meta name="apple-touch-fullscreen" content="yes">
+<link rel="apple-touch-icon" href="aurenix-icon-192.png">
+<link rel="apple-touch-startup-image" href="aurenix-icon-512.png">
+<!-- PWA manifest -->
 <link rel="manifest" href="aurenix-manifest.json">
 <link rel="icon" href="aurenix-favicon.svg" type="image/svg+xml">
 <title>AURENIX — The Broadcast Never Stops</title>
+<!-- Core design system -->
 <link rel="stylesheet" href="aurenix-network.css">
+<!-- Mobile app layer -->
+<link rel="stylesheet" href="aurenix-mobile.css">
 </head>
 <body>
 
@@ -19,22 +28,79 @@
 <div class="ax-ambient" aria-hidden="true"></div>
 <canvas id="ax-particles" aria-hidden="true"></canvas>
 
+<!-- ══ SPLASH SCREEN ══════════════════════════════════════════ -->
+<!-- Shown before any JS runs; dismissed by aurenix-mobile.js  -->
+<div id="ax-splash" aria-hidden="true">
+  <div class="ax-splash-inner">
+    <div class="ax-splash-logo-wrap">
+      <svg viewBox="0 0 64 64" fill="none" class="ax-splash-svg" role="img" aria-label="AURENIX logo">
+        <polygon points="32,6 58,56 6,56" fill="none" stroke="#b8860b" stroke-width="1.5" opacity="0.85"/>
+        <ellipse cx="32" cy="38" rx="13" ry="9" fill="none" stroke="#1e50ff" stroke-width="1.3"/>
+        <circle cx="32" cy="38" r="5" fill="none" stroke="#b8860b" stroke-width="1.2"/>
+        <circle cx="32" cy="38" r="2.5" fill="#1e50ff" opacity="0.9"/>
+        <line x1="8" y1="38" x2="19" y2="38" stroke="#b8860b" stroke-width="0.8" opacity="0.5"/>
+        <line x1="45" y1="38" x2="56" y2="38" stroke="#b8860b" stroke-width="0.8" opacity="0.5"/>
+      </svg>
+    </div>
+    <div class="ax-splash-wordmark">AURE<span>NIX</span></div>
+    <div class="ax-splash-tagline">THE BROADCAST NEVER STOPS.</div>
+    <div class="ax-splash-connecting" id="ax-splash-status">CONNECTING…</div>
+  </div>
+  <div class="ax-splash-glow" aria-hidden="true"></div>
+</div>
+
 <!-- Navigation (populated by broadcast.js; hidden until authenticated) -->
 <nav id="ax-nav" role="navigation" aria-label="AURENIX Network" style="display:none;"></nav>
 
-<!-- Main app shell (populated by broadcast.js) -->
+<!-- Mobile bottom navigation (populated by mobile.js) -->
+<nav id="ax-mobile-nav" role="navigation" aria-label="AURENIX App Navigation"></nav>
+
+<!-- Main app shell (populated by broadcast.js / mobile.js) -->
 <div id="ax-app" role="main"></div>
 
 <!-- Admin control center (populated lazily by control.js) -->
 <div id="ax-control" aria-label="Broadcast Control Center"></div>
 
-<!-- Toast -->
+<!-- Toast notifications -->
 <div id="ax-toast" role="status" aria-live="polite"></div>
+
+<!-- Muted autoplay prompt (mobile — shown when autoplay blocked with sound) -->
+<div id="ax-sound-prompt" style="display:none;" aria-live="polite">
+  <button id="ax-sound-btn" aria-label="Tap for sound">
+    <span class="ax-sound-icon">🔇</span>
+    <span class="ax-sound-text">TAP FOR SOUND</span>
+  </button>
+</div>
 
 <!-- PWA service worker -->
 <script>
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/aurenix-sw.js').catch(() => {});
+    navigator.serviceWorker.register('/aurenix-sw.js').then(reg => {
+      reg.addEventListener('updatefound', () => {
+        const newSW = reg.installing;
+        if (newSW) {
+          newSW.addEventListener('statechange', () => {
+            if (newSW.state === 'installed' && navigator.serviceWorker.controller) {
+              // New SW available — activate it quietly
+              newSW.postMessage({ type: 'SKIP_WAITING' });
+            }
+          });
+        }
+      });
+    }).catch(() => {});
+  }
+</script>
+
+<!-- AURENIX Mobile Layer (loads first, coordinates splash + nav) -->
+<script type="module">
+  try {
+    const { initMobile } = await import('./aurenix-mobile.js');
+    initMobile();
+  } catch (err) {
+    // Non-fatal — mobile enhancements degrade gracefully
+    console.warn('[AURENIX MOBILE] Mobile layer failed to load:', err);
+    const splash = document.getElementById('ax-splash');
+    if (splash) splash.style.display = 'none';
   }
 </script>
 
@@ -45,7 +111,8 @@
     initBroadcast();
   } catch (err) {
     console.error('[AURENIX] Fatal startup error:', err);
-    // Show a visible fallback so the page is never a pure black screen
+    const splash = document.getElementById('ax-splash');
+    if (splash) splash.style.display = 'none';
     const app = document.getElementById('ax-app');
     if (app) {
       app.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:16px;padding:40px 24px;text-align:center;';

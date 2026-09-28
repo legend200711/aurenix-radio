@@ -1,25 +1,57 @@
 {
   "name": "AURENIX",
   "short_name": "AURENIX",
-  "description": "AURENIX",
+  "description": "AURENIX — The Broadcast Never Stops. 24/7 internet television network.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "orientation": "portrait-primary",
+  "orientation": "any",
   "background_color": "#050507",
   "theme_color": "#050507",
+  "id": "/",
+  "categories": ["entertainment", "music"],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "Watch LIVE",
+      "short_name": "Watch",
+      "description": "Open AURENIX and go directly to the live broadcast",
+      "url": "/?action=watch",
+      "icons": [{ "src": "aurenix-icon-192.png", "sizes": "192x192" }]
+    }
+  ],
   "icons": [
     {
       "src": "aurenix-icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "aurenix-icon-192-maskable.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
     },
     {
       "src": "aurenix-icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "aurenix-icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
-  ]
+  ],
+  "related_applications": [
+    {
+      "platform": "webapp",
+      "url": "https://aurenix.tv/"
+    }
+  ],
+  "prefer_related_applications": false,
+  "display_override": ["standalone", "minimal-ui", "browser"]
 }

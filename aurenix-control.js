@@ -225,6 +225,10 @@ export function mountControl(user, isAdmin) {
     _checkWorkerHealth();
     ctrl.querySelector('#ax-sec-recheck-btn')?.addEventListener('click', _checkWorkerHealth);
 
+    // System health pane
+    _runHealthCheck();
+    ctrl.querySelector('#ax-health-refresh-btn')?.addEventListener('click', _runHealthCheck);
+
     // Probe upload limit button
     ctrl.querySelector('#ax-sec-probe-limit-btn')?.addEventListener('click', async () => {
       const resultEl = document.getElementById('ax-sec-limit-result');
@@ -376,6 +380,9 @@ function _buildFounderHTML() {
       <span class="ax-ctrl-nav-icon">📥</span> Submissions <span id="ax-submissions-badge" style="display:none;background:var(--red);color:#fff;border-radius:10px;padding:1px 6px;font-size:10px;margin-left:4px;"></span>
     </button>
     <div class="ax-ctrl-section-label">SYSTEM</div>
+    <button class="ax-ctrl-nav-btn" data-pane="health">
+      <span class="ax-ctrl-nav-icon">💓</span> System Health
+    </button>
     <button class="ax-ctrl-nav-btn" data-pane="stats">
       <span class="ax-ctrl-nav-icon">📊</span> Statistics
     </button>
@@ -423,6 +430,57 @@ function _buildFounderHTML() {
           <div class="ax-dash-card-title">24/7 WARNINGS</div>
           <div id="ax-dash-warnings"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- ══ SYSTEM HEALTH ══ -->
+    <div class="ax-ctrl-pane" id="ax-pane-health">
+      <div class="ax-section-title">System <span>Health</span></div>
+      <div class="ax-section-title" style="font-size:12px;margin-bottom:12px;color:var(--text-dim);font-weight:400;letter-spacing:1px;">Real-time status of all AURENIX network services</div>
+      <div class="ax-health-grid" id="ax-health-grid">
+        <div class="ax-health-card">
+          <div class="ax-health-card-label">Firebase Auth</div>
+          <div class="ax-health-card-value" id="ax-health-auth-val">Checking…</div>
+          <div class="ax-health-card-status" id="ax-health-auth-status">—</div>
+        </div>
+        <div class="ax-health-card">
+          <div class="ax-health-card-label">Firestore</div>
+          <div class="ax-health-card-value" id="ax-health-fs-val">Checking…</div>
+          <div class="ax-health-card-status" id="ax-health-fs-status">—</div>
+        </div>
+        <div class="ax-health-card">
+          <div class="ax-health-card-label">Cloudflare Worker</div>
+          <div class="ax-health-card-value" id="ax-health-worker-val">Checking…</div>
+          <div class="ax-health-card-status" id="ax-health-worker-status">—</div>
+        </div>
+        <div class="ax-health-card">
+          <div class="ax-health-card-label">Media Storage</div>
+          <div class="ax-health-card-value" id="ax-health-storage-val">Checking…</div>
+          <div class="ax-health-card-status" id="ax-health-storage-status">—</div>
+        </div>
+        <div class="ax-health-card">
+          <div class="ax-health-card-label">Broadcast State</div>
+          <div class="ax-health-card-value" id="ax-health-broadcast-val">—</div>
+          <div class="ax-health-card-status" id="ax-health-broadcast-status">—</div>
+        </div>
+        <div class="ax-health-card">
+          <div class="ax-health-card-label">Active Channels</div>
+          <div class="ax-health-card-value" id="ax-health-channels-val">—</div>
+          <div class="ax-health-card-status" id="ax-health-channels-status">—</div>
+        </div>
+        <div class="ax-health-card">
+          <div class="ax-health-card-label">Media Library</div>
+          <div class="ax-health-card-value" id="ax-health-media-val">—</div>
+          <div class="ax-health-card-status" id="ax-health-media-status">—</div>
+        </div>
+        <div class="ax-health-card">
+          <div class="ax-health-card-label">Service Worker</div>
+          <div class="ax-health-card-value" id="ax-health-sw-val">Checking…</div>
+          <div class="ax-health-card-status" id="ax-health-sw-status">—</div>
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <button class="ax-btn-sm" id="ax-health-refresh-btn">↺ Refresh Health Check</button>
       </div>
     </div>
 
@@ -3157,6 +3215,108 @@ async function _checkWorkerHealth() {
       effEl.style.color = 'var(--text-dim)';
     }
   } catch (_) {}
+}
+
+/* ═══════════════════════════════════════
+   SYSTEM HEALTH CHECK
+═══════════════════════════════════════ */
+async function _runHealthCheck() {
+  const setCard = (valId, statusId, value, status) => {
+    const valEl    = document.getElementById(valId);
+    const statusEl = document.getElementById(statusId);
+    if (valEl)    valEl.textContent    = value;
+    if (statusEl) {
+      statusEl.textContent  = status.toUpperCase();
+      statusEl.className    = `ax-health-card-status ${status}`;
+    }
+  };
+
+  // Auth check
+  try {
+    const user = (await import('./firebase-client.js')).auth.currentUser;
+    setCard('ax-health-auth-val', 'ax-health-auth-status',
+      user ? user.email : '(not signed in)',
+      user ? 'online' : 'warning');
+  } catch (e) {
+    setCard('ax-health-auth-val', 'ax-health-auth-status', 'Error: ' + e.message, 'offline');
+  }
+
+  // Firestore check — try to read a known doc
+  try {
+    const { db, doc, getDoc } = await import('./firebase-client.js');
+    await getDoc(doc(db, 'network_channels', '__health__'));
+    setCard('ax-health-fs-val', 'ax-health-fs-status', 'Connected', 'online');
+  } catch (e) {
+    const msg = e?.code || e?.message || 'Error';
+    setCard('ax-health-fs-val', 'ax-health-fs-status', msg, msg.includes('permission') ? 'online' : 'offline');
+  }
+
+  // Cloudflare Worker check
+  try {
+    const res  = await fetch(UPLOAD_WORKER_URL + '/health', { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    setCard('ax-health-worker-val', 'ax-health-worker-status',
+      data.ok ? 'Operational' : (data.error || 'Not OK'),
+      data.ok ? 'online' : 'offline');
+  } catch (e) {
+    setCard('ax-health-worker-val', 'ax-health-worker-status', 'Unreachable', 'offline');
+  }
+
+  // Storage check
+  try {
+    const res  = await fetch(UPLOAD_WORKER_URL + '/diagnose', { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    const mb   = data.bucket_file_size_limit_bytes ? Math.round(data.bucket_file_size_limit_bytes / 1048576) + ' MB limit' : 'Connected';
+    setCard('ax-health-storage-val', 'ax-health-storage-status', mb, 'online');
+  } catch (e) {
+    setCard('ax-health-storage-val', 'ax-health-storage-status', 'Unavailable', 'warning');
+  }
+
+  // Broadcast state check
+  try {
+    const { db, collection, getDocs } = await import('./firebase-client.js');
+    const snap = await getDocs(collection(db, 'network_state'));
+    const live = snap.docs.filter(d => d.data()?.current_item?.id).length;
+    const total = snap.docs.length;
+    setCard('ax-health-broadcast-val', 'ax-health-broadcast-status',
+      `${live} / ${total} channels broadcasting`,
+      live > 0 ? 'online' : (total > 0 ? 'warning' : 'offline'));
+  } catch (e) {
+    setCard('ax-health-broadcast-val', 'ax-health-broadcast-status', 'Error', 'offline');
+  }
+
+  // Active channels
+  try {
+    const { db, collection, getDocs } = await import('./firebase-client.js');
+    const snap = await getDocs(collection(db, 'network_channels'));
+    const enabled = snap.docs.filter(d => d.data()?.enabled !== false).length;
+    setCard('ax-health-channels-val', 'ax-health-channels-status',
+      `${enabled} channel${enabled !== 1 ? 's' : ''} configured`,
+      enabled > 0 ? 'online' : 'warning');
+  } catch (e) {
+    setCard('ax-health-channels-val', 'ax-health-channels-status', 'Error', 'offline');
+  }
+
+  // Media library
+  const mediaCount = _mediaLib.length;
+  const approved   = _mediaLib.filter(m => m.status === 'approved').length;
+  setCard('ax-health-media-val', 'ax-health-media-status',
+    `${approved} approved / ${mediaCount} total`,
+    approved > 0 ? 'online' : (mediaCount > 0 ? 'warning' : 'offline'));
+
+  // Service Worker
+  try {
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration('/');
+      setCard('ax-health-sw-val', 'ax-health-sw-status',
+        reg ? 'Active' : 'Not registered',
+        reg ? 'online' : 'warning');
+    } else {
+      setCard('ax-health-sw-val', 'ax-health-sw-status', 'Not supported', 'warning');
+    }
+  } catch (e) {
+    setCard('ax-health-sw-val', 'ax-health-sw-status', 'Error', 'offline');
+  }
 }
 
 /* ═══════════════════════════════════════

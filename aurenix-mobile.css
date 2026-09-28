@@ -1,0 +1,991 @@
+/* ═══════════════════════════════════════════════════════════════
+   AURENIX MOBILE — App Experience Layer
+   Native-feeling mobile UI: splash, bottom nav, fullscreen TV,
+   portrait home, landscape player, safe-area support.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ══════════════════════════════════════
+   SAFE AREA + VIEWPORT
+   Works inside browser, PWA standalone, Capacitor WebView
+══════════════════════════════════════ */
+:root {
+  --sat: env(safe-area-inset-top, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --mobile-nav-h: 64px;
+  --mobile-nav-total: calc(var(--mobile-nav-h) + var(--sab));
+  /* Mobile: reduce top nav height */
+  --nav-h: 52px;
+}
+
+/* Prevent overscroll / pull-to-refresh feel in standalone mode */
+@media (display-mode: standalone) {
+  html, body {
+    overscroll-behavior: none;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* ══════════════════════════════════════
+   SPLASH SCREEN
+   Cinematic startup — shown instantly from HTML,
+   dismissed via JS after auth check.
+══════════════════════════════════════ */
+#ax-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  background: #050507;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  transition: opacity 0.55s ease, transform 0.55s ease;
+}
+#ax-splash.ax-splash-out {
+  opacity: 0;
+  transform: scale(1.04);
+  pointer-events: none;
+}
+#ax-splash.ax-splash-gone {
+  display: none;
+}
+
+.ax-splash-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  z-index: 1;
+  position: relative;
+  animation: ax-splash-enter 0.7s ease both;
+}
+@keyframes ax-splash-enter {
+  0%  { opacity: 0; transform: translateY(18px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.ax-splash-logo-wrap {
+  position: relative;
+  width: 90px;
+  height: 90px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ax-splash-logo-wrap::after {
+  content: '';
+  position: absolute;
+  inset: -12px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(30,80,255,0.28) 0%, transparent 70%);
+  animation: ax-splash-glow-pulse 2.5s ease-in-out infinite;
+}
+@keyframes ax-splash-glow-pulse {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50%       { opacity: 1;   transform: scale(1.15); }
+}
+.ax-splash-svg {
+  width: 80px;
+  height: 80px;
+  position: relative;
+  z-index: 1;
+  filter: drop-shadow(0 0 18px rgba(30,80,255,0.55));
+}
+
+.ax-splash-wordmark {
+  font-size: clamp(32px, 9vw, 52px);
+  font-weight: 900;
+  letter-spacing: 0.28em;
+  color: #c8d0e8;
+  line-height: 1;
+  text-shadow: 0 0 40px rgba(30,80,255,0.4);
+}
+.ax-splash-wordmark span { color: #4d7aff; }
+
+.ax-splash-tagline {
+  font-size: 10px;
+  letter-spacing: 4px;
+  color: #3a4060;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.ax-splash-connecting {
+  font-size: 10px;
+  letter-spacing: 3px;
+  color: #4d7aff;
+  text-transform: uppercase;
+  font-weight: 700;
+  animation: ax-splash-blink 1.4s ease-in-out infinite;
+  margin-top: 8px;
+}
+@keyframes ax-splash-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+.ax-splash-glow {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 70vw;
+  height: 40vh;
+  background: radial-gradient(ellipse at bottom, rgba(30,80,255,0.12) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+/* ══════════════════════════════════════
+   MOBILE BOTTOM NAVIGATION
+══════════════════════════════════════ */
+#ax-mobile-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: var(--mobile-nav-total);
+  z-index: 800;
+  background: rgba(5,5,7,0.96);
+  border-top: 1px solid rgba(30,80,255,0.18);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  display: none; /* shown by JS after auth */
+  padding-bottom: var(--sab);
+  /* Transition for show/hide during fullscreen */
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+#ax-mobile-nav.visible {
+  display: flex;
+}
+#ax-mobile-nav.ax-nav-hidden {
+  transform: translateY(100%);
+  opacity: 0;
+  pointer-events: none;
+}
+#ax-mobile-nav.ax-nav-desktop-override {
+  display: none !important;
+}
+
+.ax-mobile-nav-inner {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-around;
+  width: 100%;
+  height: var(--mobile-nav-h);
+}
+
+.ax-mobile-nav-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px 4px;
+  color: var(--text-dim);
+  transition: color var(--transition);
+  -webkit-tap-highlight-color: transparent;
+  min-width: 0;
+  position: relative;
+}
+.ax-mobile-nav-btn.active {
+  color: var(--blue-bright);
+}
+.ax-mobile-nav-btn.active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 25%;
+  right: 25%;
+  height: 2px;
+  background: var(--blue);
+  border-radius: 0 0 2px 2px;
+}
+.ax-mobile-nav-btn:active {
+  opacity: 0.7;
+  transform: scale(0.95);
+}
+
+.ax-mobile-nav-icon {
+  font-size: 22px;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+.ax-mobile-nav-btn.active .ax-mobile-nav-icon {
+  transform: scale(1.1);
+}
+.ax-mobile-nav-label {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* Hide desktop nav items on mobile screens */
+@media (max-width: 767px) {
+  #ax-nav .ax-nav-btn,
+  #ax-nav .ax-founder-badge-nav {
+    display: none;
+  }
+  #ax-nav .ax-nav-live-badge {
+    display: flex;
+  }
+  /* Keep AURENIX logo + live badge in top nav but hide redundant auth buttons */
+  #ax-nav-auth-area .ax-nav-btn:not(#ax-ctrl-btn) {
+    display: none;
+  }
+}
+
+/* On desktop (≥768px), hide the mobile bottom nav */
+@media (min-width: 768px) {
+  #ax-mobile-nav.visible {
+    display: none;
+  }
+  #ax-mobile-nav.ax-nav-desktop-override {
+    display: none !important;
+  }
+}
+
+/* ══════════════════════════════════════
+   MOBILE BODY PADDING
+   Account for bottom nav on mobile
+══════════════════════════════════════ */
+@media (max-width: 767px) {
+  #ax-app {
+    padding-bottom: var(--mobile-nav-total);
+    /* Also account for top safe area in standalone mode */
+    padding-top: calc(var(--nav-h) + var(--sat));
+  }
+  /* Reduce hero vertical padding on mobile */
+  #ax-hero {
+    min-height: unset;
+    padding: 0 0 16px;
+  }
+  .ax-network-header {
+    padding: 12px 16px 8px;
+  }
+}
+
+/* ══════════════════════════════════════
+   MOBILE HOME — TV LAYOUT
+   Single-column stacked view on phone
+══════════════════════════════════════ */
+@media (max-width: 767px) {
+  .ax-tv-layout {
+    display: flex;
+    flex-direction: column;
+    padding: 0 0 8px;
+    gap: 0;
+    max-width: 100%;
+  }
+  .ax-tv-sidebar {
+    display: flex;
+    flex-direction: column;
+    padding: 0 12px;
+    gap: 12px;
+    width: 100%;
+  }
+  .ax-tv-main {
+    width: 100%;
+  }
+}
+
+/* ══════════════════════════════════════
+   MOBILE PLAYER
+   Full-width 16:9, touch-optimized controls
+══════════════════════════════════════ */
+@media (max-width: 767px) {
+  .ax-player-wrap {
+    position: relative;
+  }
+  .ax-channel-badge {
+    font-size: 10px;
+    padding: 4px 10px 4px 10px;
+    gap: 6px;
+  }
+  .ax-player-shell {
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
+
+  /* Make progress bar taller for touch */
+  .ax-progress-bar {
+    height: 4px;
+    cursor: pointer;
+  }
+  .ax-progress-wrap {
+    padding: 10px 14px 6px;
+  }
+
+  /* Touch-friendly controls */
+  .ax-controls {
+    padding: 8px 14px 10px;
+    gap: 10px;
+  }
+  .ax-ctrl-btn {
+    min-width: 44px;
+    min-height: 44px;
+    font-size: 20px;
+  }
+  .ax-ctrl-btn.primary {
+    width: 52px;
+    height: 52px;
+    font-size: 22px;
+  }
+  .ax-volume-wrap {
+    gap: 8px;
+  }
+
+  /* Now playing panel below player */
+  .ax-now-playing-panel {
+    padding: 12px 14px;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .ax-np-panel-right {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .ax-np-panel-title {
+    font-size: clamp(13px, 3.5vw, 17px);
+  }
+}
+
+/* ══════════════════════════════════════
+   MOBILE SECTIONS (Channels, Up Next, Guide)
+   Touch-friendly scroll lists
+══════════════════════════════════════ */
+@media (max-width: 767px) {
+  .ax-panel {
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+
+  /* Horizontal scrolling channel strip */
+  #ax-channel-list {
+    display: flex;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 10px 8px;
+    gap: 8px;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  #ax-channel-list::-webkit-scrollbar { display: none; }
+
+  .ax-channel-btn {
+    flex-shrink: 0;
+    flex-direction: column;
+    width: 72px;
+    min-width: 72px;
+    height: 72px;
+    padding: 8px 6px;
+    gap: 4px;
+    align-items: center;
+    justify-content: center;
+    scroll-snap-align: start;
+    border-left: none;
+    border-top: 2px solid transparent;
+    border-radius: var(--radius-lg);
+    text-align: center;
+  }
+  .ax-channel-btn.active {
+    border-top-color: var(--blue);
+  }
+  .ax-ch-num { font-size: 9px; }
+  .ax-ch-icon { font-size: 22px; }
+  .ax-ch-name {
+    font-size: 8px;
+    white-space: normal;
+    text-align: center;
+    line-height: 1.2;
+    max-width: 64px;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .ax-ch-status {
+    width: 5px;
+    height: 5px;
+  }
+}
+
+/* ══════════════════════════════════════
+   MOBILE UP NEXT
+   Compact touch-friendly list
+══════════════════════════════════════ */
+@media (max-width: 767px) {
+  .ax-sched-row {
+    padding: 10px 14px;
+    min-height: 52px;
+  }
+  .ax-sched-title {
+    font-size: 13px;
+  }
+  .ax-sched-meta {
+    font-size: 11px;
+  }
+  .ax-up-next-section {
+    padding: 8px 14px 4px;
+    font-size: 9px;
+    letter-spacing: 2px;
+  }
+}
+
+/* ══════════════════════════════════════
+   MOBILE EPG (TV GUIDE)
+   Scrollable guide view
+══════════════════════════════════════ */
+@media (max-width: 767px) {
+  .ax-epg-panel {
+    min-height: unset;
+  }
+  .ax-epg-tabs {
+    padding: 8px 8px 0;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    flex-wrap: nowrap;
+  }
+  .ax-epg-tabs::-webkit-scrollbar { display: none; }
+  .ax-epg-tab {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    font-size: 10px;
+  }
+  .ax-epg-row {
+    padding: 10px 14px;
+    min-height: 56px;
+  }
+  .ax-epg-title {
+    font-size: 13px;
+  }
+  .ax-epg-meta {
+    font-size: 11px;
+  }
+}
+
+/* ══════════════════════════════════════
+   FULLSCREEN LANDSCAPE TV MODE
+   Native TV-app experience when rotated
+══════════════════════════════════════ */
+
+/* During fullscreen: hide all nav, bottom nav, headers */
+body.ax-fullscreen-active #ax-mobile-nav,
+body.ax-fullscreen-active #ax-nav {
+  display: none !important;
+}
+body.ax-fullscreen-active #ax-app {
+  padding-bottom: 0 !important;
+  padding-top: 0 !important;
+}
+
+/* Landscape orientation on mobile — auto-expand player */
+@media (max-width: 900px) and (orientation: landscape) {
+  #ax-mobile-nav {
+    transform: translateY(100%);
+    opacity: 0;
+    pointer-events: none;
+  }
+  #ax-nav {
+    transform: translateY(-100%);
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+  }
+  #ax-app {
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+  }
+  #ax-hero {
+    padding: 0;
+    min-height: 100vh;
+  }
+  .ax-network-header {
+    display: none;
+  }
+  .ax-tv-layout {
+    display: flex;
+    flex-direction: row;
+    padding: 0;
+    gap: 0;
+    height: 100vh;
+    max-width: 100vw;
+  }
+  .ax-tv-main {
+    flex: 1;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .ax-tv-sidebar {
+    display: none; /* sidebar hidden in landscape on phone */
+  }
+  .ax-player-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+  .ax-channel-badge {
+    border-radius: 0;
+    font-size: 9px;
+    padding: 3px 10px;
+  }
+  .ax-player-shell {
+    flex: 1;
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+  }
+  #ax-fs-container {
+    flex: 1;
+    height: 100%;
+  }
+  .ax-media-area {
+    aspect-ratio: unset;
+    height: 100%;
+    flex: 1;
+  }
+  .ax-progress-wrap,
+  .ax-controls {
+    display: none;
+  }
+  .ax-now-playing-panel {
+    display: none;
+  }
+  /* Show fullscreen overlay controls in landscape */
+  .ax-fs-overlay {
+    display: flex !important;
+    opacity: 1;
+  }
+}
+
+/* ══════════════════════════════════════
+   FULLSCREEN OVERLAY — MOBILE
+   Larger touch targets for landscape playback
+══════════════════════════════════════ */
+.ax-fs-overlay {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+@media (max-width: 900px) {
+  .ax-fs-ctrl-btn {
+    min-width: 48px;
+    min-height: 48px;
+    font-size: 22px;
+    padding: 8px;
+  }
+  .ax-fs-vol-slider {
+    width: 80px;
+  }
+  .ax-fs-np-title {
+    font-size: clamp(12px, 3vw, 20px);
+  }
+  .ax-fs-channel-badge {
+    font-size: 10px;
+  }
+  .ax-fs-ctrl-bar {
+    padding: 12px 16px;
+    gap: 8px;
+  }
+  .ax-fs-top-bar {
+    padding: 12px 16px;
+  }
+  /* Progress bar area — larger touch target */
+  .ax-fs-progress-wrap {
+    gap: 6px;
+  }
+  .ax-fs-progress-bar {
+    height: 4px;
+  }
+  .ax-fs-btns {
+    gap: 6px;
+  }
+}
+
+/* ══════════════════════════════════════
+   SOUND PROMPT (muted autoplay fallback)
+══════════════════════════════════════ */
+#ax-sound-prompt {
+  position: fixed;
+  bottom: calc(var(--mobile-nav-total) + 16px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 850;
+  animation: ax-sound-slide-up 0.3s ease both;
+}
+@keyframes ax-sound-slide-up {
+  from { opacity: 0; transform: translateX(-50%) translateY(12px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+#ax-sound-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: rgba(5,5,7,0.95);
+  border: 1px solid rgba(30,80,255,0.5);
+  border-radius: 40px;
+  color: var(--blue-bright);
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: 800;
+  font-size: 12px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  -webkit-tap-highlight-color: transparent;
+  min-height: 48px;
+  transition: all 0.15s ease;
+  box-shadow: 0 0 20px rgba(30,80,255,0.25);
+}
+#ax-sound-btn:active {
+  transform: scale(0.97);
+}
+.ax-sound-icon {
+  font-size: 16px;
+}
+.ax-sound-text {
+  letter-spacing: 2px;
+}
+
+/* Hide sound prompt during fullscreen */
+body.ax-fullscreen-active #ax-sound-prompt {
+  display: none !important;
+}
+
+/* ══════════════════════════════════════
+   TUNING & RECONNECT OVERLAYS — MOBILE
+   Full-screen centered experience
+══════════════════════════════════════ */
+@media (max-width: 767px) {
+  .ax-tuning-overlay,
+  .ax-reconnect-overlay {
+    border-radius: 0;
+  }
+  .ax-tuning-label {
+    font-size: 10px;
+    letter-spacing: 3px;
+  }
+  .ax-reconnect-label {
+    font-size: 10px;
+    letter-spacing: 2.5px;
+  }
+}
+
+/* ══════════════════════════════════════
+   AUTOPLAY GATE — MOBILE
+   Large centered button, easy to tap
+══════════════════════════════════════ */
+@media (max-width: 767px) {
+  .ax-gate-btn {
+    padding: 16px 44px;
+    font-size: 14px;
+    min-height: 56px;
+    letter-spacing: 2px;
+  }
+  .ax-gate-logo svg {
+    width: 60px;
+    height: 60px;
+  }
+  .ax-gate-title {
+    font-size: clamp(24px, 6vw, 36px);
+  }
+  .ax-gate-sub {
+    font-size: 12px;
+    letter-spacing: 1.5px;
+  }
+}
+
+/* ══════════════════════════════════════
+   MOBILE SCREENS (Watch / Library / Profile)
+   App-style screens shown by mobile.js
+══════════════════════════════════════ */
+.ax-mobile-screen {
+  display: none;
+  flex-direction: column;
+  min-height: calc(100vh - var(--nav-h) - var(--mobile-nav-total));
+  padding: 0 0 16px;
+  animation: ax-screen-enter 0.22s ease both;
+}
+.ax-mobile-screen.active {
+  display: flex;
+}
+@keyframes ax-screen-enter {
+  from { opacity: 0; transform: translateX(8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Screen header */
+.ax-screen-header {
+  padding: 16px 16px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.ax-screen-title {
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.ax-screen-subtitle {
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  margin-top: 2px;
+}
+
+/* Library grid */
+.ax-mobile-library-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  padding: 12px;
+}
+@media (min-width: 480px) and (max-width: 767px) {
+  .ax-mobile-library-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+.ax-mobile-media-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.ax-mobile-media-card:active {
+  transform: scale(0.97);
+  background: var(--surface-hi);
+}
+.ax-mobile-card-icon {
+  font-size: 28px;
+  line-height: 1;
+}
+.ax-mobile-card-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.3;
+}
+.ax-mobile-card-meta {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* Profile screen */
+.ax-mobile-profile {
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.ax-profile-avatar {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: var(--surface-hi);
+  border: 2px solid var(--border-hi);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--blue-bright);
+  flex-shrink: 0;
+}
+.ax-profile-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ax-profile-email {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.ax-profile-role {
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+}
+.ax-profile-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ax-profile-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: all 0.15s ease;
+  letter-spacing: 0.5px;
+  text-align: left;
+  width: 100%;
+}
+.ax-profile-action-btn:active {
+  background: var(--surface-hi);
+  transform: scale(0.99);
+}
+.ax-profile-action-btn .ax-pab-icon {
+  font-size: 18px;
+  width: 28px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.ax-profile-action-btn .ax-pab-label {
+  flex: 1;
+}
+.ax-profile-action-btn .ax-pab-arrow {
+  color: var(--text-dim);
+  font-size: 14px;
+}
+.ax-profile-action-btn.danger {
+  color: var(--red);
+  border-color: rgba(255,45,85,0.25);
+  background: rgba(255,45,85,0.05);
+}
+.ax-profile-founder-card {
+  background: linear-gradient(135deg, rgba(184,134,11,0.12) 0%, rgba(30,80,255,0.08) 100%);
+  border: 1px solid rgba(184,134,11,0.35);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.ax-pfc-icon { font-size: 24px; }
+.ax-pfc-label {
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  color: var(--gold-bright);
+  text-transform: uppercase;
+}
+.ax-pfc-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+/* ══════════════════════════════════════
+   RECONNECT FULL-SCREEN OVERLAY (mobile)
+   Covers entire screen when network is lost
+══════════════════════════════════════ */
+#ax-mobile-reconnect {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  background: rgba(5,5,7,0.97);
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 40px 24px;
+}
+#ax-mobile-reconnect.visible {
+  display: flex;
+}
+.ax-mobile-reconnect-logo {
+  opacity: 0.85;
+}
+.ax-mobile-reconnect-title {
+  font-size: clamp(24px, 6vw, 36px);
+  font-weight: 900;
+  letter-spacing: 0.25em;
+  color: var(--text);
+}
+.ax-mobile-reconnect-title span { color: var(--blue-bright); }
+.ax-mobile-reconnect-msg {
+  font-size: 11px;
+  letter-spacing: 3px;
+  color: var(--blue-bright);
+  text-transform: uppercase;
+  font-weight: 700;
+  animation: ax-splash-blink 1.4s ease-in-out infinite;
+}
+.ax-mobile-reconnect-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+  max-width: 300px;
+  line-height: 1.7;
+}
+
+/* ══════════════════════════════════════
+   DESKTOP (≥768px): HIDE MOBILE-ONLY ELEMENTS
+   Show the full TV layout as before
+══════════════════════════════════════ */
+@media (min-width: 768px) {
+  #ax-sound-prompt {
+    display: none !important;
+  }
+  /* On desktop, override mobile-only hiding of nav auth buttons */
+  #ax-nav-auth-area .ax-nav-btn {
+    display: inline-flex !important;
+  }
+  #ax-nav .ax-founder-badge-nav {
+    display: inline-flex !important;
+  }
+  /* Restore desktop app layout — no bottom padding for mobile nav */
+  #ax-app {
+    padding-bottom: 0 !important;
+    padding-top: var(--nav-h) !important;
+  }
+}
+
+/* ══════════════════════════════════════
+   PRINT: hide everything except player
+══════════════════════════════════════ */
+@media print {
+  #ax-splash,
+  #ax-mobile-nav,
+  #ax-nav,
+  #ax-sound-prompt,
+  #ax-mobile-reconnect,
+  .ax-ambient,
+  #ax-particles { display: none !important; }
+}

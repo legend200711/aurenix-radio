@@ -82,9 +82,14 @@ export function initBroadcast() {
   _buildParticles();
   _showLoginScreen();
 
+  // Expose reconnect hook for mobile layer (network recovery)
+  window._axBroadcastReconnect = (reason) => _viewerReconnect(reason);
+
   onAuthChange((user) => {
     _user      = user;
     _isFounder = !!(user && user.email?.trim().toLowerCase() === FOUNDER_EMAIL.toLowerCase());
+    // Notify mobile layer
+    if (window._axMobile?.onAuth) window._axMobile.onAuth(user, _isFounder);
     if (user) { _enterNetwork(); }
     else      { _showLoginScreen(); }
   });
@@ -156,9 +161,10 @@ function _showLoginScreen() {
   if (!app) return;
 
   app.innerHTML = `
-    <div class="ax-auth-screen" id="ax-auth-screen">
-      <div class="ax-auth-logo">
-        <svg viewBox="0 0 64 64" fill="none" width="56" height="56">
+    <div id="ax-auth-screen" style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;gap:28px;">
+      <!-- Brand -->
+      <div style="text-align:center;">
+        <svg viewBox="0 0 64 64" fill="none" width="52" height="52" style="margin-bottom:12px;">
           <polygon points="32,6 58,56 6,56" fill="none" stroke="#b8860b" stroke-width="1.5" opacity="0.85"/>
           <ellipse cx="32" cy="38" rx="13" ry="9" fill="none" stroke="#1e50ff" stroke-width="1.3"/>
           <circle cx="32" cy="38" r="5" fill="none" stroke="#b8860b" stroke-width="1.2"/>
@@ -166,37 +172,35 @@ function _showLoginScreen() {
           <line x1="8" y1="38" x2="19" y2="38" stroke="#b8860b" stroke-width="0.8" opacity="0.5"/>
           <line x1="45" y1="38" x2="56" y2="38" stroke="#b8860b" stroke-width="0.8" opacity="0.5"/>
         </svg>
-        <div class="ax-auth-logo-text">AURE<span>NIX</span></div>
-        <div class="ax-auth-logo-sub">THE BROADCAST NEVER STOPS.</div>
+        <div style="font-size:clamp(26px,5vw,38px);font-weight:900;letter-spacing:0.28em;color:var(--text);line-height:1;">AURE<span style="color:var(--blue-bright)">NIX</span></div>
+        <div style="font-size:9px;letter-spacing:4px;color:var(--text-muted);text-transform:uppercase;font-weight:700;margin-top:6px;">THE BROADCAST NEVER STOPS.</div>
       </div>
 
-      <div class="ax-auth-card" id="ax-panel-login">
-        <div class="ax-auth-card-title">LOGIN</div>
+      <div class="ax-auth-box" id="ax-panel-login">
+        <div class="ax-auth-title">SIGN IN</div>
         <div class="ax-field-group">
           <label class="ax-field-label">Email</label>
           <input class="ax-field-input" type="email" id="ax-login-email" placeholder="you@example.com" autocomplete="email">
         </div>
-        <div class="ax-field-group" id="ax-login-pass-group">
+        <div class="ax-field-group">
           <label class="ax-field-label">Password</label>
           <div style="position:relative;">
             <input class="ax-field-input" type="password" id="ax-login-pass" placeholder="Password" autocomplete="current-password" style="padding-right:48px;">
-            <button type="button" id="ax-login-pass-toggle" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:11px;padding:2px 4px;letter-spacing:1px;">SHOW</button>
+            <button type="button" id="ax-login-pass-toggle" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:10px;padding:2px 4px;letter-spacing:1px;font-family:inherit;">SHOW</button>
           </div>
         </div>
         <div class="ax-auth-err" id="ax-login-err"></div>
-        <button class="ax-btn-primary" id="ax-login-submit">LOGIN</button>
-        <div style="display:flex;gap:8px;margin-top:8px;">
+        <button class="ax-btn-primary" id="ax-login-submit">ENTER AURENIX</button>
+        <div class="ax-auth-divider">or</div>
+        <div style="display:flex;gap:8px;">
+          <button class="ax-btn-ghost" id="ax-go-register" style="flex:1;font-size:11px;">Create Free Account</button>
           <button class="ax-btn-ghost" id="ax-login-forgot" style="flex:1;font-size:11px;">Forgot Password?</button>
-        </div>
-        <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);text-align:center;">
-          <span style="font-size:12px;color:var(--text-dim);">No account? Registration is FREE.</span>
-          <button class="ax-btn-ghost" id="ax-go-register" style="margin-left:8px;font-size:12px;padding:4px 12px;">CREATE ACCOUNT</button>
         </div>
       </div>
 
-      <div class="ax-auth-card" id="ax-panel-register" style="display:none;">
-        <div class="ax-auth-card-title">CREATE FREE ACCOUNT</div>
-        <div class="ax-auth-card-sub">Free access to all AURENIX channels. No subscription required.</div>
+      <div class="ax-auth-box" id="ax-panel-register" style="display:none;">
+        <div class="ax-auth-title">CREATE FREE ACCOUNT</div>
+        <div class="ax-auth-sub" style="margin-top:-12px;font-size:11px;">Free access to all channels. No subscription required.</div>
         <div class="ax-field-group">
           <label class="ax-field-label">Email</label>
           <input class="ax-field-input" type="email" id="ax-reg-email" placeholder="you@example.com" autocomplete="email">
@@ -205,7 +209,7 @@ function _showLoginScreen() {
           <label class="ax-field-label">Password</label>
           <div style="position:relative;">
             <input class="ax-field-input" type="password" id="ax-reg-pass" placeholder="At least 6 characters" autocomplete="new-password" style="padding-right:48px;">
-            <button type="button" id="ax-reg-pass-toggle" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:11px;padding:2px 4px;letter-spacing:1px;">SHOW</button>
+            <button type="button" id="ax-reg-pass-toggle" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:10px;padding:2px 4px;letter-spacing:1px;font-family:inherit;">SHOW</button>
           </div>
         </div>
         <div class="ax-field-group">
@@ -213,25 +217,21 @@ function _showLoginScreen() {
           <input class="ax-field-input" type="password" id="ax-reg-pass2" placeholder="Repeat password" autocomplete="new-password">
         </div>
         <div class="ax-auth-err" id="ax-reg-err"></div>
-        <button class="ax-btn-primary" id="ax-reg-submit">CREATE FREE ACCOUNT</button>
-        <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);text-align:center;">
-          <span style="font-size:12px;color:var(--text-dim);">Already have an account?</span>
-          <button class="ax-btn-ghost" id="ax-go-login" style="margin-left:8px;font-size:12px;padding:4px 12px;">LOGIN</button>
-        </div>
+        <button class="ax-btn-primary" id="ax-reg-submit">CREATE ACCOUNT &amp; WATCH</button>
+        <div class="ax-auth-divider">or</div>
+        <button class="ax-btn-ghost" id="ax-go-login" style="font-size:12px;">Already have an account? Sign In</button>
       </div>
 
-      <div class="ax-auth-card" id="ax-panel-reset" style="display:none;">
-        <div class="ax-auth-card-title">RESET PASSWORD</div>
-        <div class="ax-auth-card-sub">Enter your email to receive a reset link.</div>
+      <div class="ax-auth-box" id="ax-panel-reset" style="display:none;">
+        <div class="ax-auth-title">RESET PASSWORD</div>
+        <div class="ax-auth-sub" style="margin-top:-12px;">Enter your email to receive a reset link.</div>
         <div class="ax-field-group">
           <label class="ax-field-label">Email</label>
           <input class="ax-field-input" type="email" id="ax-reset-email" placeholder="you@example.com" autocomplete="email">
         </div>
         <div class="ax-auth-err" id="ax-reset-err"></div>
         <button class="ax-btn-primary" id="ax-reset-submit">SEND RESET EMAIL</button>
-        <div style="margin-top:8px;">
-          <button class="ax-btn-ghost" id="ax-reset-back" style="width:100%;font-size:12px;">← Back to Login</button>
-        </div>
+        <button class="ax-btn-ghost" id="ax-reset-back" style="width:100%;font-size:12px;margin-top:4px;">← Back to Sign In</button>
       </div>
     </div>
   `;
@@ -394,6 +394,8 @@ function _subscribeChannels() {
       // Start the global tick immediately so ALL channels are watched from the
       // moment the network is ready — even if no channel has content yet.
       _startTick();
+      // Notify mobile layer — network is ready, channels loaded
+      if (window._axMobile?.onNetworkReady) window._axMobile.onNetworkReady(_channels, first?.id);
     } else {
       _buildChannelList();
       _buildEPGChannelTabs();
@@ -476,17 +478,13 @@ function _buildHero(channels) {
   const app = document.getElementById('ax-app');
   if (!app) return;
 
-  const chIcons = { ONE:'🔴', LIVE:'🔴', MUSIC:'🎵', VIDEO:'🎬', FUNNY:'😂', 'AFTER DARK':'🌙',
-    GAMING:'🎮', HORROR:'👻', SPORTS:'⚽', CONCERTS:'🎤', COMEDY:'😄', MOVIES:'🎞',
-    PODCASTS:'🎙', 'SCI-FI':'🚀', CLASSICS:'📺' };
-
   app.innerHTML = `
     <section id="ax-hero">
       <div class="ax-hero-bg"></div>
 
-      <!-- Network title -->
+      <!-- Network header -->
       <div class="ax-network-header">
-        <div class="ax-network-title">AURE<span>NIX</span> <span class="ax-network-sub">NETWORK</span></div>
+        <div class="ax-network-title">AURE<span>NIX</span><span class="ax-network-sub">NETWORK</span></div>
         <div class="ax-network-tagline">THE BROADCAST NEVER STOPS.</div>
       </div>
 
@@ -497,48 +495,97 @@ function _buildHero(channels) {
 
           <!-- Channel badge + player -->
           <div class="ax-player-wrap">
-            <div class="ax-channel-badge" id="ax-channel-badge">
+            <div class="ax-channel-badge" id="ax-channel-badge" style="background:var(--blue);">
               <span class="ax-badge-num" id="ax-badge-num">—</span>
               <span class="ax-badge-dot">·</span>
               <span id="ax-badge-name">Loading…</span>
               <span class="ax-live-indicator"><span class="ax-live-dot"></span> LIVE</span>
             </div>
             <div class="ax-player-shell">
-              <!-- Fullscreen container — this is the element that enters fullscreen -->
+              <!-- Fullscreen container -->
               <div id="ax-fs-container">
                 <div class="ax-media-area" id="ax-media-area">
-                  <video id="ax-video" playsinline style="width:100%;height:100%;display:none;"></video>
-                  <audio id="ax-audio" style="display:none;"></audio>
-                  <div class="ax-media-thumbnail" id="ax-thumbnail">
-                    <div style="font-size:72px;opacity:0.12;">◉</div>
+                  <video id="ax-video" playsinline></video>
+                  <audio id="ax-audio"></audio>
+                  <!-- Thumbnail / audio viz / commercial area -->
+                  <div id="ax-thumbnail" class="ax-media-thumbnail">
+                    <!-- Populated dynamically: audio viz or commercial overlay -->
+                    <div id="ax-thumb-placeholder" style="font-size:60px;opacity:0.1;">◉</div>
                   </div>
                   <div class="ax-media-overlay"></div>
-                  <!-- Now Playing overlay on player -->
+
+                  <!-- Now Playing overlay on video -->
                   <div class="ax-np-overlay" id="ax-np-overlay">
-                    <div class="ax-np-label" id="ax-np-label-text">NOW PLAYING</div>
+                    <div class="ax-np-label"><span class="ax-live-dot" style="width:6px;height:6px;"></span> NOW PLAYING</div>
                     <div class="ax-np-title" id="ax-np-title">Connecting to network…</div>
                     <div class="ax-np-artist" id="ax-np-artist"></div>
                   </div>
-                  <!-- LIVE / COMMERCIAL badges -->
-                  <div id="ax-one-viewer-live" style="display:none;position:absolute;top:10px;left:10px;z-index:10;background:rgba(255,45,85,0.92);color:#fff;font-size:10px;font-weight:900;letter-spacing:2px;padding:3px 8px;border-radius:4px;">● LIVE</div>
-                  <div id="ax-one-viewer-comm" style="display:none;position:absolute;top:10px;right:10px;z-index:10;background:rgba(184,134,11,0.92);color:#fff;font-size:10px;font-weight:900;letter-spacing:1.5px;padding:3px 8px;border-radius:4px;">📢 COMMERCIAL BREAK</div>
+
+                  <!-- LIVE badge -->
+                  <div class="ax-player-live-badge" id="ax-one-viewer-live" style="display:none;">
+                    <span class="ax-live-dot" style="width:6px;height:6px;"></span> LIVE
+                  </div>
+                  <!-- Commercial badge -->
+                  <div class="ax-player-comm-badge" id="ax-one-viewer-comm" style="display:none;">
+                    NETWORK BREAK
+                  </div>
+
+                  <!-- Channel tuning transition -->
+                  <div class="ax-tuning-overlay" id="ax-tuning-overlay">
+                    <div class="ax-tuning-logo">
+                      <svg viewBox="0 0 64 64" fill="none" width="40" height="40">
+                        <polygon points="32,6 58,56 6,56" fill="none" stroke="#b8860b" stroke-width="1.5" opacity="0.85"/>
+                        <ellipse cx="32" cy="38" rx="13" ry="9" fill="none" stroke="#1e50ff" stroke-width="1.3"/>
+                        <circle cx="32" cy="38" r="2.5" fill="#1e50ff" opacity="0.9"/>
+                      </svg>
+                    </div>
+                    <div class="ax-tuning-name">AURE<span>NIX</span></div>
+                    <div class="ax-tuning-label" id="ax-tuning-ch-name">TUNING CHANNEL…</div>
+                    <div class="ax-tuning-dots">
+                      <div class="ax-tuning-dot"></div>
+                      <div class="ax-tuning-dot"></div>
+                      <div class="ax-tuning-dot"></div>
+                    </div>
+                  </div>
+
+                  <!-- Reconnecting overlay -->
+                  <div class="ax-reconnect-overlay" id="ax-reconnect-overlay">
+                    <div class="ax-reconnect-icon">↻</div>
+                    <div class="ax-reconnect-label">RECONNECTING TO BROADCAST…</div>
+                  </div>
+
                   <!-- Autoplay gate -->
                   <div class="ax-autoplay-gate" id="ax-gate">
                     <div class="ax-gate-logo">
-                      <svg viewBox="0 0 64 64" fill="none" width="56" height="56">
-                        <polygon points="32,6 58,56 6,56" fill="none" stroke="#b8860b" stroke-width="1.5"/>
+                      <svg viewBox="0 0 64 64" fill="none" width="52" height="52">
+                        <polygon points="32,6 58,56 6,56" fill="none" stroke="#b8860b" stroke-width="1.5" opacity="0.85"/>
                         <ellipse cx="32" cy="38" rx="13" ry="9" fill="none" stroke="#1e50ff" stroke-width="1.3"/>
-                        <circle cx="32" cy="38" r="2.5" fill="#1e50ff"/>
+                        <circle cx="32" cy="38" r="2.5" fill="#1e50ff" opacity="0.9"/>
                       </svg>
                     </div>
-                    <div class="ax-gate-title">AURENIX</div>
-                    <div class="ax-gate-sub">Click to enter the broadcast</div>
+                    <div class="ax-gate-title">AURE<span>NIX</span></div>
+                    <div class="ax-gate-slogan">THE BROADCAST NEVER STOPS.</div>
+                    <div class="ax-gate-sub">Enter to join the live broadcast already in progress</div>
                     <button class="ax-gate-btn" id="ax-gate-btn">▶ ENTER BROADCAST</button>
                   </div>
-                  <!-- Fullscreen overlay controls (visible only in fullscreen) -->
+
+                  <!-- Fullscreen overlay -->
                   <div class="ax-fs-overlay" id="ax-fs-overlay">
                     <div class="ax-fs-overlay-gradient"></div>
+                    <!-- Top: channel + live -->
+                    <div class="ax-fs-top-bar">
+                      <div class="ax-fs-channel-info">
+                        <div class="ax-fs-channel-badge" id="ax-fs-ch-badge">CH —</div>
+                        <div class="ax-fs-channel-name" id="ax-fs-ch-name"></div>
+                      </div>
+                      <div class="ax-fs-live-badge"><span class="ax-live-dot" style="width:6px;height:6px;"></span> LIVE</div>
+                    </div>
+                    <!-- Bottom: now playing + controls -->
                     <div class="ax-fs-ctrl-bar">
+                      <div class="ax-fs-now-playing">
+                        <div class="ax-fs-np-title" id="ax-fs-np-title">—</div>
+                        <div class="ax-fs-np-meta" id="ax-fs-np-meta"></div>
+                      </div>
                       <div class="ax-fs-progress-wrap">
                         <div class="ax-fs-progress-bar" id="ax-fs-progress-bar">
                           <div class="ax-fs-progress-fill" id="ax-fs-progress-fill"></div>
@@ -562,7 +609,7 @@ function _buildHero(channels) {
                       </div>
                     </div>
                   </div>
-                </div>
+                </div><!-- /.ax-media-area -->
 
                 <!-- Progress bar (normal view) -->
                 <div class="ax-progress-wrap">
@@ -581,7 +628,7 @@ function _buildHero(channels) {
                   <button class="ax-ctrl-btn primary" id="ax-play-btn" title="Play / Pause">▶</button>
                   <div class="ax-volume-wrap">
                     <button class="ax-ctrl-btn" id="ax-mute-btn" title="Mute">🔊</button>
-                    <input type="range" class="ax-volume-slider" id="ax-vol-slider" min="0" max="1" step="0.02" value="0.8">
+                    <input type="range" class="ax-volume-slider" id="ax-vol-slider" min="0" max="1" step="0.02" value="0.8" aria-label="Volume">
                   </div>
                   <div class="ax-controls-spacer"></div>
                   <button class="ax-ctrl-btn" id="ax-pip-btn" title="Picture-in-Picture" style="display:none;">⧉</button>
@@ -594,12 +641,12 @@ function _buildHero(channels) {
                 </div>
               </div><!-- /#ax-fs-container -->
             </div>
-          </div>
+          </div><!-- /.ax-player-wrap -->
 
           <!-- Now Playing info panel (below player) -->
           <div class="ax-now-playing-panel" id="ax-now-playing-panel">
             <div class="ax-np-panel-left">
-              <div class="ax-np-panel-label">🔴 NOW PLAYING</div>
+              <div class="ax-np-panel-label"><span class="ax-live-dot" style="width:6px;height:6px;"></span> NOW PLAYING</div>
               <div class="ax-np-panel-title" id="ax-np-panel-title">—</div>
               <div class="ax-np-panel-meta" id="ax-np-panel-meta">—</div>
             </div>
@@ -608,7 +655,7 @@ function _buildHero(channels) {
               <div class="ax-np-panel-remain" id="ax-np-panel-remain"></div>
             </div>
           </div>
-        </div>
+        </div><!-- /.ax-tv-main -->
 
         <!-- Right sidebar -->
         <div class="ax-tv-sidebar">
@@ -619,17 +666,17 @@ function _buildHero(channels) {
               <span class="ax-panel-title">📺 CHANNELS</span>
             </div>
             <div class="ax-channels" id="ax-channel-list">
-              <div style="padding:16px;color:var(--text-dim);font-size:12px;">Loading channels…</div>
+              <div style="padding:14px;color:var(--text-dim);font-size:12px;">Loading channels…</div>
             </div>
           </div>
 
           <!-- Up Next -->
           <div class="ax-panel">
             <div class="ax-panel-header">
-              <span class="ax-panel-title">UP NEXT</span>
+              <span class="ax-panel-title">⏭ UP NEXT</span>
             </div>
-            <div class="ax-schedule-list" id="ax-up-next-list">
-              <div style="padding:16px;color:var(--text-dim);font-size:12px;">Loading…</div>
+            <div id="ax-up-next-list">
+              <div style="padding:14px;color:var(--text-dim);font-size:12px;">Loading…</div>
             </div>
           </div>
 
@@ -640,12 +687,12 @@ function _buildHero(channels) {
             </div>
             <div class="ax-epg-tabs" id="ax-epg-tabs"></div>
             <div class="ax-epg-body" id="ax-epg-body">
-              <div style="padding:16px;color:var(--text-dim);font-size:12px;">Select a channel above.</div>
+              <div class="ax-epg-empty">Select a channel above.</div>
             </div>
           </div>
 
-        </div>
-      </div>
+        </div><!-- /.ax-tv-sidebar -->
+      </div><!-- /.ax-tv-layout -->
 
       <!-- Submit content modal -->
       <div class="ax-modal-overlay" id="ax-submit-modal" style="display:none;">
@@ -655,25 +702,25 @@ function _buildHero(channels) {
             Upload directly from your phone, tablet, or computer — music, video, funny clips, podcasts, music videos, and more.<br>
             <strong style="color:var(--text);">Submitting does not publish your content.</strong> The Founder reviews all submissions before anything goes on air.
           </div>
-          <div id="ax-sub-drop-zone" style="border:2px dashed rgba(30,80,255,0.45);border-radius:10px;padding:22px 16px;text-align:center;cursor:pointer;background:rgba(30,80,255,0.04);margin-bottom:14px;transition:border-color 0.15s,background 0.15s;">
-            <div style="font-size:28px;margin-bottom:6px;">📁</div>
-            <div style="font-size:14px;font-weight:700;color:var(--text);letter-spacing:0.5px;">SELECT FILE</div>
+          <div id="ax-sub-drop-zone" style="border:2px dashed rgba(30,80,255,0.45);border-radius:10px;padding:20px 16px;text-align:center;cursor:pointer;background:rgba(30,80,255,0.04);margin-bottom:14px;transition:border-color 0.15s,background 0.15s;">
+            <div style="font-size:26px;margin-bottom:6px;">📁</div>
+            <div style="font-size:13px;font-weight:700;color:var(--text);letter-spacing:0.5px;">SELECT FILE</div>
             <div style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.6;">
-              Tap to choose from your device — phone, tablet, or computer<br>
+              Tap to choose from your device<br>
               <span style="opacity:0.7;">Video: MP4 WebM MOV · Audio: MP3 WAV AAC · Image: JPG PNG WebP</span>
             </div>
-            <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:12px;">
-              <button type="button" id="ax-sub-btn-any" style="padding:8px 16px;background:var(--blue,#1e50ff);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;letter-spacing:0.5px;">📁 SELECT FILE</button>
-              <button type="button" id="ax-sub-btn-photo" style="padding:8px 16px;background:rgba(30,80,255,0.15);color:var(--blue-bright,#4d7aff);border:1px solid rgba(30,80,255,0.3);border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">📷 PHOTO</button>
-              <button type="button" id="ax-sub-btn-video" style="padding:8px 16px;background:rgba(30,80,255,0.15);color:var(--blue-bright,#4d7aff);border:1px solid rgba(30,80,255,0.3);border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">🎥 VIDEO</button>
-              <button type="button" id="ax-sub-btn-audio" style="padding:8px 16px;background:rgba(30,80,255,0.15);color:var(--blue-bright,#4d7aff);border:1px solid rgba(30,80,255,0.3);border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">🎵 AUDIO</button>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:10px;">
+              <button type="button" id="ax-sub-btn-any" style="padding:7px 14px;background:var(--blue);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;font-family:inherit;">📁 SELECT FILE</button>
+              <button type="button" id="ax-sub-btn-photo" style="padding:7px 14px;background:rgba(30,80,255,0.15);color:var(--blue-bright);border:1px solid rgba(30,80,255,0.3);border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit;">📷 PHOTO</button>
+              <button type="button" id="ax-sub-btn-video" style="padding:7px 14px;background:rgba(30,80,255,0.15);color:var(--blue-bright);border:1px solid rgba(30,80,255,0.3);border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit;">🎥 VIDEO</button>
+              <button type="button" id="ax-sub-btn-audio" style="padding:7px 14px;background:rgba(30,80,255,0.15);color:var(--blue-bright);border:1px solid rgba(30,80,255,0.3);border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit;">🎵 AUDIO</button>
             </div>
             <input type="file" id="ax-sub-file-any"   accept="audio/*,video/*,image/*" style="display:none;">
             <input type="file" id="ax-sub-file-photo" accept="image/*" capture="environment" style="display:none;">
             <input type="file" id="ax-sub-file-video" accept="video/*" capture="environment" style="display:none;">
             <input type="file" id="ax-sub-file-audio" accept="audio/*" style="display:none;">
           </div>
-          <div id="ax-sub-file-info" style="display:none;background:var(--surface,#10101c);border:1px solid var(--border,rgba(255,255,255,0.08));border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+          <div id="ax-sub-file-info" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px;">
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
               <span id="ax-sub-file-icon" style="font-size:20px;flex-shrink:0;">📄</span>
               <div style="flex:1;min-width:0;">
@@ -686,10 +733,10 @@ function _buildHero(channels) {
           <div id="ax-sub-progress" style="display:none;margin-bottom:14px;">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
               <span id="ax-sub-progress-status" style="font-size:12px;color:var(--text-dim);">Uploading…</span>
-              <span id="ax-sub-progress-pct" style="font-size:12px;font-weight:700;color:var(--blue-bright,#4d7aff);">0%</span>
+              <span id="ax-sub-progress-pct" style="font-size:12px;font-weight:700;color:var(--blue-bright);">0%</span>
             </div>
-            <div style="height:6px;background:rgba(255,255,255,0.07);border-radius:3px;overflow:hidden;">
-              <div id="ax-sub-progress-bar" style="height:100%;width:0%;background:var(--blue,#1e50ff);border-radius:3px;transition:width 0.1s;"></div>
+            <div style="height:5px;background:var(--surface-hi);border-radius:3px;overflow:hidden;">
+              <div id="ax-sub-progress-bar" style="height:100%;width:0%;background:var(--blue);border-radius:3px;transition:width 0.1s;"></div>
             </div>
             <div id="ax-sub-progress-bytes" style="font-size:10px;color:var(--text-dim);margin-top:4px;text-align:right;"></div>
           </div>
@@ -716,14 +763,13 @@ function _buildHero(channels) {
             </div>
             <div class="ax-field-group" style="margin-bottom:10px;">
               <label class="ax-field-label">Description</label>
-              <textarea class="ax-field-input" id="ax-sub-desc" rows="2" placeholder="Tell us about your content…" style="resize:vertical;"></textarea>
+              <textarea class="ax-field-input" id="ax-sub-desc" rows="2" placeholder="Tell us about your content…"></textarea>
             </div>
           </div>
           <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:14px;cursor:pointer;">
             <input type="checkbox" id="ax-sub-rights" style="margin-top:3px;accent-color:var(--blue);">
             <span style="font-size:11px;color:var(--text-dim);line-height:1.5;">
               I confirm that I have the legal right to submit this content, or have explicit permission from the rights holder.
-              I understand this submission will be reviewed by the Founder before any broadcast decision is made.
               AURENIX does not claim ownership of submitted content.
             </span>
           </label>
@@ -756,16 +802,22 @@ function _buildChannelList() {
     GAMING:'🎮', HORROR:'👻', SPORTS:'⚽', CONCERTS:'🎤', COMEDY:'😄', MOVIES:'🎞',
     PODCASTS:'🎙', 'SCI-FI':'🚀', CLASSICS:'📺' };
   list.innerHTML = _channels.map((ch, idx) => {
-    const icon = icons[ch.label?.toUpperCase()] || icons[ch.name?.split(' ').pop()?.toUpperCase()] || '📺';
+    const displayName = ch.label || ch.name || ch.id;
+    const icon = icons[displayName.toUpperCase()] || icons[displayName.split(' ').pop()?.toUpperCase()] || '📺';
     const num  = String(idx + 1).padStart(2, '0');
     const isActive = _activeChannel?.id === ch.id;
+    const st   = _channelStates[ch.id];
+    const currentTitle = st?.current_item?.title || '';
     return `
     <button class="ax-channel-btn ${isActive ? 'active' : ''}" data-chid="${ch.id}"
-            style="${isActive && ch.color ? `border-left-color:${ch.color};` : ''}">
+            style="${isActive ? `border-left-color:${ch.color || 'var(--blue)'};` : ''}">
       <span class="ax-ch-num">${num}</span>
       <span class="ax-ch-icon">${icon}</span>
-      <span class="ax-ch-name">${_esc(ch.label || ch.name)}</span>
-      <span class="ax-ch-status ${_channelStates[ch.id]?.current_item ? 'live' : 'idle'}" id="ax-ch-dot-${ch.id}"></span>
+      <div style="flex:1;min-width:0;">
+        <div class="ax-ch-name">${_esc(displayName)}</div>
+        ${currentTitle ? `<div style="font-size:10px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.3;max-width:160px;">${_esc(currentTitle)}</div>` : ''}
+      </div>
+      <span class="ax-ch-status ${st?.current_item ? 'live' : 'idle'}" id="ax-ch-dot-${ch.id}"></span>
     </button>`;
   }).join('');
   list.querySelectorAll('.ax-channel-btn').forEach(btn => {
@@ -826,34 +878,34 @@ function _renderEPG(channelId) {
     show:'📺', broadcast_clip:'🎬', archive:'📼', trailer:'🎞', other:'📦' };
   const icon = t => typeIcons[t] || '▶';
 
+  const pct = dur > 0 ? Math.min(100, (elapsed / dur) * 100).toFixed(1) : 0;
   body.innerHTML = `
-    <div class="ax-epg-now">
-      <div class="ax-epg-row current">
-        <div class="ax-epg-badge">${isComm ? '📢 BREAK' : '🔴 NOW'}</div>
-        <div class="ax-epg-info">
-          <div class="ax-epg-title">${icon(cur.type)} ${_esc(cur.title)}</div>
-          <div class="ax-epg-meta">${_esc(cur.artist || cur.type || '')}${dur > 0 ? ' · ' + _fmtTime(elapsed) + ' / ' + _fmtTime(dur) : ''}</div>
-        </div>
-        ${remain !== null ? `<div class="ax-epg-remain">-${_fmtTime(remain)}</div>` : ''}
+    <div class="ax-epg-row current">
+      <div class="ax-epg-badge">${isComm ? 'BREAK' : 'NOW'}</div>
+      <div class="ax-epg-info">
+        <div class="ax-epg-title">${icon(cur.type)} ${_esc(cur.title)}</div>
+        <div class="ax-epg-meta">${_esc(cur.artist || cur.type || '')}${dur > 0 ? ' · ' + _fmtTime(elapsed) + ' / ' + _fmtTime(dur) : ''}</div>
+        ${dur > 0 ? `<div class="ax-epg-progress"><div class="ax-epg-progress-fill" style="width:${pct}%"></div></div>` : ''}
       </div>
+      ${remain !== null ? `<div class="ax-epg-remain">-${_fmtTime(remain)}</div>` : ''}
     </div>
     ${commQ.length > 0 ? commQ.map((c, i) => `
       <div class="ax-epg-row">
-        <div class="ax-epg-badge" style="opacity:0.6;">📢 NEXT</div>
+        <div class="ax-epg-badge">NEXT</div>
         <div class="ax-epg-info">
-          <div class="ax-epg-title">${_esc(c.title)}</div>
-          <div class="ax-epg-meta">Commercial${c.duration_sec ? ' · ' + _fmtTime(c.duration_sec) : ''}</div>
+          <div class="ax-epg-title">📢 ${_esc(c.title)}</div>
+          <div class="ax-epg-meta">Network Break${c.duration_sec ? ' · ' + _fmtTime(c.duration_sec) : ''}</div>
         </div>
       </div>`).join('') : ''}
     ${upcoming.map((item, i) => `
       <div class="ax-epg-row">
-        <div class="ax-epg-badge" style="opacity:${0.7 - i * 0.1};">${i === 0 ? 'NEXT' : 'LATER'}</div>
+        <div class="ax-epg-badge">${i === 0 ? 'NEXT' : 'LATER'}</div>
         <div class="ax-epg-info">
           <div class="ax-epg-title">${icon(item.type)} ${_esc(item.title)}</div>
           <div class="ax-epg-meta">${_esc(item.artist || item.type || '')}${item.duration_sec ? ' · ' + _fmtTime(item.duration_sec) : ''}</div>
         </div>
       </div>`).join('')}
-    ${!upcoming.length && !commQ.length ? '<div class="ax-epg-empty" style="padding:10px;">No upcoming programs scheduled.</div>' : ''}
+    ${!upcoming.length && !commQ.length ? '<div class="ax-epg-empty">No upcoming programs scheduled.</div>' : ''}
   `;
 }
 
@@ -941,6 +993,23 @@ function _bindPlayerControls() {
     else if (v && v.style.display !== 'none') { v.requestPictureInPicture().catch(() => {}); }
   });
 
+  // Double-tap on media area for PiP (mobile gesture)
+  let _doubleTapTimer = null;
+  document.getElementById('ax-media-area')?.addEventListener('touchend', (e) => {
+    if (!_gateOpen || !document.pictureInPictureEnabled) return;
+    if (_doubleTapTimer) {
+      clearTimeout(_doubleTapTimer);
+      _doubleTapTimer = null;
+      // Double tap detected
+      e.preventDefault();
+      const v = document.getElementById('ax-video');
+      if (document.pictureInPictureElement) { document.exitPictureInPicture(); }
+      else if (v && v.style.display !== 'none') { v.requestPictureInPicture().catch(() => {}); }
+    } else {
+      _doubleTapTimer = setTimeout(() => { _doubleTapTimer = null; }, 300);
+    }
+  }, { passive: false });
+
   // Fullscreen overlay controls
   document.getElementById('ax-fs-play-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1016,6 +1085,8 @@ function _enterBroadcast() {
   _gateOpen = true;
   const gate = document.getElementById('ax-gate');
   if (gate) gate.style.display = 'none';
+  // Notify mobile layer — gate is now open
+  if (window._axMobile?.onGateOpen) window._axMobile.onGateOpen();
   const st = _activeChannel ? _channelStates[_activeChannel.id] : null;
   if (st?.current_item) _playState(st);
 }
@@ -1071,10 +1142,18 @@ function _subscribeChannelState(channelId) {
   });
 }
 
+let _tuningTimer = null;
+
 function _setActiveChannel(channelId) {
   const ch = _channels.find(c => c.id === channelId);
   if (!ch) return;
+
+  // Don't re-tune the same channel
+  if (_activeChannel?.id === channelId) return;
+
   _activeChannel = ch;
+  // Notify mobile layer
+  if (window._axMobile?.onChannelChange) window._axMobile.onChannelChange(channelId, ch.label || ch.name);
   if (_isFounder) {
     console.log(
       `[AURENIX GLOBAL ENGINE] FOUNDER CHANNEL SELECTED\n` +
@@ -1089,8 +1168,14 @@ function _setActiveChannel(channelId) {
   const badge     = document.getElementById('ax-channel-badge');
   const chIdx     = _channels.indexOf(ch);
   if (badgeNum)  badgeNum.textContent  = String(chIdx + 1).padStart(2, '0');
-  if (badgeName) badgeName.textContent = ch.name;
-  if (badge && ch.color) badge.style.background = ch.color;
+  if (badgeName) badgeName.textContent = ch.label || ch.name;
+  if (badge) badge.style.background = ch.color || 'var(--blue)';
+
+  // Update fullscreen channel info
+  const fsBadge = document.getElementById('ax-fs-ch-badge');
+  const fsName  = document.getElementById('ax-fs-ch-name');
+  if (fsBadge) fsBadge.textContent = `CH ${String(chIdx + 1).padStart(2, '0')}`;
+  if (fsName)  fsName.textContent  = ch.label || ch.name;
 
   // Update channel list active state
   document.querySelectorAll('.ax-channel-btn').forEach(btn => {
@@ -1106,10 +1191,32 @@ function _setActiveChannel(channelId) {
   });
   _renderEPG(channelId);
 
+  // Show cinematic tuning transition (skip if gate not open — avoid overlapping gate)
   _stopMedia();
-  const st = _channelStates[channelId];
-  if (st) _onActiveChannelUpdate(st);
-  else    { _setNowPlaying(ch.name, '', ''); _renderUpNext([]); }
+  if (_gateOpen) {
+    _showTuning(ch.label || ch.name, () => {
+      const st = _channelStates[channelId];
+      if (st) _onActiveChannelUpdate(st);
+      else    { _setNowPlaying(ch.label || ch.name, '', ''); _renderUpNext([]); }
+    });
+  } else {
+    const st = _channelStates[channelId];
+    if (st) _onActiveChannelUpdate(st);
+    else    { _setNowPlaying(ch.label || ch.name, '', ''); _renderUpNext([]); }
+  }
+}
+
+function _showTuning(chName, onComplete) {
+  const overlay = document.getElementById('ax-tuning-overlay');
+  const label   = document.getElementById('ax-tuning-ch-name');
+  if (!overlay) { if (onComplete) onComplete(); return; }
+  if (label) label.textContent = chName ? `TUNING — ${chName.toUpperCase()}` : 'TUNING CHANNEL…';
+  overlay.classList.add('visible');
+  clearTimeout(_tuningTimer);
+  _tuningTimer = setTimeout(() => {
+    overlay.classList.remove('visible');
+    if (onComplete) onComplete();
+  }, 900);
 }
 
 function _onActiveChannelUpdate(st) {
@@ -1144,33 +1251,27 @@ function _onActiveChannelUpdate(st) {
   _setNowPlaying(item.title, item.artist || '', item.type || '');
   _updateLiveTVOverlay(item, isComm);
 
-  // Up Next — only show items that have a usable URL (deleted items in stale
-  // queue snapshots will still be in the array but have empty/missing URLs).
+  // Up Next — only show items that have a usable URL.
+  // Always include the current item as position 0 (NOW PLAYING), followed by upcoming.
   if (_activeChannel?.id === LIVE_TV_CHANNEL_ID) {
     const commQ = st.commercial_queue || [];
     if (isComm && commQ.length > 0) {
-      _renderUpNext(commQ.filter(q => q?.id && q?.url).slice(0, 1));
-    } else { _renderUpNext([]); }
+      _renderUpNext([item, ...commQ.filter(q => q?.id && q?.url).slice(0, 3)]);
+    } else {
+      _renderUpNext([item]);
+    }
   } else {
     const queue  = (st.queue || []).filter(q => q?.id && q?.url);
     const curIdx = queue.findIndex(q => q.id === item.id);
-    // Build Up Next with wrap-around so the loop is visible.
-    // When the last item is playing, Up Next shows items from the front of the
-    // queue (the looped continuation) instead of an empty list.
-    // curIdx === -1 means the currently-playing item is not in the queue
-    // (e.g. bootstrapped randomly before a queue was built) — show from front.
-    const upNext = [];
-    const startOffset = curIdx === -1 ? 0 : curIdx;    // where to start counting from
-    const maxShow     = curIdx === -1
-      ? Math.min(5, queue.length)        // current not in queue → all items are "up next"
-      : Math.min(5, queue.length - 1);   // current IS in queue → exclude it
-    if (maxShow > 0 && queue.length > 0) {
+    const upNext = [item]; // current item is always first
+    const startIdx = curIdx === -1 ? 0 : curIdx;
+    const maxNext  = 4;
+    if (queue.length > 0) {
       for (let i = 1; i <= queue.length; i++) {
-        const idx = (startOffset + i) % queue.length;
-        // Stop once we've looped back to the current item (or shown enough).
+        const idx = (startIdx + i) % queue.length;
         if (curIdx !== -1 && idx === curIdx) break;
         upNext.push(queue[idx]);
-        if (upNext.length >= maxShow) break;
+        if (upNext.length >= maxNext + 1) break;
       }
     }
     _renderUpNext(upNext);
@@ -1314,13 +1415,20 @@ function _playState(st) {
   const isVideo = !isImage && (
     item.type === 'video' || item.type === 'music_video' || item.type === 'show' ||
     item.type === 'trailer' || item.type === 'archive' || item.type === 'broadcast_clip' ||
-    /\.(mp4|webm|mov|avi|wmv|mpeg)(\?|$)/i.test(item.url) ||
+    item.type === 'funny_clip' || item.type === 'short_film' ||
+    /\.(mp4|webm|mov|avi|wmv|mpeg|m4v)(\?|$)/i.test(item.url) ||
     (item.mime_type || '').startsWith('video/')
   );
+  const isAudio = !isImage && !isVideo;
+  const isComm  = !!(st.is_commercial);
 
   const videoEl = document.getElementById('ax-video');
   const audioEl = document.getElementById('ax-audio');
   const thumbEl = document.getElementById('ax-thumbnail');
+
+  // Update commercial badge
+  const commBadge = document.getElementById('ax-one-viewer-comm');
+  if (commBadge) commBadge.style.display = isComm ? '' : 'none';
 
   if (isImage) {
     _transitioning = true;
@@ -1330,13 +1438,12 @@ function _playState(st) {
     _mediaEl   = null;
     _mediaType = 'image';
     if (thumbEl) {
+      thumbEl.innerHTML = '';
       thumbEl.style.display           = 'flex';
       thumbEl.style.backgroundImage   = `url(${JSON.stringify(item.url)})`;
       thumbEl.style.backgroundSize    = 'contain';
       thumbEl.style.backgroundRepeat  = 'no-repeat';
       thumbEl.style.backgroundPosition = 'center';
-      const ph = thumbEl.querySelector('div');
-      if (ph) ph.style.display = 'none';
     }
     if (videoEl) videoEl.style.display = 'none';
     if (audioEl) audioEl.style.display = 'none';
@@ -1362,8 +1469,17 @@ function _playState(st) {
   if (_mediaEl) {
     _mediaEl.src = item.url;
     _mediaEl.style.display = isVideo ? 'block' : 'none';
-    if (isVideo) { if (thumbEl) thumbEl.style.display = 'none'; }
-    else          { if (thumbEl) thumbEl.style.display = 'flex'; }
+    if (isVideo) {
+      // Video: hide thumbnail
+      if (thumbEl) { thumbEl.innerHTML = ''; thumbEl.style.display = 'none'; thumbEl.style.backgroundImage = ''; }
+    } else {
+      // Audio-only: show visualization
+      if (thumbEl) {
+        thumbEl.style.display = 'flex';
+        thumbEl.style.backgroundImage = '';
+        thumbEl.innerHTML = isComm ? _buildCommercialOverlayHTML(item) : _buildAudioVizHTML(item);
+      }
+    }
     _mediaEl.volume = parseFloat(document.getElementById('ax-vol-slider')?.value || '0.8');
 
     // Call load() explicitly so the element resets from any previous ended/error/stale
@@ -1456,16 +1572,34 @@ function _playState(st) {
     if (pipBtn) pipBtn.style.display = isVideo && document.pictureInPictureEnabled ? '' : 'none';
 
     _mediaEl.play().catch(() => {
-      // Autoplay blocked by browser policy — show the tap-to-play gate.
-      // Do NOT set _gateOpen = false here; _gateOpen tracks whether the viewer
-      // has interacted with the gate overlay, not whether autoplay succeeded.
-      // Keeping _gateOpen = true means tapping the gate later calls _enterBroadcast()
-      // which re-drives _playState with the current authoritative state.
-      const gate = document.getElementById('ax-gate');
-      if (gate) {
-        gate.style.display = 'flex';
-        const sub = gate.querySelector('.ax-gate-sub');
-        if (sub) sub.textContent = 'Tap to start the broadcast';
+      // Autoplay blocked by browser policy.
+      // On mobile: try muted autoplay first (most platforms allow this).
+      // If we're post-gate (user already interacted), show the "TAP FOR SOUND" prompt.
+      if (_gateOpen) {
+        // Already past the gate — try muted play as a fallback
+        _mediaEl.muted = true;
+        _mediaEl.play().then(() => {
+          // Muted play succeeded — show the mobile sound prompt
+          if (window._axMobile?.showMutePrompt) window._axMobile.showMutePrompt();
+          // Also update mute button state
+          _updateMuteBtn(); _updateFsMuteBtn();
+        }).catch(() => {
+          // Muted play also blocked — show gate
+          const gate = document.getElementById('ax-gate');
+          if (gate) {
+            gate.style.display = 'flex';
+            const sub = gate.querySelector('.ax-gate-sub');
+            if (sub) sub.textContent = 'Tap to start the broadcast';
+          }
+        });
+      } else {
+        // Not yet past gate — show gate overlay
+        const gate = document.getElementById('ax-gate');
+        if (gate) {
+          gate.style.display = 'flex';
+          const sub = gate.querySelector('.ax-gate-sub');
+          if (sub) sub.textContent = 'Tap to start the broadcast';
+        }
       }
       // Keep _gateOpen as-is (do not set false) — _enterBroadcast will replay state.
     });
@@ -1686,13 +1820,12 @@ function _stopMedia() {
   _currentMediaId = null;
   const thumbEl = document.getElementById('ax-thumbnail');
   if (thumbEl) {
+    thumbEl.innerHTML = '<div id="ax-thumb-placeholder" style="font-size:60px;opacity:0.1;">◉</div>';
     thumbEl.style.display             = 'flex';
     thumbEl.style.backgroundImage     = '';
     thumbEl.style.backgroundSize      = '';
     thumbEl.style.backgroundRepeat    = '';
     thumbEl.style.backgroundPosition  = '';
-    const ph = thumbEl.querySelector('div');
-    if (ph) ph.style.display = '';
   }
 }
 
@@ -1702,6 +1835,11 @@ function _stopMedia() {
    Checks whether the player is in a dead state for the currently-broadcasting
    item and reloads it in-place WITHOUT touching channel state.
 ════════════════════════════════════ */
+function _showReconnectOverlay(show) {
+  const el = document.getElementById('ax-reconnect-overlay');
+  if (el) el.classList.toggle('visible', !!show);
+}
+
 function _viewerReconnect(reason) {
   // Not authenticated or network not ready yet — nothing to do.
   if (!_user || !_networkReady || !_gateOpen) return;
@@ -1762,6 +1900,8 @@ function _updatePlayBtn() {
   if (btn) btn.textContent = playing ? '⏸' : '▶';
   const fsBtn = document.getElementById('ax-fs-play-btn');
   if (fsBtn) fsBtn.textContent = playing ? '⏸' : '▶';
+  // Update audio viz animation
+  _updateAudioVizPlayState(!!playing);
 }
 
 function _updateMuteBtn() {
@@ -1950,35 +2090,94 @@ function _advance(_st) {
    UI HELPERS
 ════════════════════════════════════ */
 function _setNowPlaying(title, artist, type) {
-  const t = document.getElementById('ax-np-title');
-  const a = document.getElementById('ax-np-artist');
+  const t  = document.getElementById('ax-np-title');
+  const a  = document.getElementById('ax-np-artist');
   const pt = document.getElementById('ax-np-panel-title');
   const pm = document.getElementById('ax-np-panel-meta');
+  const ft = document.getElementById('ax-fs-np-title');
+  const fm = document.getElementById('ax-fs-np-meta');
   if (t)  t.textContent  = title;
   if (a)  a.textContent  = artist;
   if (pt) pt.textContent = title;
   if (pm) pm.textContent = [artist, type].filter(Boolean).join(' · ');
+  if (ft) ft.textContent = title;
+  if (fm) fm.textContent = [artist, type].filter(Boolean).join(' · ');
+}
+
+function _buildAudioVizHTML(item) {
+  const bars = Array.from({length: 12}, (_, i) => `<div class="ax-audio-viz-bar" style="height:${6 + Math.random() * 22}px;"></div>`).join('');
+  const title  = _esc(item.title || '—');
+  const artist = _esc(item.artist || '');
+  return `<div class="ax-audio-viz" id="ax-audio-viz">
+    <div class="ax-audio-viz-logo">
+      <svg viewBox="0 0 64 64" fill="none" width="44" height="44">
+        <polygon points="32,6 58,56 6,56" fill="none" stroke="#b8860b" stroke-width="1.4" opacity="0.7"/>
+        <ellipse cx="32" cy="38" rx="12" ry="8" fill="none" stroke="#1e50ff" stroke-width="1.2" opacity="0.8"/>
+        <circle cx="32" cy="38" r="2.5" fill="#1e50ff" opacity="0.9"/>
+      </svg>
+    </div>
+    <div class="ax-audio-viz-title">${title}</div>
+    ${artist ? `<div class="ax-audio-viz-artist">${artist}</div>` : ''}
+    <div class="ax-audio-viz-waveform">${bars}</div>
+  </div>`;
+}
+
+function _buildCommercialOverlayHTML(item) {
+  const title = _esc(item.title || 'COMMERCIAL BREAK');
+  return `<div class="ax-commercial-overlay">
+    <div class="ax-commercial-icon">📡</div>
+    <div class="ax-commercial-badge">AURENIX NETWORK BREAK</div>
+    <div class="ax-commercial-title">${title}</div>
+    <div class="ax-commercial-sub">Programming continues shortly</div>
+  </div>`;
+}
+
+function _updateAudioVizPlayState(playing) {
+  const viz = document.getElementById('ax-audio-viz');
+  if (viz) viz.classList.toggle('ax-audio-viz-paused', !playing);
 }
 
 function _renderUpNext(items) {
   const list = document.getElementById('ax-up-next-list');
   if (!list) return;
   if (!items.length) {
-    list.innerHTML = '<div style="padding:16px;color:var(--text-muted);font-size:12px;text-align:center;">Empty queue</div>';
+    list.innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:11px;text-align:center;letter-spacing:1px;">No upcoming programs</div>';
     return;
   }
-  const typeIcons = { music:'🎵', audio:'🎵', video:'🎬', funny_clip:'😂', podcast:'🎙',
-    music_video:'🎞', commercial:'📢', station_id:'📻', show:'📺', other:'▶' };
-  list.innerHTML = items.map((item, i) => `
-    <div class="ax-sched-row ${i === 0 ? 'current' : ''}">
-      <div class="ax-sched-idx">${typeIcons[item.type] || (i === 0 ? '▶' : i + 1)}</div>
+  const typeIcons = { music:'🎵', audio:'🎵', video:'🎬', funny_clip:'😂', short_film:'🎥',
+    podcast:'🎙', music_video:'🎞', commercial:'📢', promo:'📢', station_id:'📻', show:'📺',
+    broadcast_clip:'🎬', archive:'📼', trailer:'▶', other:'▶' };
+
+  // Separate NOW from NEXT
+  const nowItem  = items[0];
+  const nextItems = items.slice(1);
+
+  let html = '';
+
+  html += `<div class="ax-up-next-section now">● NOW PLAYING</div>
+  <div class="ax-sched-row now-item">
+    <div class="ax-sched-idx">${typeIcons[nowItem.type] || '▶'}</div>
+    <div class="ax-sched-info">
+      <div class="ax-sched-title">${_esc(nowItem.title)}</div>
+      <div class="ax-sched-meta">${_esc(nowItem.artist || '')}${nowItem.type ? (nowItem.artist ? ' · ' : '') + nowItem.type : ''}</div>
+    </div>
+    <div class="ax-sched-dur">${nowItem.duration_sec ? _fmtTime(nowItem.duration_sec) : '—'}</div>
+  </div>`;
+
+  if (nextItems.length) {
+    html += `<div class="ax-up-next-section">NEXT UP</div>`;
+    html += nextItems.map((item, i) => `
+    <div class="ax-sched-row">
+      <div class="ax-sched-idx">${typeIcons[item.type] || (i + 2)}</div>
       <div class="ax-sched-info">
         <div class="ax-sched-title">${_esc(item.title)}</div>
-        <div class="ax-sched-meta">${_esc(item.artist || '')}${item.type ? ' · ' + item.type : ''}</div>
+        <div class="ax-sched-meta">${_esc(item.artist || '')}${item.type ? (item.artist ? ' · ' : '') + item.type : ''}</div>
       </div>
-      <div class="ax-sched-dur">${_fmtTime(item.duration_sec || 0)}</div>
-    </div>
-  `).join('');
+      <div class="ax-sched-dur">${item.duration_sec ? _fmtTime(item.duration_sec) : '—'}</div>
+    </div>`).join('');
+  }
+
+  list.innerHTML = html;
 }
 
 /* ════════════════════════════════════
