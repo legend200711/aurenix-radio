@@ -3,8 +3,8 @@
   "short_name": "AURENIX",
   "description": "AURENIX — The Broadcast Never Stops. 24/7 internet television network.",
   "id": "aurenix-live-tv",
-  "start_url": "/?pwa=aurenix",
-  "scope": "/",
+  "start_url": "/aurenix-radio/?pwa=aurenix",
+  "scope": "/aurenix-radio/",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#050507",
@@ -16,31 +16,31 @@
       "name": "Watch LIVE",
       "short_name": "Watch",
       "description": "Open AURENIX and go directly to the live broadcast",
-      "url": "/?pwa=aurenix&action=watch",
-      "icons": [{ "src": "aurenix-icon-192.png", "sizes": "192x192" }]
+      "url": "/aurenix-radio/?pwa=aurenix&action=watch",
+      "icons": [{ "src": "/aurenix-radio/aurenix-icon-192.png", "sizes": "192x192" }]
     }
   ],
   "icons": [
     {
-      "src": "aurenix-icon-192.png",
+      "src": "/aurenix-radio/aurenix-icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "aurenix-icon-192-maskable.png",
+      "src": "/aurenix-radio/aurenix-icon-192-maskable.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "maskable"
     },
     {
-      "src": "aurenix-icon-512.png",
+      "src": "/aurenix-radio/aurenix-icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "aurenix-icon-512-maskable.png",
+      "src": "/aurenix-radio/aurenix-icon-512-maskable.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"

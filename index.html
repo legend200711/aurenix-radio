@@ -75,7 +75,7 @@
 <!-- PWA service worker -->
 <script>
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/aurenix-sw.js').then(reg => {
+    navigator.serviceWorker.register('/aurenix-radio/aurenix-sw.js').then(reg => {
       reg.addEventListener('updatefound', () => {
         const newSW = reg.installing;
         if (newSW) {

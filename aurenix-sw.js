@@ -1,42 +1,38 @@
 /**
- * AURENIX — Service Worker (v5 — Unique PWA Identity)
+ * AURENIX — Service Worker (v6 — GitHub Pages /aurenix-radio/ base path)
  *
- * Cache scope: ALL AURENIX cache names start with "aurenix-".
- * Activation only deletes caches that match this prefix, so any
- * other PWA running on the same origin (e.g. Shadow Nexus Social)
- * keeps its own caches untouched.
+ * All paths are prefixed with /aurenix-radio/ to match the GitHub Pages
+ * deployment at https://legend200711.github.io/aurenix-radio/
  *
- * JS engine files are always network-fetched so viewers always run
- * the latest broadcast/player logic without a hard refresh.
+ * Cache scope: ALL AURENIX cache names start with "aurenix-" so the
+ * activate handler only deletes our own old caches, never other apps'.
  */
 
-// ── AURENIX-specific cache name ──────────────────────────────────
-// MUST start with "aurenix-" so the activation cleanup only touches
-// AURENIX caches and never deletes caches belonging to other apps.
-const CACHE = 'aurenix-v11';
+const BASE  = '/aurenix-radio';
+const CACHE = 'aurenix-v12';
 
-// Only truly static, rarely-changing shell assets go here.
+// Static shell assets — cache first.
 const SHELL = [
-  '/aurenix-network.css',
-  '/aurenix-mobile.css',
-  '/aurenix-favicon.svg',
-  '/aurenix-manifest.json',
-  '/aurenix-icon-192.png',
-  '/aurenix-icon-512.png',
+  BASE + '/aurenix-network.css',
+  BASE + '/aurenix-mobile.css',
+  BASE + '/aurenix-favicon.svg',
+  BASE + '/aurenix-manifest.json',
+  BASE + '/aurenix-icon-192.png',
+  BASE + '/aurenix-icon-512.png',
 ];
 
-// JS engine files that must NEVER be served from cache.
-// This guarantees viewers always run the latest player code.
+// JS engine files — always network, never stale cache.
 const JS_ENGINES = [
-  '/aurenix-broadcast.js',
-  '/aurenix-mobile.js',
-  '/aurenix-live-tv-engine.js',
-  '/aurenix-channel-engine.js',
-  '/aurenix-control.js',
-  '/firebase-client.js',
-  '/supabase-client.js',
-  '/index.html',
-  '/',
+  BASE + '/aurenix-broadcast.js',
+  BASE + '/aurenix-mobile.js',
+  BASE + '/aurenix-live-tv-engine.js',
+  BASE + '/aurenix-channel-engine.js',
+  BASE + '/aurenix-control.js',
+  BASE + '/firebase-client.js',
+  BASE + '/supabase-client.js',
+  BASE + '/index.html',
+  BASE + '/',
+  BASE,          // trailing-slash-less variant
 ];
 
 self.addEventListener('install', e => {
@@ -52,11 +48,6 @@ self.addEventListener('activate', e => {
     caches.keys()
       .then(keys => Promise.all(
         keys
-          // ── CRITICAL: only delete OUR OWN old caches ──────────────
-          // Filter to names that start with "aurenix-" (AURENIX's prefix)
-          // but are not the current version. This ensures we never delete
-          // caches belonging to Shadow Nexus Social or any other PWA on
-          // the same origin.
           .filter(k => k.startsWith('aurenix-') && k !== CACHE)
           .map(k => caches.delete(k))
       ))
@@ -69,7 +60,7 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (!url.protocol.startsWith('http')) return;
 
-  // Always network: Firebase, Supabase, Google APIs, gstatic (Firebase SDK CDN)
+  // Always network: Firebase, Supabase, Google APIs, CDNs
   if (
     url.hostname.endsWith('firebaseio.com') ||
     url.hostname.endsWith('firestore.googleapis.com') ||
@@ -83,25 +74,27 @@ self.addEventListener('fetch', e => {
     url.hostname.endsWith('jsdelivr.net')
   ) { return; }
 
-  // JS engine files — always network, never cache.
+  // JS engine files — always network, never cached.
   if (JS_ENGINES.includes(url.pathname)) {
     e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
     return;
   }
 
-  // Static shell assets — cache first, network fallback.
+  // Shell assets — cache first, network fallback.
   if (SHELL.includes(url.pathname)) {
     e.respondWith(caches.match(e.request).then(c => c || fetch(e.request)));
     return;
   }
 
-  // Navigation fallback — offline shell
+  // Navigation fallback — serve the app shell when offline.
   if (e.request.mode === 'navigate') {
-    e.respondWith(fetch(e.request).catch(() => caches.match('/index.html')));
+    e.respondWith(
+      fetch(e.request).catch(() => caches.match(BASE + '/index.html'))
+    );
   }
 });
 
-// Handle messages from the app (e.g. skipWaiting on update)
+// Handle skipWaiting message from the app on update.
 self.addEventListener('message', e => {
   if (e.data?.type === 'SKIP_WAITING') self.skipWaiting();
 });
