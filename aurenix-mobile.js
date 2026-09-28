@@ -157,17 +157,10 @@ function _buildBottomNav() {
   if (!nav) return;
 
   const tabs = [
-    { id: 'watch',    icon: '📺', label: 'WATCH'    },
-    { id: 'channels', icon: '📡', label: 'CHANNELS' },
-    { id: 'guide',    icon: '📅', label: 'GUIDE'    },
-    { id: 'library',  icon: '🎬', label: 'LIBRARY'  },
-    { id: 'profile',  icon: '👤', label: 'PROFILE'  },
+    { id: 'watch',   icon: '📺', label: 'WATCH'   },
+    { id: 'guide',   icon: '📅', label: 'GUIDE'   },
+    { id: 'profile', icon: '👤', label: 'PROFILE' },
   ];
-
-  if (_isFounder) {
-    // Founder gets their access via Profile screen, not a separate nav tab
-    // to keep the nav clean for regular viewers
-  }
 
   nav.innerHTML = `<div class="ax-mobile-nav-inner">${
     tabs.map(t => `
@@ -222,11 +215,9 @@ function _switchTab(tab) {
 
   // Show/hide screens
   switch (tab) {
-    case 'watch':    _showWatchScreen();    break;
-    case 'channels': _showChannelsScreen(); break;
-    case 'guide':    _showGuideScreen();    break;
-    case 'library':  _showLibraryScreen();  break;
-    case 'profile':  _showProfileScreen();  break;
+    case 'watch':   _showWatchScreen();   break;
+    case 'guide':   _showGuideScreen();   break;
+    case 'profile': _showProfileScreen(); break;
   }
 }
 
@@ -239,22 +230,10 @@ function _showWatchScreen() {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-/* ── CHANNELS screen ── */
-function _showChannelsScreen() {
-  _hideMobileScreens();
-  _showScreen('ax-mob-channels', _buildChannelsScreen);
-}
-
 /* ── GUIDE screen ── */
 function _showGuideScreen() {
   _hideMobileScreens();
   _showScreen('ax-mob-guide', _buildGuideScreen);
-}
-
-/* ── LIBRARY screen ── */
-function _showLibraryScreen() {
-  _hideMobileScreens();
-  _showScreen('ax-mob-library', _buildLibraryScreen);
 }
 
 /* ── PROFILE screen ── */
@@ -288,45 +267,6 @@ function _showScreen(id, buildFn) {
 /* ════════════════════════════════════════
    SCREEN BUILDERS
 ════════════════════════════════════════ */
-
-function _buildChannelsScreen(el) {
-  // The channel list already lives inside #ax-hero/.ax-tv-sidebar
-  // On mobile we extract and re-render it as a full-screen list
-  const channelBtns = document.querySelectorAll('.ax-channel-btn');
-  const items = Array.from(channelBtns).map(btn => ({
-    id: btn.dataset.chid,
-    html: btn.outerHTML.replace(/ax-mobile-screen-channel-/g, 'axch-'),
-  }));
-
-  el.innerHTML = `
-    <div class="ax-screen-header">
-      <div>
-        <div class="ax-screen-title">📡 CHANNELS</div>
-        <div class="ax-screen-subtitle">AURENIX NETWORK</div>
-      </div>
-    </div>
-    <div id="ax-mob-ch-list" style="padding:12px;display:flex;flex-direction:column;gap:8px;">
-      ${items.length
-        ? items.map(it => it.html).join('')
-        : '<div style="padding:20px;color:var(--text-dim);font-size:12px;text-align:center;">Loading channels…</div>'}
-    </div>
-  `;
-
-  // Re-bind channel click events
-  el.querySelectorAll('.ax-channel-btn').forEach(btn => {
-    btn.style.flexDirection = 'row';
-    btn.style.width = '';
-    btn.style.minWidth = '';
-    btn.style.height = '';
-    btn.style.padding = '12px 14px';
-    btn.addEventListener('click', () => {
-      // Delegate to broadcast.js by clicking the real channel button in hero
-      const real = document.querySelector(`#ax-channel-list .ax-channel-btn[data-chid="${btn.dataset.chid}"]`);
-      if (real) real.click();
-      _switchTab('watch');
-    });
-  });
-}
 
 function _buildGuideScreen(el) {
   // Mirror EPG content
@@ -368,31 +308,6 @@ function _buildGuideScreen(el) {
       }
     });
   });
-}
-
-function _buildLibraryScreen(el) {
-  // Reflect media library content
-  const mediaCards = document.querySelectorAll('#ax-ctrl-lib-grid .ax-media-card, .ax-media-card');
-  el.innerHTML = `
-    <div class="ax-screen-header">
-      <div>
-        <div class="ax-screen-title">🎬 LIBRARY</div>
-        <div class="ax-screen-subtitle">BROWSE CONTENT</div>
-      </div>
-    </div>
-    <div style="padding:12px;color:var(--text-dim);font-size:12px;text-align:center;line-height:1.7;">
-      <div style="font-size:32px;margin-bottom:10px;">🎬</div>
-      <div style="font-size:13px;font-weight:700;color:var(--text);letter-spacing:1px;">AURENIX LIBRARY</div>
-      <div style="margin-top:6px;">The full media library is managed by the Founder.</div>
-      <div style="margin-top:4px;">Watch the live broadcast to see what's on now.</div>
-      <button
-        onclick="window._axMobile && window._axMobile.switchTab && window._axMobile.switchTab('watch')"
-        style="margin-top:18px;padding:13px 32px;background:var(--blue);color:#fff;border:none;border-radius:40px;cursor:pointer;font-size:13px;font-weight:900;letter-spacing:2px;font-family:inherit;"
-      >▶ WATCH LIVE</button>
-    </div>
-  `;
-  // Expose switchTab so the inline button works
-  if (window._axMobile) window._axMobile.switchTab = _switchTab;
 }
 
 function _buildProfileScreen(el) {

@@ -680,15 +680,10 @@ function _buildHero(channels) {
             </div>
           </div>
 
-          <!-- TV Guide / EPG -->
-          <div class="ax-panel ax-epg-panel">
-            <div class="ax-panel-header">
-              <span class="ax-panel-title">📅 TV GUIDE</span>
-            </div>
-            <div class="ax-epg-tabs" id="ax-epg-tabs"></div>
-            <div class="ax-epg-body" id="ax-epg-body">
-              <div class="ax-epg-empty">Select a channel above.</div>
-            </div>
+          <!-- Hidden EPG data store — used by the Guide tab, not shown here -->
+          <div style="display:none;" aria-hidden="true">
+            <div id="ax-epg-tabs"></div>
+            <div id="ax-epg-body"></div>
           </div>
 
         </div><!-- /.ax-tv-sidebar -->
