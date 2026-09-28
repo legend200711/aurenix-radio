@@ -2,13 +2,13 @@
   "name": "AURENIX",
   "short_name": "AURENIX",
   "description": "AURENIX — The Broadcast Never Stops. 24/7 internet television network.",
-  "start_url": "/",
+  "id": "aurenix-live-tv",
+  "start_url": "/?pwa=aurenix",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#050507",
   "theme_color": "#050507",
-  "id": "/",
   "categories": ["entertainment", "music"],
   "screenshots": [],
   "shortcuts": [
@@ -16,7 +16,7 @@
       "name": "Watch LIVE",
       "short_name": "Watch",
       "description": "Open AURENIX and go directly to the live broadcast",
-      "url": "/?action=watch",
+      "url": "/?pwa=aurenix&action=watch",
       "icons": [{ "src": "aurenix-icon-192.png", "sizes": "192x192" }]
     }
   ],
@@ -44,12 +44,6 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
-    }
-  ],
-  "related_applications": [
-    {
-      "platform": "webapp",
-      "url": "https://aurenix.tv/"
     }
   ],
   "prefer_related_applications": false,

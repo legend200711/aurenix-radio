@@ -25,18 +25,31 @@ export function initMobile() {
 }
 
 /* ── Internal state ──────────────────────────────────────────── */
-let _isMobile       = _detectMobile();
-let _isStandalone   = _detectStandalone();
-let _isCapacitor    = typeof window.Capacitor !== 'undefined';
-let _activeTab      = 'watch';        // watch | channels | guide | library | profile
-let _isFounder      = false;
-let _userEmail      = null;
-let _splashDone     = false;
-let _networkReady   = false;
-let _gateOpen       = false;          // mirrors broadcast.js gate state
+let _isMobile        = _detectMobile();
+let _isAurenixPWA    = _detectAurenixPWA();  // true only when AURENIX itself runs installed
+let _isCapacitor     = typeof window.Capacitor !== 'undefined';
+let _activeTab       = 'watch';
+let _isFounder       = false;
+let _userEmail       = null;
+let _splashDone      = false;
+let _networkReady    = false;
+let _gateOpen        = false;          // mirrors broadcast.js gate state
 let _mutePromptShown = false;
-let _onlineTimer    = null;
-let _lastOnline     = navigator.onLine;
+let _onlineTimer     = null;
+let _installPrompt   = null;           // captured beforeinstallprompt event
+let _lastOnline      = navigator.onLine;
+
+// Capture the install prompt the moment it fires (may be before _init runs)
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault(); // don't show the mini-infobar automatically
+  _installPrompt = e;
+  _updateInstallBtn();
+});
+
+window.addEventListener('appinstalled', () => {
+  _installPrompt = null;
+  _updateInstallBtn();
+});
 
 /* Expose the mobile event bus immediately so broadcast.js can attach */
 window._axMobile = {
@@ -62,7 +75,7 @@ function _init() {
   _setupOnlineHandler();
 
   // On desktop → dismiss splash quickly, no mobile nav needed
-  if (!_isMobile && !_isStandalone && !_isCapacitor) {
+  if (!_isMobile && !_isAurenixPWA && !_isCapacitor) {
     setTimeout(_hideSplash, 1200);
     return;
   }
@@ -129,7 +142,7 @@ function _onNetworkReady(channels, activeChannelId) {
   // Short delay so "LIVE TV ON" is visible before transition
   setTimeout(_hideSplash, 350);
 
-  if (_isMobile || _isStandalone || _isCapacitor) {
+  if (_isMobile || _isAurenixPWA || _isCapacitor) {
     _buildBottomNav();
     _showBottomNav();
   }
@@ -361,6 +374,13 @@ function _buildProfileScreen(el) {
         </button>
         ` : ''}
 
+        <!-- Install button: shown only when installable and not yet installed -->
+        <button class="ax-profile-action-btn" id="ax-mob-install-btn" style="display:none;border-color:rgba(30,80,255,0.4);color:var(--blue-bright);">
+          <span class="ax-pab-icon">⬇</span>
+          <span class="ax-pab-label">INSTALL AURENIX</span>
+          <span class="ax-pab-arrow">›</span>
+        </button>
+
         <button class="ax-profile-action-btn danger" id="ax-mob-signout-btn">
           <span class="ax-pab-icon">🚪</span>
           <span class="ax-pab-label">SIGN OUT</span>
@@ -397,6 +417,9 @@ function _buildProfileScreen(el) {
     const signoutBtn = document.getElementById('ax-signout-btn');
     if (signoutBtn) signoutBtn.click();
   });
+
+  // Apply correct state to the install button now that it's in the DOM
+  _updateInstallBtn();
 }
 
 /* ════════════════════════════════════════
@@ -578,12 +601,66 @@ function _detectMobile() {
     || window.innerWidth <= 767;
 }
 
-function _detectStandalone() {
-  return (
+/**
+ * Returns true only when AURENIX itself is the installed PWA running in
+ * standalone mode — NOT when another app (e.g. Shadow Nexus Social) is open.
+ *
+ * Strategy:
+ *   1. The AURENIX manifest uses id "aurenix-live-tv" and start_url "/?pwa=aurenix".
+ *   2. When Chrome launches the installed AURENIX PWA it opens that start_url,
+ *      so location.search will contain "pwa=aurenix".
+ *   3. We also check display-mode:standalone AND the pwa param together, so a
+ *      plain browser visit to /?pwa=aurenix doesn't falsely claim "installed".
+ *   4. On iOS Safari, window.navigator.standalone is true for the installed app.
+ *      We additionally verify the URL param to distinguish from other PWAs.
+ */
+function _detectAurenixPWA() {
+  const params = new URLSearchParams(window.location.search);
+  const isAurenixParam = params.get('pwa') === 'aurenix';
+
+  const isStandaloneMode = (
     window.matchMedia('(display-mode: standalone)').matches ||
-    window.navigator.standalone === true ||  // iOS Safari
-    document.referrer.includes('android-app://')
+    window.navigator.standalone === true
   );
+
+  // Capacitor WebView always counts as our own app
+  if (typeof window.Capacitor !== 'undefined') return true;
+
+  // Must BOTH be in standalone mode AND carry our URL marker
+  if (isStandaloneMode && isAurenixParam) return true;
+
+  // android-app:// referrer is set when launched from the Android app icon
+  // Chrome sets this with the TWA/standalone start_url which includes our param
+  if (document.referrer.includes('android-app://') && isAurenixParam) return true;
+
+  return false;
+}
+
+/* ════════════════════════════════════════
+   INSTALL BUTTON HELPER
+   Shows/hides an install button in the profile screen
+   or wherever the app exposes one.
+════════════════════════════════════════ */
+function _updateInstallBtn() {
+  const btn = document.getElementById('ax-mob-install-btn');
+  if (!btn) return;
+  if (_isAurenixPWA) {
+    // Already running as installed PWA
+    btn.style.display = 'none';
+  } else if (_installPrompt) {
+    // Installable and not yet installed
+    btn.style.display = '';
+    btn.textContent = '⬇ INSTALL AURENIX';
+    btn.onclick = async () => {
+      if (!_installPrompt) return;
+      _installPrompt.prompt();
+      const { outcome } = await _installPrompt.userChoice;
+      if (outcome === 'accepted') _installPrompt = null;
+      _updateInstallBtn();
+    };
+  } else {
+    btn.style.display = 'none';
+  }
 }
 
 /* ════════════════════════════════════════

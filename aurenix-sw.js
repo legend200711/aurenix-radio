@@ -1,14 +1,19 @@
 /**
- * AURENIX — Service Worker (v4 — Mobile App Edition)
- * Caches static shell assets only.
- * All JS engine files are always fetched from the network so viewers
- * always get the latest broadcast/player logic without a hard refresh.
- * The mobile layer (aurenix-mobile.js, aurenix-mobile.css) follows the
- * same network-only rule as the other JS engines.
+ * AURENIX — Service Worker (v5 — Unique PWA Identity)
+ *
+ * Cache scope: ALL AURENIX cache names start with "aurenix-".
+ * Activation only deletes caches that match this prefix, so any
+ * other PWA running on the same origin (e.g. Shadow Nexus Social)
+ * keeps its own caches untouched.
+ *
+ * JS engine files are always network-fetched so viewers always run
+ * the latest broadcast/player logic without a hard refresh.
  */
 
-// Bump this version any time shell assets change.
-const CACHE = 'aurenix-v10';
+// ── AURENIX-specific cache name ──────────────────────────────────
+// MUST start with "aurenix-" so the activation cleanup only touches
+// AURENIX caches and never deletes caches belonging to other apps.
+const CACHE = 'aurenix-v11';
 
 // Only truly static, rarely-changing shell assets go here.
 const SHELL = [
@@ -16,6 +21,8 @@ const SHELL = [
   '/aurenix-mobile.css',
   '/aurenix-favicon.svg',
   '/aurenix-manifest.json',
+  '/aurenix-icon-192.png',
+  '/aurenix-icon-512.png',
 ];
 
 // JS engine files that must NEVER be served from cache.
@@ -43,7 +50,16 @@ self.addEventListener('install', e => {
 self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(keys => Promise.all(
+        keys
+          // ── CRITICAL: only delete OUR OWN old caches ──────────────
+          // Filter to names that start with "aurenix-" (AURENIX's prefix)
+          // but are not the current version. This ensures we never delete
+          // caches belonging to Shadow Nexus Social or any other PWA on
+          // the same origin.
+          .filter(k => k.startsWith('aurenix-') && k !== CACHE)
+          .map(k => caches.delete(k))
+      ))
       .then(() => self.clients.claim())
   );
 });
@@ -85,7 +101,7 @@ self.addEventListener('fetch', e => {
   }
 });
 
-// Handle messages from the app (e.g. skipWaiting request)
+// Handle messages from the app (e.g. skipWaiting on update)
 self.addEventListener('message', e => {
   if (e.data?.type === 'SKIP_WAITING') self.skipWaiting();
 });
